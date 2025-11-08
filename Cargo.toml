@@ -1,0 +1,37 @@
+[package]
+name = "kovan"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["Kovan Contributors"]
+description = "High-performance memory reclamation for lock-free data structures using the Crystalline/Hyaline algorithm"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/kovan"
+keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
+categories = ["concurrency", "memory-management", "no-std"]
+
+[lib]
+name = "kovan"
+path = "src/lib.rs"
+
+[features]
+default = []
+robust = []  # Enable robustness extensions (Hyaline-S)
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
+[dependencies]
+once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
+portable-atomic = { version = "1.11.1", default-features = false, features = ["require-cas"]}
+
+[dev-dependencies]
+# Will add these as needed:
+# criterion = "0.5"
+# crossbeam-epoch = "0.9"
+# loom = "0.7"

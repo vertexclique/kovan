@@ -1,0 +1,5 @@
+[build]
+rustflags = ["-C", "target-feature=+cmpxchg16b"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+cmpxchg16b"]
