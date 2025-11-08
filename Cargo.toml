@@ -15,7 +15,7 @@ name = "kovan"
 path = "src/lib.rs"
 
 [features]
-default = ["robust"]
+default = []
 robust = []  # Enable robustness extensions (to prevent stalled thread detection).
 
 [profile.release]

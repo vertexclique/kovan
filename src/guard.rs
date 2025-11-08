@@ -53,6 +53,7 @@ struct Handle {
     slot: Cell<usize>,
     batch: RefCell<Vec<Retired>>,
     batch_nref: Cell<*mut NRefNode>,
+    pin_count: Cell<usize>,
 }
 
 impl Handle {
@@ -64,6 +65,7 @@ impl Handle {
             slot: Cell::new(slot),
             batch: RefCell::new(Vec::with_capacity(BATCH_SIZE)),
             batch_nref: Cell::new(core::ptr::null_mut()),
+            pin_count: Cell::new(0),
         }
     }
     
@@ -93,20 +95,33 @@ impl Handle {
     }
 
     fn pin(&self) -> Guard {
+        // Optimization: Cache slot selection for 100 operations
+        let pin_count = self.pin_count.get();
+        if pin_count % 100 == 0 {
+            let slot = Self::select_slot();
+            self.slot.set(slot);
+        }
+        self.pin_count.set(pin_count.wrapping_add(1));
+        
         let slot = self.slot.get();
         let global = global();
 
-        // Touch era for robustness
+        // Optimization: Lazy era updates - only every 64th pin
         #[cfg(feature = "robust")]
         {
-            let current_era = crate::robust::current_era();
-            global.slot(slot).access_era.store(current_era, core::sync::atomic::Ordering::Relaxed);
+            if pin_count % 64 == 0 {
+                let current_era = crate::robust::current_era();
+                global.slot(slot).access_era.store(current_era, core::sync::atomic::Ordering::Relaxed);
+            }
         }
 
         // Atomic: increment ref count, get list snapshot
         let (_, handle_ptr) = global.slot(slot).head.fetch_add_ref();
 
-        Guard { slot, handle_ptr }
+        Guard { 
+            slot, 
+            handle_ptr,
+        }
     }
 
     fn retire<T>(&self, ptr: *mut T) 
