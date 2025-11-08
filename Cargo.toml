@@ -31,7 +31,13 @@ once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
 portable-atomic = { version = "1.11.1", default-features = false, features = ["require-cas"] }
 
 [dev-dependencies]
-# Will add these as needed:
-# criterion = "0.5"
-# crossbeam-epoch = "0.9"
-# loom = "0.7"
+criterion = { version = "0.5", features = ["html_reports"] }
+crossbeam-epoch = "0.9"
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false
