@@ -40,11 +40,13 @@ mod guard;
 mod retired;
 mod atomic;
 mod reclaim;
+mod robust;
 
 pub use guard::{pin, Guard};
 pub use retired::RetiredNode;
 pub use atomic::{Atomic, Shared};
 pub use reclaim::Reclaimable;
+pub use robust::{BirthEra, current_era};
 
 // Re-export retire from guard (it's the public API)
 pub use guard::retire;

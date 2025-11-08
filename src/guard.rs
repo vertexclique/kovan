@@ -57,10 +57,8 @@ struct Handle {
 
 impl Handle {
     fn new() -> Self {
-        // Simple slot selection based on pseudo-random value
-        use core::sync::atomic::{AtomicUsize, Ordering};
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let slot = COUNTER.fetch_add(1, Ordering::Relaxed) % global().num_slots();
+        // Adaptive slot selection (avoid stalled slots in robust mode)
+        let slot = Self::select_slot();
 
         Self {
             slot: Cell::new(slot),
@@ -68,10 +66,42 @@ impl Handle {
             batch_nref: Cell::new(core::ptr::null_mut()),
         }
     }
+    
+    /// Select a slot, avoiding stalled ones if robust feature enabled
+    fn select_slot() -> usize {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        
+        let global = global();
+        let start_slot = COUNTER.fetch_add(1, Ordering::Relaxed) % global.num_slots();
+        
+        #[cfg(feature = "robust")]
+        {
+            // Try to find non-stalled slot
+            let mut slot = start_slot;
+            for _ in 0..global.num_slots() {
+                let slot_ref = global.slot(slot);
+                let ack = slot_ref.ack_counter.load(Ordering::Relaxed);
+                if ack <= crate::robust::STALL_THRESHOLD {
+                    return slot;
+                }
+                slot = (slot + 1) % global.num_slots();
+            }
+        }
+        
+        start_slot
+    }
 
     fn pin(&self) -> Guard {
         let slot = self.slot.get();
         let global = global();
+
+        // Touch era for robustness
+        #[cfg(feature = "robust")]
+        {
+            let current_era = crate::robust::current_era();
+            global.slot(slot).access_era.store(current_era, core::sync::atomic::Ordering::Relaxed);
+        }
 
         // Atomic: increment ref count, get list snapshot
         let (_, handle_ptr) = global.slot(slot).head.fetch_add_ref();
@@ -173,6 +203,12 @@ impl Handle {
                     node_ptr as usize,
                 ) {
                     Ok(_) => {
+                        // Increment ack counter for robustness
+                        #[cfg(feature = "robust")]
+                        {
+                            slot.ack_counter.fetch_add(refs as isize, Ordering::Relaxed);
+                        }
+                        
                         // Adjust predecessor if list was non-empty
                         if list_ptr != 0 {
                             let adj = calculate_adjustment(global.slot_order()).saturating_add(refs as isize);

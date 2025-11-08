@@ -15,6 +15,10 @@ pub struct RetiredNode {
     
     /// Pointer to batch's reference counter
     pub(crate) nref_ptr: *mut NRefNode,
+    
+    /// Birth era for robustness (Hyaline-S)
+    #[cfg(feature = "robust")]
+    pub(crate) birth_era: u64,
 }
 
 impl RetiredNode {
@@ -24,6 +28,19 @@ impl RetiredNode {
             smr_next: core::ptr::null_mut(),
             batch_next: core::ptr::null_mut(),
             nref_ptr: core::ptr::null_mut(),
+            #[cfg(feature = "robust")]
+            birth_era: 0,
+        }
+    }
+    
+    /// Create a new RetiredNode with birth era
+    #[cfg(feature = "robust")]
+    pub fn new_with_era(era: u64) -> Self {
+        Self {
+            smr_next: core::ptr::null_mut(),
+            batch_next: core::ptr::null_mut(),
+            nref_ptr: core::ptr::null_mut(),
+            birth_era: era,
         }
     }
 }

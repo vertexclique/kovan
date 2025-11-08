@@ -15,7 +15,7 @@ name = "kovan"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["robust"]
 robust = []  # Enable robustness extensions (Hyaline-S)
 
 [profile.release]

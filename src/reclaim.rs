@@ -108,8 +108,9 @@ pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize) {
 ///
 /// - start must point to valid RetiredNode or be null
 /// - All nodes in list must still be valid
-pub(crate) unsafe fn traverse_and_decrement(start: usize, _slot: usize) {
+pub(crate) unsafe fn traverse_and_decrement(start: usize, slot: usize) {
     let mut curr = start as *mut RetiredNode;
+    let mut count = 0usize;
 
     while !curr.is_null() {
         let node = unsafe { &*curr };
@@ -120,30 +121,38 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, _slot: usize) {
 
             // Atomic decrement
             let prev_nref = nref_node.nref.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+            count += 1;
 
-        // If reaches zero, free entire batch
-        if prev_nref == 1 {
-            // SAFETY: NRef reached 0, all threads have left
-            unsafe {
-                let nref_node = &*node.nref_ptr;
-                
-                // Call the type-erased destructor to free all nodes in batch
-                let destructor = nref_node.destructor;
-                let mut curr = nref_node.batch_first;
-                
-                while !curr.is_null() {
-                    let next = (*curr).batch_next;
-                    destructor(curr);
-                    curr = next;
+            // If reaches zero, free entire batch
+            if prev_nref == 1 {
+                // SAFETY: NRef reached 0, all threads have left
+                unsafe {
+                    let nref_node = &*node.nref_ptr;
+                    
+                    // Call the type-erased destructor to free all nodes in batch
+                    let destructor = nref_node.destructor;
+                    let mut curr = nref_node.batch_first;
+                    
+                    while !curr.is_null() {
+                        let next = (*curr).batch_next;
+                        destructor(curr);
+                        curr = next;
+                    }
+                    
+                    // Free the NRefNode itself
+                    drop(Box::from_raw(node.nref_ptr as *mut NRefNode));
                 }
-                
-                // Free the NRefNode itself
-                drop(Box::from_raw(node.nref_ptr as *mut NRefNode));
             }
-        }
         }
 
         // Move to next node in list
         curr = node.smr_next;
+    }
+    
+    // Decrement ack counter for robustness
+    #[cfg(feature = "robust")]
+    if count > 0 {
+        let global = crate::slot::global();
+        global.slot(slot).ack_counter.fetch_sub(count as isize, core::sync::atomic::Ordering::Relaxed);
     }
 }
