@@ -161,7 +161,9 @@ fn test_read_heavy_workload() {
 fn test_oversubscription() {
     // More threads than cores (2x oversubscription, matching paper's methodology)
     let num_cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let num_threads = num_cores * 2;  // 2x oversubscription as tested in the paper
+    // 2x oversubscription as tested in the paper
+    // We go beyond that and do 4x oversub here
+    let num_threads = num_cores * 4;
     const ITERATIONS: usize = 10000;
     
     let atomic = Arc::new(Atomic::new(StressNode::new(0)));

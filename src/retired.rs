@@ -5,7 +5,7 @@ use core::sync::atomic::AtomicIsize;
 /// Node structure embedded in user's data structure
 ///
 /// Users must embed this at the start of their node type to enable retirement.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct RetiredNode {
     /// Next node in slot's retirement list
     pub(crate) smr_next: *mut RetiredNode,
@@ -54,7 +54,7 @@ unsafe impl Sync for RetiredNode {}
 pub(crate) type DestructorFn = unsafe fn(*mut RetiredNode);
 
 /// Reference counter node shared by all nodes in a batch
-#[repr(C)]
+#[repr(C, align(8))]
 pub(crate) struct NRefNode {
     /// Atomic reference counter
     ///

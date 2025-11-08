@@ -173,6 +173,11 @@ impl Handle {
         let num_slots = global.num_slots();
         let mut curr_idx = 0;
         let mut empty_slots = 0isize;
+        
+        // Initialize NRef with hold value to prevent premature freeing during insertion
+        let hold_value = isize::MAX / 2;
+        let nref_node = unsafe { &*self.batch_nref.get() };
+        nref_node.nref.store(hold_value, Ordering::Release);
 
         // Insert into each slot
         for slot_idx in 0..num_slots {
@@ -233,6 +238,11 @@ impl Handle {
                 adjust_refs(first as usize, empty_slots);
             }
         }
+
+        // Release hold value: all insertions complete, set correct initial NRef
+        // The correct value is empty_slots (which already includes adjustments)
+        let adjustment = empty_slots - hold_value;
+        nref_node.nref.fetch_add(adjustment, Ordering::Release);
 
         // Reset for next batch
         self.batch_nref.set(core::ptr::null_mut());
