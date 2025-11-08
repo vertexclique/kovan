@@ -49,29 +49,34 @@ pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize) {
     
     let nref_node = unsafe { &*node.nref_ptr };
 
-    // Use saturating_add to prevent overflow
-    let prev = nref_node.nref.fetch_add(delta, core::sync::atomic::Ordering::AcqRel);
-    let new_val = prev.saturating_add(delta);
-
-    // If reaches zero, free entire batch
-    if new_val == 0 {
-        // SAFETY: NRef reached 0, so all threads that could see batch have left
-        unsafe {
-            let nref_node = &*node.nref_ptr;
-            
-            // Call the type-erased destructor to free all nodes in batch
-            let destructor = nref_node.destructor;
-            let mut curr = nref_node.batch_first;
-            
-            while !curr.is_null() {
-                let next = (*curr).batch_next;
-                destructor(curr);
-                curr = next;
+    // Handle increment vs decrement separately to avoid race conditions
+    if delta < 0 {
+        // Decrement: use fetch_sub and check if we're the one who brought it to zero
+        let prev = nref_node.nref.fetch_sub(delta.abs(), core::sync::atomic::Ordering::AcqRel);
+        
+        // Only free if we were the one who brought it from delta.abs() to 0
+        if prev == delta.abs() {
+            // SAFETY: NRef reached 0, so all threads that could see batch have left
+            unsafe {
+                let nref_node = &*node.nref_ptr;
+                
+                // Call the type-erased destructor to free all nodes in batch
+                let destructor = nref_node.destructor;
+                let mut curr = nref_node.batch_first;
+                
+                while !curr.is_null() {
+                    let next = (*curr).batch_next;
+                    destructor(curr);
+                    curr = next;
+                }
+                
+                // Free the NRefNode itself
+                drop(Box::from_raw(node.nref_ptr));
             }
-            
-            // Free the NRefNode itself
-            drop(Box::from_raw(node.nref_ptr));
         }
+    } else {
+        // Increment: just add, no free needed
+        nref_node.nref.fetch_add(delta, core::sync::atomic::Ordering::AcqRel);
     }
 }
 
