@@ -3,8 +3,8 @@ name = "kovan"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-authors = ["Kovan Contributors"]
-description = "High-performance memory reclamation for lock-free data structures using the Crystalline/Hyaline algorithm"
+authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
+description = "High-performance memory reclamation for lock-free data structures"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourusername/kovan"
 keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["robust"]
-robust = []  # Enable robustness extensions (Hyaline-S)
+robust = []  # Enable robustness extensions (to prevent stalled thread detection).
 
 [profile.release]
 opt-level = 3

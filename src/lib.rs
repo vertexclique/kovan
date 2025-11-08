@@ -1,7 +1,7 @@
 //! Kovan: High-performance memory reclamation for lock-free data structures
 //!
-//! Kovan implements the Crystalline/Hyaline algorithm, providing snapshot-free
-//! memory reclamation with zero overhead on read operations.
+//! Kovan implements the safe and transparent memory reclamation algorithm,
+//! providing snapshot-free memory reclamation with zero overhead on read operations.
 //!
 //! # Key Features
 //!

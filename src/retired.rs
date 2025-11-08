@@ -83,7 +83,6 @@ impl NRefNode {
 /// Internal tracking structure for retired nodes
 pub(crate) struct Retired {
     pub(crate) ptr: *mut RetiredNode,
-    pub(crate) nref_ptr: *mut NRefNode,
 }
 
 // SAFETY: Retired contains only raw pointers which are Send

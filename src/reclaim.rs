@@ -28,33 +28,6 @@ pub unsafe trait Reclaimable: Sized {
     }
 }
 
-/// Free an entire batch of nodes
-///
-/// # Safety
-///
-/// - first_node must point to a valid batch
-/// - All nodes in batch must be unreachable
-/// - This must only be called once per batch
-pub(crate) unsafe fn free_batch<T: Reclaimable>(first_node: *mut RetiredNode) {
-    let mut curr = first_node;
-    
-    while !curr.is_null() {
-        // SAFETY: curr points to valid RetiredNode embedded in T
-        let node = unsafe { &*curr };
-        let next = node.batch_next;
-        
-        // Calculate offset to get T pointer from RetiredNode pointer
-        // Assumes RetiredNode is first field in T
-        let t_ptr = curr as *mut T;
-        
-        // SAFETY: Caller guarantees node is unreachable and this is called once
-        unsafe {
-            T::dealloc(t_ptr);
-        }
-        
-        curr = next;
-    }
-}
 
 /// Adjust reference count of a batch
 ///

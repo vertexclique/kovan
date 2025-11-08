@@ -136,7 +136,6 @@ impl Handle {
 
         batch.push(Retired {
             ptr: retired_ptr,
-            nref_ptr: self.batch_nref.get(),
         });
 
         // Flush when batch reaches threshold

@@ -4,7 +4,6 @@
 //! access to heap-allocated data with automatic memory reclamation.
 
 use crate::guard::Guard;
-use crate::retired::RetiredNode;
 use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -296,30 +295,4 @@ impl<'g, T> core::fmt::Debug for Shared<'g, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Shared({:p})", self.data)
     }
-}
-
-/// Retires a pointer for later reclamation.
-///
-/// The pointer will be freed once all active guards have been dropped.
-///
-/// # Safety
-///
-/// The pointer must:
-/// - Point to a valid allocation that contains a `RetiredNode` header
-/// - Not be accessed after this call (except through guards that loaded it before)
-/// - Have been allocated with the global allocator
-///
-/// # Examples
-///
-/// ```ignore
-/// use kovan::retire;
-///
-/// let ptr = Box::into_raw(Box::new(42));
-/// unsafe {
-///     retire(ptr as *mut RetiredNode);
-/// }
-/// ```
-#[inline]
-pub unsafe fn retire(ptr: *mut RetiredNode) {
-    crate::guard::retire(ptr);
 }

@@ -1,13 +1,12 @@
 //! Hyaline-S robustness extensions for bounded memory and stalled thread handling
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Global era counter for birth era tracking
 ///
 /// Incremented periodically to track allocation generations
 static GLOBAL_ERA: AtomicU64 = AtomicU64::new(0);
 
-/// Thread-local allocation counter for era advancement
 thread_local! {
     static ALLOC_COUNTER: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
 }
@@ -74,136 +73,8 @@ impl Default for BirthEra {
     }
 }
 
-/// Slot robustness state for Hyaline-S
-///
-/// Tracks access era and acknowledgment counter for stall detection
-#[repr(align(64))] // Cache line alignment
-pub(crate) struct SlotRobust {
-    /// Latest era accessed in this slot
-    pub(crate) access_era: AtomicU64,
-    
-    /// Acknowledgment counter for traversal tracking
-    ///
-    /// Incremented when nodes inserted, decremented when traversed.
-    /// High values indicate potential stall.
-    pub(crate) ack_counter: AtomicUsize,
-}
-
-impl SlotRobust {
-    /// Create new slot robustness state
-    pub(crate) const fn new() -> Self {
-        Self {
-            access_era: AtomicU64::new(0),
-            ack_counter: AtomicUsize::new(0),
-        }
-    }
-    
-    /// Touch the access era for this slot
-    ///
-    /// Updates the slot's access era to the current era if it's behind.
-    /// This indicates the slot has been accessed recently.
-    #[inline]
-    pub(crate) fn touch_era(&self, era: u64) {
-        let mut current = self.access_era.load(Ordering::Acquire);
-        
-        while current < era {
-            match self.access_era.compare_exchange_weak(
-                current,
-                era,
-                Ordering::Release,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
-    }
-    
-    /// Check if slot appears stalled
-    ///
-    /// A slot is considered stalled if its ack counter exceeds the threshold
-    #[inline]
-    pub(crate) fn is_stalled(&self) -> bool {
-        self.ack_counter.load(Ordering::Relaxed) > STALL_THRESHOLD as usize
-    }
-    
-    /// Increment acknowledgment counter
-    ///
-    /// Called when nodes are inserted into this slot
-    #[inline]
-    pub(crate) fn increment_ack(&self, count: usize) {
-        self.ack_counter.fetch_add(count, Ordering::Relaxed);
-    }
-    
-    /// Decrement acknowledgment counter
-    ///
-    /// Called when nodes are traversed from this slot
-    #[inline]
-    pub(crate) fn decrement_ack(&self, count: usize) {
-        self.ack_counter.fetch_sub(count, Ordering::Relaxed);
-    }
-    
-    /// Mark slot as avoiding (set era to max)
-    ///
-    /// Used to signal that this slot should be avoided due to stall
-    #[inline]
-    pub(crate) fn mark_avoid(&self) {
-        self.access_era.store(u64::MAX, Ordering::Release);
-    }
-    
-    /// Check if slot should be avoided
-    #[inline]
-    pub(crate) fn should_avoid(&self) -> bool {
-        self.access_era.load(Ordering::Relaxed) == u64::MAX
-    }
-}
-
-/// Stall detection and recovery
-pub(crate) struct StallDetector {
-    last_check: AtomicU64,
-}
-
-impl StallDetector {
-    /// Create new stall detector
-    pub(crate) const fn new() -> Self {
-        Self {
-            last_check: AtomicU64::new(0),
-        }
-    }
-    
-    /// Check for stalled slots and mark them
-    ///
-    /// Should be called periodically (e.g., every 1000 operations)
-    pub(crate) fn check_stalls(&self, slots: &[crate::slot::Slot]) {
-        let current_era = current_era();
-        let last = self.last_check.load(Ordering::Relaxed);
-        
-        // Only check every 100 eras
-        if current_era < last + 100 {
-            return;
-        }
-        
-        if self.last_check.compare_exchange(
-            last,
-            current_era,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ).is_err() {
-            return; // Another thread is checking
-        }
-        
-        // Check each slot for stalls
-        for slot in slots {
-            #[cfg(feature = "robust")]
-            {
-                let ack = slot.ack_counter.load(core::sync::atomic::Ordering::Relaxed);
-                if ack > STALL_THRESHOLD {
-                    slot.access_era.store(u64::MAX, core::sync::atomic::Ordering::Release);
-                }
-            }
-        }
-    }
-}
+// Note: SlotRobust and StallDetector removed - we use direct field access in Slot instead
+// Stall detection happens inline during slot selection, not periodically
 
 #[cfg(test)]
 mod tests {
@@ -233,20 +104,4 @@ mod tests {
         assert!(era1.is_older_than(era2.value()));
     }
     
-    #[test]
-    fn test_slot_robust() {
-        let slot = SlotRobust::new();
-        
-        assert!(!slot.is_stalled());
-        assert!(!slot.should_avoid());
-        
-        slot.touch_era(100);
-        assert_eq!(slot.access_era.load(Ordering::Relaxed), 100);
-        
-        slot.increment_ack(STALL_THRESHOLD as usize + 1);
-        assert!(slot.is_stalled());
-        
-        slot.mark_avoid();
-        assert!(slot.should_avoid());
-    }
 }

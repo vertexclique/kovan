@@ -113,10 +113,6 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-    /// Stall detection threshold
-    #[cfg(feature = "robust")]
-    pub(crate) const STALL_THRESHOLD: isize = 32768;
-
     /// Create a new Slot with zero state
     pub(crate) const fn new() -> Self {
         Self {
