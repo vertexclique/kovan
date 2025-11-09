@@ -90,6 +90,7 @@ pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize) {
 /// - start must point to valid RetiredNode or be null
 /// - stop is where to stop traversing (exclusive) - use 0 to traverse all
 /// - All nodes in list must still be valid
+#[allow(unused_variables)]
 pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usize) {
     let mut curr = start as *mut RetiredNode;
     #[cfg(feature = "robust")]

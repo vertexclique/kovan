@@ -2,6 +2,8 @@
 //!
 //! These tests verify the robust feature works correctly
 
+#![allow(unused_unsafe)]
+
 use kovan::{Atomic, BirthEra, RetiredNode, current_era, pin, retire};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

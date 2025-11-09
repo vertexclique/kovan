@@ -2,6 +2,8 @@
 //!
 //! These tests push the system to its limits to find edge cases
 
+#![allow(unused_unsafe)]
+
 use kovan::{Atomic, RetiredNode, pin, retire};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

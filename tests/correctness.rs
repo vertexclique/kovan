@@ -5,9 +5,11 @@
 //! 2. Eventual reclamation (all retired nodes eventually freed)
 //! 3. ABA prevention (packed atomics prevent ABA problem)
 
+#![allow(unused_unsafe)]
+
 use kovan::{Atomic, RetiredNode, pin, retire};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
