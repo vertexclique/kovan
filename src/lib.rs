@@ -1,4 +1,5 @@
-//! Kovan: High-performance memory reclamation for lock-free data structures
+//! Kovan: High-performance wait-free memory reclamation for lock-free data structures.
+//! Bounded memory usage, predictable latency.
 //!
 //! Kovan implements the safe and transparent memory reclamation algorithm,
 //! providing snapshot-free memory reclamation with zero overhead on read operations.
@@ -12,7 +13,8 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
+//! use std::sync::atomic::Ordering;
 //! use kovan::{pin, retire, Atomic};
 //!
 //! let atomic = Atomic::new(Box::into_raw(Box::new(42)));
@@ -24,8 +26,10 @@
 //! let ptr = atomic.load(Ordering::Acquire, &guard);
 //!
 //! // Access safely within guard lifetime
-//! if let Some(value) = ptr.as_ref() {
-//!     println!("Value: {}", value);
+//! unsafe {
+//!     if let Some(value) = ptr.as_ref() {
+//!         println!("Value: {}", value);
+//!     }
 //! }
 //!
 //! drop(guard);

@@ -96,7 +96,7 @@ impl SlotHead {
 }
 
 /// Per-slot state for retirement list management
-#[repr(align(128))] // Cache line alignment to prevent false sharing
+#[repr(align(128))]
 pub(crate) struct Slot {
     /// Packed reference count + list head pointer
     pub(crate) head: SlotHead,

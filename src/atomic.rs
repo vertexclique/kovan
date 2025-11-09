@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
 /// use kovan::{Atomic, pin};
 /// use std::sync::atomic::Ordering;
 ///
@@ -37,10 +37,10 @@ impl<T> Atomic<T> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use kovan::Atomic;
     ///
-    /// let atomic = Atomic::new(std::ptr::null_mut());
+    /// let atomic: Atomic<i32> = Atomic::new(std::ptr::null_mut());
     /// ```
     #[inline]
     pub fn new(ptr: *mut T) -> Self {
@@ -62,7 +62,7 @@ impl<T> Atomic<T> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use kovan::{Atomic, pin};
     /// use std::sync::atomic::Ordering;
     ///
@@ -83,13 +83,15 @@ impl<T> Atomic<T> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use kovan::{Atomic, Shared};
     /// use std::sync::atomic::Ordering;
     ///
     /// let atomic = Atomic::new(std::ptr::null_mut());
     /// let ptr = Box::into_raw(Box::new(42));
-    /// atomic.store(Shared::from_raw(ptr), Ordering::Release);
+    /// unsafe {
+    ///     atomic.store(Shared::from_raw(ptr), Ordering::Release);
+    /// }
     /// ```
     #[inline]
     pub fn store(&self, ptr: Shared<T>, order: Ordering) {
@@ -100,7 +102,7 @@ impl<T> Atomic<T> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use kovan::{Atomic, Shared, pin};
     /// use std::sync::atomic::Ordering;
     ///
@@ -108,13 +110,15 @@ impl<T> Atomic<T> {
     /// let guard = pin();
     /// let current = atomic.load(Ordering::Acquire, &guard);
     /// let new = Box::into_raw(Box::new(43));
-    /// atomic.compare_exchange(
-    ///     current,
-    ///     Shared::from_raw(new),
-    ///     Ordering::AcqRel,
-    ///     Ordering::Acquire,
-    ///     &guard
-    /// );
+    /// unsafe {
+    ///     atomic.compare_exchange(
+    ///         current,
+    ///         Shared::from_raw(new),
+    ///         Ordering::AcqRel,
+    ///         Ordering::Acquire,
+    ///         &guard
+    ///     );
+    /// }
     /// ```
     #[inline]
     pub fn compare_exchange<'g>(

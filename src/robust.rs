@@ -12,11 +12,11 @@ thread_local! {
 }
 
 /// Era advancement threshold (allocations per era increment)
-const ERA_ADVANCE_THRESHOLD: u32 = 256;
+const ERA_ADVANCE_THRESHOLD: u32 = 1 << 8; // 256
 
 /// Stall detection threshold (unacknowledged traversals)
 #[allow(dead_code)]
-pub(crate) const STALL_THRESHOLD: isize = 32768;
+pub(crate) const STALL_THRESHOLD: isize = 1 << 15; // 32768
 
 /// Get current global era
 #[inline]

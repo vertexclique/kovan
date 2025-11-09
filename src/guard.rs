@@ -308,7 +308,7 @@ thread_local! {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
+/// ```rust
 /// use kovan::pin;
 ///
 /// let guard = pin();
