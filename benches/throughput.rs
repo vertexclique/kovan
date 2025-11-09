@@ -1,9 +1,9 @@
 //! Throughput benchmarks for Kovan memory reclamation
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use kovan::{pin, retire, Atomic, RetiredNode};
-use std::sync::atomic::Ordering;
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use kovan::{Atomic, RetiredNode, pin, retire};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 
 #[repr(C)]
@@ -23,20 +23,20 @@ impl Node {
 
 fn bench_pin_unpin(c: &mut Criterion) {
     let mut group = c.benchmark_group("pin_unpin");
-    
+
     group.bench_function("single_thread", |b| {
         b.iter(|| {
             let _guard = pin();
             black_box(&_guard);
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_retire(c: &mut Criterion) {
     let mut group = c.benchmark_group("retire");
-    
+
     for batch_size in [10, 50, 100, 500].iter() {
         group.throughput(Throughput::Elements(*batch_size as u64));
         group.bench_with_input(
@@ -52,14 +52,14 @@ fn bench_retire(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
 fn bench_atomic_load(c: &mut Criterion) {
     let mut group = c.benchmark_group("atomic_load");
     let atomic = Arc::new(Atomic::new(Node::new(42)));
-    
+
     group.bench_function("single_thread", |b| {
         b.iter(|| {
             let guard = pin();
@@ -67,7 +67,7 @@ fn bench_atomic_load(c: &mut Criterion) {
             black_box(ptr);
         });
     });
-    
+
     for threads in [2, 4, 8, 16].iter() {
         group.bench_with_input(
             BenchmarkId::new("concurrent", threads),
@@ -87,7 +87,7 @@ fn bench_atomic_load(c: &mut Criterion) {
                             })
                         })
                         .collect();
-                    
+
                     for handle in handles {
                         handle.join().unwrap();
                     }
@@ -95,7 +95,7 @@ fn bench_atomic_load(c: &mut Criterion) {
             },
         );
     }
-    
+
     // Cleanup
     let guard = pin();
     let old = atomic.swap(
@@ -108,13 +108,13 @@ fn bench_atomic_load(c: &mut Criterion) {
             retire(old.as_raw() as *mut Node);
         }
     }
-    
+
     group.finish();
 }
 
 fn bench_atomic_swap(c: &mut Criterion) {
     let mut group = c.benchmark_group("atomic_swap");
-    
+
     for threads in [1, 2, 4, 8].iter() {
         group.throughput(Throughput::Elements(1000 * *threads as u64));
         group.bench_with_input(
@@ -144,11 +144,11 @@ fn bench_atomic_swap(c: &mut Criterion) {
                             })
                         })
                         .collect();
-                    
+
                     for handle in handles {
                         handle.join().unwrap();
                     }
-                    
+
                     // Cleanup
                     let guard = pin();
                     let old = atomic.swap(
@@ -165,14 +165,14 @@ fn bench_atomic_swap(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
 fn bench_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("contention");
     group.sample_size(20); // Reduce sample size for long-running benchmarks
-    
+
     for threads in [4, 8, 16].iter() {
         group.throughput(Throughput::Elements(10000 * *threads as u64));
         group.bench_with_input(
@@ -202,11 +202,11 @@ fn bench_contention(c: &mut Criterion) {
                             })
                         })
                         .collect();
-                    
+
                     for handle in handles {
                         handle.join().unwrap();
                     }
-                    
+
                     // Cleanup
                     let guard = pin();
                     let old = atomic.swap(
@@ -223,7 +223,7 @@ fn bench_contention(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 

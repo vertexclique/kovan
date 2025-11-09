@@ -1,22 +1,22 @@
 //! Comparison benchmarks: Kovan vs Crossbeam-Epoch
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::thread;
 
 // Kovan implementation
 mod kovan_bench {
     use super::*;
-    use kovan::{pin, retire, Atomic, RetiredNode};
-    
+    use kovan::{Atomic, RetiredNode, pin, retire};
+
     #[repr(C)]
     pub struct Node {
         retired: RetiredNode,
         pub value: usize,
         pub next: AtomicPtr<Node>,
     }
-    
+
     impl Node {
         pub fn new(value: usize) -> *mut Self {
             Box::into_raw(Box::new(Self {
@@ -26,10 +26,10 @@ mod kovan_bench {
             }))
         }
     }
-    
+
     pub fn bench_treiber_stack(num_threads: usize, ops_per_thread: usize) {
         let stack = Arc::new(Atomic::new(std::ptr::null_mut::<Node>()));
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|tid| {
                 let stack = stack.clone();
@@ -41,9 +41,11 @@ mod kovan_bench {
                             let guard = pin();
                             let head = stack.load(Ordering::Acquire, &guard);
                             unsafe {
-                                (*node).next.store(head.as_raw() as *mut Node, Ordering::Relaxed);
+                                (*node)
+                                    .next
+                                    .store(head.as_raw() as *mut Node, Ordering::Relaxed);
                             }
-                            
+
                             match stack.compare_exchange(
                                 head,
                                 unsafe { kovan::Shared::from_raw(node) },
@@ -55,7 +57,7 @@ mod kovan_bench {
                                 Err(_) => continue,
                             }
                         }
-                        
+
                         // Pop
                         loop {
                             let guard = pin();
@@ -63,12 +65,12 @@ mod kovan_bench {
                             if head.is_null() {
                                 break;
                             }
-                            
+
                             let next = unsafe {
                                 let next_ptr = (*head.as_raw()).next.load(Ordering::Relaxed);
                                 kovan::Shared::from_raw(next_ptr)
                             };
-                            
+
                             match stack.compare_exchange(
                                 head,
                                 next,
@@ -89,11 +91,11 @@ mod kovan_bench {
                 })
             })
             .collect();
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         // Cleanup
         let guard = pin();
         while let Some(head) = unsafe { stack.load(Ordering::Acquire, &guard).as_ref() } {
@@ -101,7 +103,7 @@ mod kovan_bench {
                 let next_ptr = head.next.load(Ordering::Relaxed);
                 kovan::Shared::from_raw(next_ptr)
             };
-            
+
             match stack.compare_exchange(
                 unsafe { kovan::Shared::from_raw(head as *const Node as *mut Node) },
                 next,
@@ -122,12 +124,12 @@ mod kovan_bench {
 mod crossbeam_bench {
     use super::*;
     use crossbeam_epoch::{self as epoch, Atomic, Owned};
-    
+
     pub struct Node {
         pub value: usize,
         pub next: Atomic<Node>,
     }
-    
+
     impl Node {
         pub fn new(value: usize) -> Self {
             Self {
@@ -136,10 +138,10 @@ mod crossbeam_bench {
             }
         }
     }
-    
+
     pub fn bench_treiber_stack(num_threads: usize, ops_per_thread: usize) {
         let stack = Arc::new(Atomic::null());
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|tid| {
                 let stack = stack.clone();
@@ -151,7 +153,7 @@ mod crossbeam_bench {
                             let guard = epoch::pin();
                             let head = stack.load(Ordering::Acquire, &guard);
                             node.next.store(head, Ordering::Relaxed);
-                            
+
                             match stack.compare_exchange(
                                 head,
                                 node,
@@ -167,16 +169,16 @@ mod crossbeam_bench {
                                 }
                             }
                         }
-                        
+
                         // Pop
                         loop {
                             let guard = epoch::pin();
                             let head = stack.load(Ordering::Acquire, &guard);
-                            
+
                             match unsafe { head.as_ref() } {
                                 Some(h) => {
                                     let next = h.next.load(Ordering::Relaxed, &guard);
-                                    
+
                                     match stack.compare_exchange(
                                         head,
                                         next,
@@ -200,11 +202,11 @@ mod crossbeam_bench {
                 })
             })
             .collect();
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         // Cleanup
         let guard = epoch::pin();
         while let Some(head) = unsafe { stack.load(Ordering::Acquire, &guard).as_ref() } {
@@ -228,11 +230,11 @@ mod crossbeam_bench {
 fn bench_treiber_stack_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("treiber_stack");
     group.sample_size(20);
-    
+
     for threads in [1, 2, 4, 8].iter() {
         let ops_per_thread = 5000;
         group.throughput(Throughput::Elements((threads * ops_per_thread * 2) as u64));
-        
+
         group.bench_with_input(
             BenchmarkId::new("kovan", threads),
             threads,
@@ -242,7 +244,7 @@ fn bench_treiber_stack_comparison(c: &mut Criterion) {
                 });
             },
         );
-        
+
         group.bench_with_input(
             BenchmarkId::new("crossbeam", threads),
             threads,
@@ -253,38 +255,38 @@ fn bench_treiber_stack_comparison(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
 fn bench_pin_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("pin_overhead");
-    
+
     group.bench_function("kovan", |b| {
         b.iter(|| {
             let _guard = kovan::pin();
             black_box(&_guard);
         });
     });
-    
+
     group.bench_function("crossbeam", |b| {
         b.iter(|| {
             let _guard = crossbeam_epoch::pin();
             black_box(&_guard);
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_read_heavy_workload(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_heavy");
     group.sample_size(20);
-    
+
     for threads in [2, 4, 8].iter() {
         let ops_per_thread = 10000;
         group.throughput(Throughput::Elements((threads * ops_per_thread) as u64));
-        
+
         // Kovan
         group.bench_with_input(
             BenchmarkId::new("kovan", threads),
@@ -302,7 +304,8 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                                     if i % 20 == 0 {
                                         // 5% writes - need to drop and recreate guard
                                         drop(guard);
-                                        let new_node = kovan_bench::Node::new(tid * ops_per_thread + i);
+                                        let new_node =
+                                            kovan_bench::Node::new(tid * ops_per_thread + i);
                                         let write_guard = kovan::pin();
                                         let old = atomic.swap(
                                             unsafe { kovan::Shared::from_raw(new_node) },
@@ -311,7 +314,9 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                                         );
                                         if !old.is_null() {
                                             unsafe {
-                                                kovan::retire(old.as_raw() as *mut kovan_bench::Node);
+                                                kovan::retire(
+                                                    old.as_raw() as *mut kovan_bench::Node
+                                                );
                                             }
                                         }
                                         drop(write_guard);
@@ -326,11 +331,11 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                             })
                         })
                         .collect();
-                    
+
                     for handle in handles {
                         handle.join().unwrap();
                     }
-                    
+
                     // Cleanup
                     let guard = kovan::pin();
                     let old = atomic.swap(
@@ -346,14 +351,15 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                 });
             },
         );
-        
+
         // Crossbeam
         group.bench_with_input(
             BenchmarkId::new("crossbeam", threads),
             threads,
             |b, &num_threads| {
                 b.iter(|| {
-                    let atomic = Arc::new(crossbeam_epoch::Atomic::new(crossbeam_bench::Node::new(42)));
+                    let atomic =
+                        Arc::new(crossbeam_epoch::Atomic::new(crossbeam_bench::Node::new(42)));
                     let handles: Vec<_> = (0..num_threads)
                         .map(|tid| {
                             let atomic = atomic.clone();
@@ -362,7 +368,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                                     if i % 20 == 0 {
                                         // 5% writes
                                         let new_node = crossbeam_epoch::Owned::new(
-                                            crossbeam_bench::Node::new(tid * ops_per_thread + i)
+                                            crossbeam_bench::Node::new(tid * ops_per_thread + i),
                                         );
                                         let guard = crossbeam_epoch::pin();
                                         let old = atomic.swap(new_node, Ordering::Release, &guard);
@@ -379,7 +385,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                             })
                         })
                         .collect();
-                    
+
                     for handle in handles {
                         handle.join().unwrap();
                     }
@@ -387,7 +393,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 

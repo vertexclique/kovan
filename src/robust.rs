@@ -33,7 +33,7 @@ pub fn maybe_advance_era() {
     ALLOC_COUNTER.with(|counter| {
         let count = counter.get();
         counter.set(count.wrapping_add(1));
-        
+
         if count % ERA_ADVANCE_THRESHOLD == 0 {
             GLOBAL_ERA.fetch_add(1, Ordering::Release);
         }
@@ -54,13 +54,13 @@ impl BirthEra {
         maybe_advance_era();
         Self(current_era())
     }
-    
+
     /// Get the era value
     #[inline]
     pub fn value(&self) -> u64 {
         self.0
     }
-    
+
     /// Check if this era is older than the given era
     #[inline]
     pub fn is_older_than(&self, other: u64) -> bool {
@@ -80,29 +80,28 @@ impl Default for BirthEra {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_era_advancement() {
         let start = current_era();
-        
+
         for _ in 0..ERA_ADVANCE_THRESHOLD * 2 {
             maybe_advance_era();
         }
-        
+
         let end = current_era();
         assert!(end > start, "Era should advance");
     }
-    
+
     #[test]
     fn test_birth_era() {
         let era1 = BirthEra::new();
-        
+
         for _ in 0..ERA_ADVANCE_THRESHOLD {
             maybe_advance_era();
         }
-        
+
         let era2 = BirthEra::new();
         assert!(era1.is_older_than(era2.value()));
     }
-    
 }

@@ -1,6 +1,6 @@
 //! Simple example demonstrating Kovan's basic API
 
-use kovan::{pin, Atomic, Shared};
+use kovan::{Atomic, Shared, pin};
 use std::sync::atomic::Ordering;
 
 fn main() {

@@ -36,17 +36,17 @@
 
 extern crate alloc;
 
-mod slot;
-mod guard;
-mod retired;
 mod atomic;
+mod guard;
 mod reclaim;
+mod retired;
 mod robust;
+mod slot;
 
-pub use guard::{pin, Guard};
-pub use retired::RetiredNode;
 pub use atomic::{Atomic, Shared};
+pub use guard::{Guard, pin};
 pub use reclaim::Reclaimable;
+pub use retired::RetiredNode;
 pub use robust::{BirthEra, current_era};
 
 // Re-export retire from guard (it's the public API)

@@ -10,10 +10,10 @@ use alloc::boxed::Box;
 pub unsafe trait Reclaimable: Sized {
     /// Get a reference to the embedded RetiredNode
     fn retired_node(&self) -> &RetiredNode;
-    
+
     /// Get a mutable reference to the embedded RetiredNode
     fn retired_node_mut(&mut self) -> &mut RetiredNode;
-    
+
     /// Deallocate this node
     ///
     /// # Safety
@@ -28,7 +28,6 @@ pub unsafe trait Reclaimable: Sized {
     }
 }
 
-
 /// Adjust reference count of a batch
 ///
 /// # Safety
@@ -41,42 +40,46 @@ pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize) {
     }
 
     let node = unsafe { &*(node_ptr as *const RetiredNode) };
-    
+
     // Check for null nref_ptr
     if node.nref_ptr.is_null() {
         return;
     }
-    
+
     let nref_node = unsafe { &*node.nref_ptr };
 
     // Handle increment vs decrement separately to avoid race conditions
     if delta < 0 {
         // Decrement: use fetch_sub and check if we're the one who brought it to zero
-        let prev = nref_node.nref.fetch_sub(delta.abs(), core::sync::atomic::Ordering::AcqRel);
-        
+        let prev = nref_node
+            .nref
+            .fetch_sub(delta.abs(), core::sync::atomic::Ordering::AcqRel);
+
         // Only free if we were the one who brought it from delta.abs() to 0
         if prev == delta.abs() {
             // SAFETY: NRef reached 0, so all threads that could see batch have left
             unsafe {
                 let nref_node = &*node.nref_ptr;
-                
+
                 // Call the type-erased destructor to free all nodes in batch
                 let destructor = nref_node.destructor;
                 let mut curr = nref_node.batch_first;
-                
+
                 while !curr.is_null() {
                     let next = (*curr).batch_next;
                     destructor(curr);
                     curr = next;
                 }
-                
+
                 // Free the NRefNode itself
                 drop(Box::from_raw(node.nref_ptr));
             }
         }
     } else {
         // Increment: just add, no free needed
-        nref_node.nref.fetch_add(delta, core::sync::atomic::Ordering::AcqRel);
+        nref_node
+            .nref
+            .fetch_add(delta, core::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -94,13 +97,15 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
 
     while !curr.is_null() && curr as usize != stop {
         let node = unsafe { &*curr };
-        
+
         // Check for null nref_ptr before dereferencing
         if !node.nref_ptr.is_null() {
             let nref_node = unsafe { &*node.nref_ptr };
 
             // Atomic decrement
-            let prev_nref = nref_node.nref.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+            let prev_nref = nref_node
+                .nref
+                .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
             #[cfg(feature = "robust")]
             {
                 count += 1;
@@ -111,17 +116,17 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
                 // SAFETY: NRef reached 0, all threads have left
                 unsafe {
                     let nref_node = &*node.nref_ptr;
-                    
+
                     // Call the type-erased destructor to free all nodes in batch
                     let destructor = nref_node.destructor;
                     let mut curr = nref_node.batch_first;
-                    
+
                     while !curr.is_null() {
                         let next = (*curr).batch_next;
                         destructor(curr);
                         curr = next;
                     }
-                    
+
                     // Free the NRefNode itself
                     drop(Box::from_raw(node.nref_ptr as *mut NRefNode));
                 }
@@ -131,11 +136,14 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
         // Move to next node in list
         curr = node.smr_next;
     }
-    
+
     // Decrement ack counter for robustness
     #[cfg(feature = "robust")]
     if count > 0 {
         let global = crate::slot::global();
-        global.slot(slot).ack_counter.fetch_sub(count as isize, core::sync::atomic::Ordering::Relaxed);
+        global
+            .slot(slot)
+            .ack_counter
+            .fetch_sub(count as isize, core::sync::atomic::Ordering::Relaxed);
     }
 }

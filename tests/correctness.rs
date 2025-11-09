@@ -5,9 +5,9 @@
 //! 2. Eventual reclamation (all retired nodes eventually freed)
 //! 3. ABA prevention (packed atomics prevent ABA problem)
 
-use kovan::{pin, retire, Atomic, RetiredNode};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use kovan::{Atomic, RetiredNode, pin, retire};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -39,12 +39,12 @@ impl Drop for TestNode {
 fn test_no_premature_free() {
     // Test that nodes are not freed while still accessible through guards
     // This test verifies the core safety guarantee: no use-after-free
-    
+
     let freed = Arc::new(AtomicBool::new(false));
     let atomic = Arc::new(Atomic::new(TestNode::new(42, freed.clone())));
     let started = Arc::new(AtomicBool::new(false));
     let can_retire = Arc::new(AtomicBool::new(false));
-    
+
     // Thread 1: Hold guard and access value
     let atomic1 = atomic.clone();
     let freed1 = freed.clone();
@@ -53,25 +53,25 @@ fn test_no_premature_free() {
     let handle1 = thread::spawn(move || {
         let guard = pin();
         let ptr = atomic1.load(Ordering::Acquire, &guard);
-        
+
         if let Some(node) = unsafe { ptr.as_ref() } {
             assert_eq!(node.value, 42);
             started1.store(true, Ordering::Release);
-            
+
             // Wait for retirement to happen
             while !can_retire1.load(Ordering::Acquire) {
                 thread::sleep(Duration::from_millis(10));
             }
-            
+
             // Node should NOT be freed while we hold guard
             // This is the key safety property
             assert!(!freed1.load(Ordering::Acquire), "Node freed prematurely!");
-            
+
             // Value should still be accessible
             assert_eq!(node.value, 42);
         }
     });
-    
+
     // Thread 2: Retire the node
     let atomic2 = atomic.clone();
     let started2 = started.clone();
@@ -81,7 +81,7 @@ fn test_no_premature_free() {
         while !started2.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(10));
         }
-        
+
         // Retire while thread 1 holds guard
         let guard = pin();
         let old = atomic2.swap(
@@ -89,13 +89,13 @@ fn test_no_premature_free() {
             Ordering::Release,
             &guard,
         );
-        
+
         if !old.is_null() {
             unsafe {
                 retire(old.as_raw() as *mut TestNode);
             }
         }
-        
+
         // Trigger batch flush
         for i in 0..70 {
             let dummy = TestNode::new(i, Arc::new(AtomicBool::new(false)));
@@ -103,13 +103,13 @@ fn test_no_premature_free() {
                 retire(dummy as *mut TestNode);
             }
         }
-        
+
         can_retire2.store(true, Ordering::Release);
     });
-    
+
     handle2.join().unwrap();
     handle1.join().unwrap();
-    
+
     println!("No premature free test: PASS - node remained accessible while guard held");
 }
 
@@ -118,10 +118,10 @@ fn test_eventual_reclamation() {
     // Test that all retired nodes are eventually reclaimed
     // We do this by retiring many nodes and verifying the system doesn't crash
     // and that memory is bounded (implicit through successful completion)
-    
+
     const NUM_NODES: usize = 10000;
     let atomic = Arc::new(Atomic::new(std::ptr::null_mut::<TestNode>()));
-    
+
     // Allocate and retire many nodes rapidly
     for i in 0..NUM_NODES {
         let freed = Arc::new(AtomicBool::new(false));
@@ -130,20 +130,20 @@ fn test_eventual_reclamation() {
             value: i,
             freed,
         }));
-        
+
         let guard = pin();
         let old = atomic.swap(
             unsafe { kovan::Shared::from_raw(node) },
             Ordering::Release,
             &guard,
         );
-        
+
         if !old.is_null() {
             unsafe {
                 retire(old.as_raw() as *mut TestNode);
             }
         }
-        
+
         // Periodically create guards to trigger reclamation
         if i % 100 == 0 {
             for _ in 0..10 {
@@ -151,7 +151,7 @@ fn test_eventual_reclamation() {
             }
         }
     }
-    
+
     // Retire final node
     {
         let guard = pin();
@@ -160,33 +160,39 @@ fn test_eventual_reclamation() {
             Ordering::Release,
             &guard,
         );
-        
+
         if !old.is_null() {
             unsafe {
                 retire(old.as_raw() as *mut TestNode);
             }
         }
     }
-    
+
     // Create many guards to trigger reclamation
     for _ in 0..1000 {
         let _guard = pin();
     }
-    
+
     // If we got here without crashing or OOM, reclamation is working
-    println!("Eventual reclamation test: retired {} nodes successfully", NUM_NODES);
+    println!(
+        "Eventual reclamation test: retired {} nodes successfully",
+        NUM_NODES
+    );
 }
 
 #[test]
 fn test_concurrent_access() {
     // Test that concurrent readers and writers work correctly
-    
+
     const NUM_THREADS: usize = 8;
     const ITERATIONS: usize = 10000;
-    
-    let atomic = Arc::new(Atomic::new(TestNode::new(0, Arc::new(AtomicBool::new(false)))));
+
+    let atomic = Arc::new(Atomic::new(TestNode::new(
+        0,
+        Arc::new(AtomicBool::new(false)),
+    )));
     let mut handles = vec![];
-    
+
     // Reader threads
     for _ in 0..NUM_THREADS / 2 {
         let atomic = atomic.clone();
@@ -194,7 +200,7 @@ fn test_concurrent_access() {
             for _ in 0..ITERATIONS {
                 let guard = pin();
                 let ptr = atomic.load(Ordering::Acquire, &guard);
-                
+
                 if let Some(node) = unsafe { ptr.as_ref() } {
                     // Just read the value
                     let _ = node.value;
@@ -202,24 +208,22 @@ fn test_concurrent_access() {
             }
         }));
     }
-    
+
     // Writer threads
     for tid in 0..NUM_THREADS / 2 {
         let atomic = atomic.clone();
         handles.push(thread::spawn(move || {
             for i in 0..ITERATIONS {
-                let new_node = TestNode::new(
-                    tid * ITERATIONS + i,
-                    Arc::new(AtomicBool::new(false)),
-                );
-                
+                let new_node =
+                    TestNode::new(tid * ITERATIONS + i, Arc::new(AtomicBool::new(false)));
+
                 let guard = pin();
                 let old = atomic.swap(
                     unsafe { kovan::Shared::from_raw(new_node) },
                     Ordering::Release,
                     &guard,
                 );
-                
+
                 if !old.is_null() {
                     unsafe {
                         retire(old.as_raw() as *mut TestNode);
@@ -228,11 +232,11 @@ fn test_concurrent_access() {
             }
         }));
     }
-    
+
     for handle in handles {
         handle.join().unwrap();
     }
-    
+
     // Cleanup final node
     let guard = pin();
     let old = atomic.swap(
@@ -240,7 +244,7 @@ fn test_concurrent_access() {
         Ordering::Release,
         &guard,
     );
-    
+
     if !old.is_null() {
         unsafe {
             retire(old.as_raw() as *mut TestNode);
@@ -253,10 +257,10 @@ fn test_guard_drop_triggers_reclamation() {
     // Test that the reclamation system works correctly
     // We verify this by retiring many nodes and checking the system doesn't crash
     // Actual reclamation timing depends on thread scheduling and batch behavior
-    
+
     const NUM_RETIRES: usize = 1000;
     let atomic = Atomic::new(std::ptr::null_mut::<TestNode>());
-    
+
     // Retire many nodes in a separate thread
     let handle = thread::spawn(move || {
         for i in 0..NUM_RETIRES {
@@ -267,14 +271,14 @@ fn test_guard_drop_triggers_reclamation() {
                 Ordering::Release,
                 &guard,
             );
-            
+
             if !old.is_null() {
                 unsafe {
                     retire(old.as_raw() as *mut TestNode);
                 }
             }
         }
-        
+
         // Final cleanup
         let guard = pin();
         let old = atomic.swap(
@@ -288,13 +292,16 @@ fn test_guard_drop_triggers_reclamation() {
             }
         }
     });
-    
+
     handle.join().unwrap();
-    
+
     // Create guards to trigger reclamation
     for _ in 0..500 {
         let _guard = pin();
     }
-    
-    println!("Guard drop triggers reclamation test: PASS - {} nodes retired successfully", NUM_RETIRES);
+
+    println!(
+        "Guard drop triggers reclamation test: PASS - {} nodes retired successfully",
+        NUM_RETIRES
+    );
 }

@@ -67,15 +67,15 @@ impl Handle {
             pin_count: Cell::new(0),
         }
     }
-    
+
     /// Select a slot, avoiding stalled ones if robust feature enabled
     fn select_slot() -> usize {
         use core::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        
+
         let global = global();
         let start_slot = COUNTER.fetch_add(1, Ordering::Relaxed) % global.num_slots();
-        
+
         #[cfg(feature = "robust")]
         {
             // Try to find non-stalled slot
@@ -89,7 +89,7 @@ impl Handle {
                 slot = (slot + 1) % global.num_slots();
             }
         }
-        
+
         start_slot
     }
 
@@ -101,7 +101,7 @@ impl Handle {
             self.slot.set(slot);
         }
         self.pin_count.set(pin_count.wrapping_add(1));
-        
+
         let slot = self.slot.get();
         let global = global();
 
@@ -110,20 +110,20 @@ impl Handle {
         {
             if pin_count % 64 == 0 {
                 let current_era = crate::robust::current_era();
-                global.slot(slot).access_era.store(current_era, core::sync::atomic::Ordering::Relaxed);
+                global
+                    .slot(slot)
+                    .access_era
+                    .store(current_era, core::sync::atomic::Ordering::Relaxed);
             }
         }
 
         // Atomic: increment ref count, get list snapshot
         let (_, handle_ptr) = global.slot(slot).head.fetch_add_ref();
 
-        Guard { 
-            slot, 
-            handle_ptr,
-        }
+        Guard { slot, handle_ptr }
     }
 
-    fn retire<T>(&self, ptr: *mut T) 
+    fn retire<T>(&self, ptr: *mut T)
     where
         T: 'static,
     {
@@ -140,17 +140,12 @@ impl Handle {
                     drop(Box::from_raw(typed_ptr));
                 }
             }
-            
-            let nref_node = Box::into_raw(Box::new(NRefNode::new(
-                retired_ptr,
-                destructor::<T>,
-            )));
+
+            let nref_node = Box::into_raw(Box::new(NRefNode::new(retired_ptr, destructor::<T>)));
             self.batch_nref.set(nref_node);
         }
 
-        batch.push(Retired {
-            ptr: retired_ptr,
-        });
+        batch.push(Retired { ptr: retired_ptr });
 
         // Flush when batch reaches threshold
         if batch.len() >= BATCH_SIZE {
@@ -173,7 +168,7 @@ impl Handle {
             unsafe {
                 // Set nref_ptr for all nodes in batch
                 (*batch_vec[i].ptr).nref_ptr = self.batch_nref.get();
-                
+
                 // Link to next node (circular, last points to null)
                 if i + 1 < batch_vec.len() {
                     (*batch_vec[i].ptr).batch_next = batch_vec[i + 1].ptr;
@@ -185,15 +180,15 @@ impl Handle {
 
         let global = global();
         let num_slots = global.num_slots();
-        
+
         // Optimization: Insert to subset of slots to reduce cache coherency traffic
         // Use sqrt(num_slots) slots per batch to balance coverage and performance
         let slots_to_use = (num_slots as f64).sqrt().ceil() as usize;
         let slots_to_use = slots_to_use.max(8).min(num_slots); // At least 8, at most all
-        
+
         let mut curr_idx = 0;
         let mut empty_slots = 0isize;
-        
+
         // Initialize NRef with hold value to prevent premature freeing during insertion
         let hold_value = isize::MAX / 2;
         let nref_node = unsafe { &*self.batch_nref.get() };
@@ -205,18 +200,18 @@ impl Handle {
         use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         static SLOT_OFFSET: AtomicUsize = AtomicUsize::new(0);
         let start_offset = SLOT_OFFSET.fetch_add(1, AtomicOrdering::Relaxed) % num_slots;
-        
+
         for i in 0..slots_to_use {
             let slot_idx = (start_offset + i) % num_slots;
             let slot = global.slot(slot_idx);
-            
+
             // Quick check: skip if slot is inactive
             let (refs, _) = slot.head.load();
             if refs == 0 {
                 empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
                 continue;
             }
-            
+
             let node_ptr = batch_vec[curr_idx].ptr;
 
             // Try to insert node into this active slot
@@ -225,7 +220,8 @@ impl Handle {
 
                 // Double-check: slot became inactive
                 if refs == 0 {
-                    empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
+                    empty_slots =
+                        empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
                     break;
                 }
 
@@ -235,28 +231,27 @@ impl Handle {
                 }
 
                 // CAS: install node as new head
-                match slot.head.compare_exchange(
-                    refs,
-                    list_ptr,
-                    refs,
-                    node_ptr as usize,
-                ) {
+                match slot
+                    .head
+                    .compare_exchange(refs, list_ptr, refs, node_ptr as usize)
+                {
                     Ok(_) => {
                         // Increment ack counter for robustness
                         #[cfg(feature = "robust")]
                         {
                             slot.ack_counter.fetch_add(refs as isize, Ordering::Relaxed);
                         }
-                        
+
                         // Adjust predecessor if list was non-empty
                         if list_ptr != 0 {
-                            let adj = calculate_adjustment(global.slot_order()).saturating_add(refs as isize);
+                            let adj = calculate_adjustment(global.slot_order())
+                                .saturating_add(refs as isize);
                             // SAFETY: list_ptr is valid from slot head
                             unsafe {
                                 adjust_refs(list_ptr, adj);
                             }
                         }
-                        
+
                         // Move to next node only after successful insertion
                         curr_idx = (curr_idx + 1) % batch_vec.len();
                         break;
@@ -270,10 +265,11 @@ impl Handle {
         let unvisited_slots = num_slots.saturating_sub(slots_to_use);
         if unvisited_slots > 0 {
             let adjustment_per_slot = calculate_adjustment(global.slot_order());
-            let unvisited_adjustment = (unvisited_slots as isize).saturating_mul(adjustment_per_slot);
+            let unvisited_adjustment =
+                (unvisited_slots as isize).saturating_mul(adjustment_per_slot);
             empty_slots = empty_slots.saturating_add(unvisited_adjustment);
         }
-        
+
         // Adjust first node in batch for empty slots and unvisited slots
         if empty_slots > 0 {
             let first = batch_vec[0].ptr;

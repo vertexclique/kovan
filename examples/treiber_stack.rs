@@ -1,8 +1,8 @@
 //! Treiber stack implementation using Kovan
 
-use kovan::{pin, retire, Atomic, Guard, Reclaimable, RetiredNode, Shared};
-use std::sync::atomic::Ordering;
+use kovan::{Atomic, Guard, Reclaimable, RetiredNode, Shared, pin, retire};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 
 /// A node in the Treiber stack
@@ -79,9 +79,7 @@ impl<T: 'static> TreiberStack<T> {
                 return None;
             }
 
-            let next = unsafe {
-                (*head.as_raw()).next.load(Ordering::Acquire, guard)
-            };
+            let next = unsafe { (*head.as_raw()).next.load(Ordering::Acquire, guard) };
 
             match self.head.compare_exchange(
                 head,
@@ -93,10 +91,10 @@ impl<T: 'static> TreiberStack<T> {
                 Ok(_) => {
                     // Successfully popped, retire the old head
                     let value = unsafe { core::ptr::read(&(*head.as_raw()).value) };
-                    
+
                     // Retire the node (will be reclaimed when safe)
                     retire(head.as_raw() as *mut Node<T>);
-                    
+
                     return Some(value);
                 }
                 Err(_) => continue,

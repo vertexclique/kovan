@@ -10,7 +10,7 @@ use core::sync::atomic::Ordering;
 use portable_atomic::AtomicU128;
 
 #[cfg(feature = "robust")]
-use core::sync::atomic::{AtomicU64, AtomicIsize};
+use core::sync::atomic::{AtomicIsize, AtomicU64};
 
 /// Packed atomic structure storing reference count + list pointer
 ///
@@ -81,12 +81,10 @@ impl SlotHead {
         let current = (current_refs as u128) | ((current_ptr as u128) << Self::PTR_SHIFT);
         let new = (new_refs as u128) | ((new_ptr as u128) << Self::PTR_SHIFT);
 
-        match self.data.compare_exchange_weak(
-            current,
-            new,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .data
+            .compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(()),
             Err(actual) => {
                 let refs = (actual & Self::REF_MASK) as u64;
@@ -137,7 +135,7 @@ impl GlobalState {
     /// Default: order=6 (64 slots)
     pub(crate) fn new(order: u32) -> Self {
         let num_slots = 1usize << order;
-        
+
         // Allocate slots as static array
         let slots = {
             let mut vec = alloc::vec::Vec::with_capacity(num_slots);

@@ -9,13 +9,13 @@ use core::sync::atomic::AtomicIsize;
 pub struct RetiredNode {
     /// Next node in slot's retirement list
     pub(crate) smr_next: *mut RetiredNode,
-    
+
     /// Next node in batch (for deallocation)
     pub(crate) batch_next: *mut RetiredNode,
-    
+
     /// Pointer to batch's reference counter
     pub(crate) nref_ptr: *mut NRefNode,
-    
+
     /// Birth era for robustness
     #[cfg(feature = "robust")]
     pub(crate) birth_era: u64,
@@ -32,7 +32,7 @@ impl RetiredNode {
             birth_era: 0,
         }
     }
-    
+
     /// Create a new RetiredNode with birth era
     #[cfg(feature = "robust")]
     pub fn new_with_era(era: u64) -> Self {
@@ -61,10 +61,10 @@ pub(crate) struct NRefNode {
     /// Tracks: ADDEND × k + Σ(threads_entered - threads_left)
     /// When reaches 0, all threads that could see batch have left
     pub(crate) nref: AtomicIsize,
-    
+
     /// Pointer to first node in batch (for deallocation)
     pub(crate) batch_first: *mut RetiredNode,
-    
+
     /// Type-erased destructor for the batch
     pub(crate) destructor: DestructorFn,
 }

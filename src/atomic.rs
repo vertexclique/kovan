@@ -125,12 +125,10 @@ impl<T> Atomic<T> {
         failure: Ordering,
         _guard: &'g Guard,
     ) -> Result<Shared<'g, T>, Shared<'g, T>> {
-        match self.data.compare_exchange(
-            current.data as usize,
-            new.data as usize,
-            success,
-            failure,
-        ) {
+        match self
+            .data
+            .compare_exchange(current.data as usize, new.data as usize, success, failure)
+        {
             Ok(prev) => Ok(Shared {
                 data: prev as *mut T,
                 _marker: PhantomData,
