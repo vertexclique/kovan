@@ -85,12 +85,13 @@ pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize) {
 /// # Safety
 ///
 /// - start must point to valid RetiredNode or be null
+/// - stop is where to stop traversing (exclusive) - use 0 to traverse all
 /// - All nodes in list must still be valid
-pub(crate) unsafe fn traverse_and_decrement(start: usize, slot: usize) {
+pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usize) {
     let mut curr = start as *mut RetiredNode;
     let mut count = 0usize;
 
-    while !curr.is_null() {
+    while !curr.is_null() && curr as usize != stop {
         let node = unsafe { &*curr };
         
         // Check for null nref_ptr before dereferencing

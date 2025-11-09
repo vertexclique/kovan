@@ -44,7 +44,7 @@ impl Drop for Guard {
         if self.handle_ptr != 0 {
             // SAFETY: handle_ptr is valid from slot head at entry time
             unsafe {
-                traverse_and_decrement(self.handle_ptr, self.slot);
+                traverse_and_decrement(self.handle_ptr, 0, self.slot);
             }
         }
     }
@@ -185,6 +185,12 @@ impl Handle {
 
         let global = global();
         let num_slots = global.num_slots();
+        
+        // Optimization: Insert to subset of slots to reduce cache coherency traffic
+        // Use sqrt(num_slots) slots per batch to balance coverage and performance
+        let slots_to_use = (num_slots as f64).sqrt().ceil() as usize;
+        let slots_to_use = slots_to_use.max(8).min(num_slots); // At least 8, at most all
+        
         let mut curr_idx = 0;
         let mut empty_slots = 0isize;
         
@@ -193,9 +199,15 @@ impl Handle {
         let nref_node = unsafe { &*self.batch_nref.get() };
         nref_node.nref.store(hold_value, Ordering::Release);
 
-        // Insert into each slot (sequential - parallel breaks correctness)
-        // Optimization: Skip empty slots to reduce CAS operations
-        for slot_idx in 0..num_slots {
+        // Insert into subset of slots (sequential - parallel breaks correctness)
+        // Optimization: Use subset to reduce cache coherency traffic
+        // Start from a random offset to distribute load
+        use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static SLOT_OFFSET: AtomicUsize = AtomicUsize::new(0);
+        let start_offset = SLOT_OFFSET.fetch_add(1, AtomicOrdering::Relaxed) % num_slots;
+        
+        for i in 0..slots_to_use {
+            let slot_idx = (start_offset + i) % num_slots;
             let slot = global.slot(slot_idx);
             
             // Quick check: skip if slot is inactive
@@ -254,7 +266,15 @@ impl Handle {
             }
         }
 
-        // Adjust first node in batch for empty slots
+        // Account for slots we didn't visit (subset optimization)
+        let unvisited_slots = num_slots.saturating_sub(slots_to_use);
+        if unvisited_slots > 0 {
+            let adjustment_per_slot = calculate_adjustment(global.slot_order());
+            let unvisited_adjustment = (unvisited_slots as isize).saturating_mul(adjustment_per_slot);
+            empty_slots = empty_slots.saturating_add(unvisited_adjustment);
+        }
+        
+        // Adjust first node in batch for empty slots and unvisited slots
         if empty_slots > 0 {
             let first = batch_vec[0].ptr;
             // SAFETY: first is valid from our batch
