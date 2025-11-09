@@ -89,6 +89,7 @@ pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize) {
 /// - All nodes in list must still be valid
 pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usize) {
     let mut curr = start as *mut RetiredNode;
+    #[cfg(feature = "robust")]
     let mut count = 0usize;
 
     while !curr.is_null() && curr as usize != stop {
@@ -100,7 +101,10 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
 
             // Atomic decrement
             let prev_nref = nref_node.nref.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
-            count += 1;
+            #[cfg(feature = "robust")]
+            {
+                count += 1;
+            }
 
             // If reaches zero, free entire batch
             if prev_nref == 1 {

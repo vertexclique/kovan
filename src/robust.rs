@@ -15,6 +15,7 @@ thread_local! {
 const ERA_ADVANCE_THRESHOLD: u32 = 256;
 
 /// Stall detection threshold (unacknowledged traversals)
+#[allow(dead_code)]
 pub(crate) const STALL_THRESHOLD: isize = 32768;
 
 /// Get current global era

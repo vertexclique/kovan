@@ -211,7 +211,7 @@ impl Handle {
             let slot = global.slot(slot_idx);
             
             // Quick check: skip if slot is inactive
-            let (refs, list_ptr) = slot.head.load();
+            let (refs, _) = slot.head.load();
             if refs == 0 {
                 empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
                 continue;
