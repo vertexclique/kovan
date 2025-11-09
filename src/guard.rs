@@ -9,8 +9,10 @@ use core::sync::atomic::Ordering;
 
 /// Batch size threshold for flushing
 ///
-/// Must be ≥ k+1 where k is number of slots (64)
-const BATCH_SIZE: usize = 65;
+/// Must be ≥ 2×k where k is number of slots (64)
+/// Paper recommends batch ≥ MAX_THREADS + 1, where MAX_THREADS >> k
+/// Using 256 to reduce flush frequency and amortize overhead
+const BATCH_SIZE: usize = 256;
 
 /// RAII guard representing an active critical section
 ///
