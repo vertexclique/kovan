@@ -54,7 +54,6 @@ struct Handle {
     batch: RefCell<Vec<Retired>>,
     batch_nref: Cell<*mut NRefNode>,
     pin_count: Cell<usize>,
-    nref_pool: RefCell<Vec<*mut NRefNode>>,
 }
 
 impl Handle {
@@ -64,7 +63,6 @@ impl Handle {
             batch: RefCell::new(Vec::new()),
             batch_nref: Cell::new(core::ptr::null_mut()),
             pin_count: Cell::new(0),
-            nref_pool: RefCell::new(Vec::new()),
         }
     }
     
@@ -141,27 +139,10 @@ impl Handle {
                 }
             }
             
-            // Try to allocate from pool first
-            let nref_node = {
-                let mut pool = self.nref_pool.borrow_mut();
-                if let Some(pooled) = pool.pop() {
-                    // Reuse pooled NRefNode
-                    unsafe {
-                        // Reinitialize the pooled node
-                        (*pooled).batch_first = retired_ptr;
-                        (*pooled).destructor = destructor::<T>;
-                        (*pooled).nref.store(0, Ordering::Relaxed);
-                    }
-                    pooled
-                } else {
-                    // Allocate new NRefNode
-                    Box::into_raw(Box::new(NRefNode::new(
-                        retired_ptr,
-                        destructor::<T>,
-                    )))
-                }
-            };
-            
+            let nref_node = Box::into_raw(Box::new(NRefNode::new(
+                retired_ptr,
+                destructor::<T>,
+            )));
             self.batch_nref.set(nref_node);
         }
 
