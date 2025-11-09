@@ -6,7 +6,12 @@
 use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
 
-// Use portable_atomic for AtomicU128 support
+// Use AtomicU128 from portable_atomic when available
+// On platforms without native 128-bit atomics, this will use a fallback
+#[cfg(target_has_atomic = "128")]
+use core::sync::atomic::AtomicU128;
+
+#[cfg(not(target_has_atomic = "128"))]
 use portable_atomic::AtomicU128;
 
 #[cfg(feature = "robust")]
