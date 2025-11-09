@@ -32,7 +32,7 @@
 //! ```
 
 #![warn(missing_docs)]
-#![feature(thread_local)]
+#![cfg_attr(feature = "nightly", feature(thread_local))]
 
 extern crate alloc;
 

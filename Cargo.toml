@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [features]
 default = []
 robust = []  # Enable robustness extensions (to have stalled thread detection).
+nightly = []  # Enable nightly-only optimizations (e.g. faster thread-local access).
 
 [profile.release]
 opt-level = 3

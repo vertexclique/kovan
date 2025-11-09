@@ -293,8 +293,16 @@ impl Handle {
     }
 }
 
+// Use nightly thread_local for better performance when available
+#[cfg(feature = "nightly")]
 #[thread_local]
 static HANDLE: Handle = Handle::new();
+
+// Fall back to stable thread_local! macro
+#[cfg(not(feature = "nightly"))]
+thread_local! {
+    static HANDLE: Handle = Handle::new();
+}
 
 /// Enter a critical section
 ///
@@ -313,7 +321,14 @@ static HANDLE: Handle = Handle::new();
 /// ```
 #[inline]
 pub fn pin() -> Guard {
-    HANDLE.pin()
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.pin()
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.with(|handle| handle.pin())
+    }
 }
 
 /// Retire a node for later reclamation
@@ -327,7 +342,14 @@ pub fn pin() -> Guard {
 /// accessed after this call (except through the reclamation system).
 #[inline]
 pub fn retire<T: 'static>(ptr: *mut T) {
-    HANDLE.retire(ptr);
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.retire(ptr)
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.with(|handle| handle.retire(ptr))
+    }
 }
 
 // Import reclamation functions
