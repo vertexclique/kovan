@@ -1,6 +1,6 @@
 [package]
 name = "kovan"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
