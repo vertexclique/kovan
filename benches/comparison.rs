@@ -296,24 +296,29 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                         .map(|tid| {
                             let atomic = atomic.clone();
                             thread::spawn(move || {
+                                // Proper usage: One guard for read-heavy section
+                                let mut guard = kovan::pin();
                                 for i in 0..ops_per_thread {
                                     if i % 20 == 0 {
-                                        // 5% writes
+                                        // 5% writes - need to drop and recreate guard
+                                        drop(guard);
                                         let new_node = kovan_bench::Node::new(tid * ops_per_thread + i);
-                                        let guard = kovan::pin();
+                                        let write_guard = kovan::pin();
                                         let old = atomic.swap(
                                             unsafe { kovan::Shared::from_raw(new_node) },
                                             Ordering::Release,
-                                            &guard,
+                                            &write_guard,
                                         );
                                         if !old.is_null() {
                                             unsafe {
                                                 kovan::retire(old.as_raw() as *mut kovan_bench::Node);
                                             }
                                         }
+                                        drop(write_guard);
+                                        // Recreate guard for continued reads
+                                        guard = kovan::pin();
                                     } else {
-                                        // 95% reads
-                                        let guard = kovan::pin();
+                                        // 95% reads - reuse same guard
                                         let ptr = atomic.load(Ordering::Acquire, &guard);
                                         black_box(ptr);
                                     }
