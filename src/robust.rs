@@ -1,4 +1,4 @@
-//! Hyaline-S robustness extensions for bounded memory and stalled thread handling
+//! Robustness extensions for bounded memory and stalled thread handling
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

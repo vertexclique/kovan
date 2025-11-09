@@ -1,4 +1,4 @@
-//! Tests for Hyaline-S robustness features
+//! Tests for robustness features
 //!
 //! These tests verify the robust feature works correctly
 

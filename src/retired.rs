@@ -16,7 +16,7 @@ pub struct RetiredNode {
     /// Pointer to batch's reference counter
     pub(crate) nref_ptr: *mut NRefNode,
     
-    /// Birth era for robustness (Hyaline-S)
+    /// Birth era for robustness
     #[cfg(feature = "robust")]
     pub(crate) birth_era: u64,
 }
