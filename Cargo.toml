@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-robust = []  # Enable robustness extensions (to prevent stalled thread detection).
+robust = []  # Enable robustness extensions (to have stalled thread detection).
 
 [profile.release]
 opt-level = 3
