@@ -32,7 +32,7 @@ inherits = "release"
 
 [dependencies]
 once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
-portable-atomic = { version = "1.11.1", default-features = false, features = ["require-cas"] }
+portable-atomic = { version = "1.11.1", default-features = false, features = ["require-cas", "fallback"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
