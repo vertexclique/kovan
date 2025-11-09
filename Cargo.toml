@@ -10,6 +10,9 @@ repository = "https://github.com/vertexclique/kovan"
 keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
 categories = ["concurrency", "memory-management", "no-std"]
 
+[package.metadata.docs.rs]
+rustdoc-args = ["-C", "target-feature=+cmpxchg16b"]
+
 [lib]
 name = "kovan"
 path = "src/lib.rs"
