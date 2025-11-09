@@ -54,18 +54,17 @@ struct Handle {
     batch: RefCell<Vec<Retired>>,
     batch_nref: Cell<*mut NRefNode>,
     pin_count: Cell<usize>,
+    nref_pool: RefCell<Vec<*mut NRefNode>>,
 }
 
 impl Handle {
-    fn new() -> Self {
-        // Adaptive slot selection (avoid stalled slots in robust mode)
-        let slot = Self::select_slot();
-
+    const fn new() -> Self {
         Self {
-            slot: Cell::new(slot),
-            batch: RefCell::new(Vec::with_capacity(BATCH_SIZE)),
+            slot: Cell::new(0),
+            batch: RefCell::new(Vec::new()),
             batch_nref: Cell::new(core::ptr::null_mut()),
             pin_count: Cell::new(0),
+            nref_pool: RefCell::new(Vec::new()),
         }
     }
     
@@ -142,10 +141,27 @@ impl Handle {
                 }
             }
             
-            let nref_node = Box::into_raw(Box::new(NRefNode::new(
-                retired_ptr,
-                destructor::<T>,
-            )));
+            // Try to allocate from pool first
+            let nref_node = {
+                let mut pool = self.nref_pool.borrow_mut();
+                if let Some(pooled) = pool.pop() {
+                    // Reuse pooled NRefNode
+                    unsafe {
+                        // Reinitialize the pooled node
+                        (*pooled).batch_first = retired_ptr;
+                        (*pooled).destructor = destructor::<T>;
+                        (*pooled).nref.store(0, Ordering::Relaxed);
+                    }
+                    pooled
+                } else {
+                    // Allocate new NRefNode
+                    Box::into_raw(Box::new(NRefNode::new(
+                        retired_ptr,
+                        destructor::<T>,
+                    )))
+                }
+            };
+            
             self.batch_nref.set(nref_node);
         }
 
@@ -194,16 +210,25 @@ impl Handle {
         let nref_node = unsafe { &*self.batch_nref.get() };
         nref_node.nref.store(hold_value, Ordering::Release);
 
-        // Insert into each slot
+        // Insert into each slot (sequential - parallel breaks correctness)
+        // Optimization: Skip empty slots to reduce CAS operations
         for slot_idx in 0..num_slots {
-            let node_ptr = batch_vec[curr_idx].ptr;
             let slot = global.slot(slot_idx);
+            
+            // Quick check: skip if slot is inactive
+            let (refs, list_ptr) = slot.head.load();
+            if refs == 0 {
+                empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
+                continue;
+            }
+            
+            let node_ptr = batch_vec[curr_idx].ptr;
 
-            // Try to insert node into this slot
+            // Try to insert node into this active slot
             loop {
                 let (refs, list_ptr) = slot.head.load();
 
-                // Slot is inactive (refs == 0)
+                // Double-check: slot became inactive
                 if refs == 0 {
                     empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
                     break;
@@ -236,13 +261,14 @@ impl Handle {
                                 adjust_refs(list_ptr, adj);
                             }
                         }
+                        
+                        // Move to next node only after successful insertion
+                        curr_idx = (curr_idx + 1) % batch_vec.len();
                         break;
                     }
                     Err(_) => continue, // Retry CAS
                 }
             }
-
-            curr_idx = (curr_idx + 1) % batch_vec.len();
         }
 
         // Adjust first node in batch for empty slots
@@ -264,9 +290,8 @@ impl Handle {
     }
 }
 
-std::thread_local! {
-    static HANDLE: Handle = Handle::new();
-}
+#[thread_local]
+static HANDLE: Handle = Handle::new();
 
 /// Enter a critical section
 ///
@@ -285,7 +310,7 @@ std::thread_local! {
 /// ```
 #[inline]
 pub fn pin() -> Guard {
-    HANDLE.with(|h| h.pin())
+    HANDLE.pin()
 }
 
 /// Retire a node for later reclamation
@@ -299,7 +324,7 @@ pub fn pin() -> Guard {
 /// accessed after this call (except through the reclamation system).
 #[inline]
 pub fn retire<T: 'static>(ptr: *mut T) {
-    HANDLE.with(|h| h.retire(ptr));
+    HANDLE.retire(ptr);
 }
 
 // Import reclamation functions

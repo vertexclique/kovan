@@ -32,6 +32,7 @@
 //! ```
 
 #![warn(missing_docs)]
+#![feature(thread_local)]
 
 extern crate alloc;
 
