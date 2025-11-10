@@ -6,11 +6,6 @@
    High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency.
  </strong>
 <hr>
-</div>
-
-<div align="center">
-</div>
-
 
 [![Crates.io](https://img.shields.io/crates/v/kovan.svg)](https://crates.io/crates/kovan)
 [![Documentation](https://docs.rs/kovan/badge.svg)](https://docs.rs/kovan)
