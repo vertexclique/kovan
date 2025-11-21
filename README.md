@@ -77,12 +77,6 @@ The guard ensures any pointers you load stay valid. When all guards are dropped,
 
 See the [`examples/`](examples/) directory for complete implementations.
 
-## Key Rules
-
-1. **Always use a guard** when accessing shared pointers
-2. **Retire, don't drop** - use `retire()` instead of `Box::from_raw()`
-3. **Add `RetiredNode`** as first field in your structs
-
 ## Performance
 
 - **10x faster** than naive implementations
