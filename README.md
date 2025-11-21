@@ -77,12 +77,6 @@ The guard ensures any pointers you load stay valid. When all guards are dropped,
 
 See the [`examples/`](examples/) directory for complete implementations.
 
-Run examples:
-```bash
-cargo run --example simple
-cargo run --example treiber_stack
-```
-
 ## Key Rules
 
 1. **Always use a guard** when accessing shared pointers
