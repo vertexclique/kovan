@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kovan - Asynchronous Safe Memory Reclamation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0a0a0a;
+            min-height: 100vh;
+            color: white;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: -50%;
+            left: -25%;
+            width: 150%;
+            height: 200%;
+            background:
+                radial-gradient(circle at 30% 20%, rgba(255,90,50,0.15) 0%, transparent 40%),
+                radial-gradient(circle at 70% 80%, rgba(180,0,104,0.2) 0%, transparent 50%),
+                radial-gradient(circle at 50% 50%, rgba(221,50,74,0.1) 0%, transparent 60%);
+            animation: drift 20s ease-in-out infinite;
+            z-index: 0;
+        }
+
+        @keyframes drift {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(-5%, 5%) scale(1.05); }
+        }
+
+        .container {
+            max-width: 1400px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 40px 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 80px;
+            padding-top: 60px;
+        }
+
+        .logo-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 50px;
+            animation: fadeInDown 1s ease-out;
+        }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .logo {
+            max-width: 600px;
+            height: auto;
+            filter: drop-shadow(0 8px 24px rgba(221,50,74,0.4));
+        }
+
+        h1 {
+            font-size: 4rem;
+            font-weight: 900;
+            background: linear-gradient(135deg, rgb(255,90,50), rgb(221,50,74), rgb(180,0,104));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 20px;
+            letter-spacing: -0.03em;
+            animation: fadeIn 1.2s ease-out 0.2s both;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .tagline {
+            font-size: 1.8rem;
+            color: rgba(255,255,255,0.9);
+            font-weight: 600;
+            margin-bottom: 20px;
+            animation: fadeIn 1.2s ease-out 0.4s both;
+        }
+
+        .asmr-badge {
+            display: inline-block;
+            padding: 12px 28px;
+            background: linear-gradient(135deg, rgba(255,90,50,0.2), rgba(221,50,74,0.2));
+            border: 2px solid rgba(255,90,50,0.5);
+            border-radius: 50px;
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            color: rgb(255,90,50);
+            margin-bottom: 40px;
+            animation: fadeIn 1.2s ease-out 0.6s both;
+        }
+
+        .description {
+            font-size: 1.3rem;
+            color: rgba(255,255,255,0.7);
+            line-height: 1.9;
+            text-align: center;
+            max-width: 900px;
+            margin: 0 auto 60px;
+            animation: fadeIn 1.2s ease-out 0.8s both;
+        }
+
+        .features {
+            max-width: 1100px;
+            margin: 80px auto;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0;
+            margin-bottom: 60px;
+        }
+
+        .feature {
+            padding: 50px 40px;
+            border-right: 1px solid rgba(255,90,50,0.15);
+            border-bottom: 1px solid rgba(255,90,50,0.15);
+            transition: all 0.4s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, rgba(255,90,50,0.05), transparent);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            z-index: 0;
+        }
+
+        .feature:hover::before {
+            opacity: 1;
+        }
+
+        .feature:hover {
+            background: rgba(255,90,50,0.02);
+        }
+
+        .feature:nth-child(3n) {
+            border-right: none;
+        }
+
+        .feature:nth-last-child(-n+3) {
+            border-bottom: none;
+        }
+
+        .feature h3 {
+            font-size: 1.3rem;
+            color: rgb(255,90,50);
+            margin-bottom: 16px;
+            font-weight: 700;
+            position: relative;
+            z-index: 1;
+        }
+
+        .feature p {
+            color: rgba(255,255,255,0.6);
+            line-height: 1.7;
+            font-size: 1rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 120px;
+            margin: 100px auto 120px;
+            max-width: 1100px;
+        }
+
+        .stat {
+            text-align: center;
+            position: relative;
+        }
+
+        .stat::after {
+            content: '';
+            position: absolute;
+            right: -60px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 1px;
+            height: 80px;
+            background: linear-gradient(to bottom, transparent, rgba(255,90,50,0.3), transparent);
+        }
+
+        .stat:last-child::after {
+            display: none;
+        }
+
+        .stat-value {
+            font-size: 4.5rem;
+            font-weight: 900;
+            background: linear-gradient(135deg, rgb(255,90,50), rgb(221,50,74));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1;
+            margin-bottom: 16px;
+        }
+
+        .stat-label {
+            font-size: 1.1rem;
+            color: rgba(255,255,255,0.5);
+            font-weight: 500;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .cta-section {
+            text-align: center;
+            margin: 100px auto;
+            max-width: 800px;
+        }
+
+        .cta-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 18px 48px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            border-radius: 50px;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            display: inline-block;
+            cursor: pointer;
+            letter-spacing: 0.02em;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, rgb(255,90,50), rgb(221,50,74));
+            color: white;
+            border: 2px solid transparent;
+            box-shadow: 0 8px 32px rgba(255,90,50,0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 48px rgba(255,90,50,0.5);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: rgb(255,90,50);
+            border: 2px solid rgba(255,90,50,0.5);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255,90,50,0.1);
+            border-color: rgb(255,90,50);
+        }
+
+        .code-snippet {
+            background: rgba(10,10,10,0.6);
+            border: 1px solid rgba(255,90,50,0.2);
+            color: white;
+            padding: 40px;
+            border-radius: 8px;
+            margin: 80px auto;
+            max-width: 800px;
+            font-family: 'Courier New', monospace;
+            font-size: 1rem;
+            overflow-x: auto;
+            line-height: 1.8;
+            position: relative;
+        }
+
+        .code-snippet::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(to right, transparent, rgb(255,90,50), transparent);
+        }
+
+        .code-snippet code {
+            display: block;
+            white-space: pre;
+            color: rgba(255,255,255,0.8);
+        }
+
+        .highlight {
+            color: rgb(255,90,50);
+            font-weight: 600;
+        }
+
+        @media (max-width: 1024px) {
+            .features-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .feature:nth-child(3n) {
+                border-right: 1px solid rgba(255,90,50,0.15);
+            }
+
+            .feature:nth-child(2n) {
+                border-right: none;
+            }
+
+            .feature:nth-last-child(-n+2) {
+                border-bottom: none;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+
+            .header {
+                padding-top: 40px;
+                margin-bottom: 60px;
+            }
+
+            h1 {
+                font-size: 2.5rem;
+            }
+
+            .tagline {
+                font-size: 1.3rem;
+            }
+
+            .asmr-badge {
+                font-size: 0.85rem;
+                padding: 10px 20px;
+            }
+
+            .description {
+                font-size: 1.1rem;
+            }
+
+            .logo-container {
+                flex-direction: column;
+                gap: 20px;
+            }
+
+            .logo {
+                max-width: 280px;
+            }
+
+            .stats {
+                flex-direction: column;
+                gap: 50px;
+                margin: 60px auto;
+            }
+
+            .stat::after {
+                display: none;
+            }
+
+            .stat-value {
+                font-size: 3.5rem;
+            }
+
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .feature {
+                border-right: none;
+                border-bottom: 1px solid rgba(255,90,50,0.15);
+                padding: 40px 30px;
+            }
+
+            .feature:last-child {
+                border-bottom: none;
+            }
+
+            .cta-buttons {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .btn {
+                width: 100%;
+                max-width: 300px;
+            }
+
+            .code-snippet {
+                padding: 30px 20px;
+                margin: 60px 0;
+                font-size: 0.9rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo-container">
+                <img src="art/kovan.svg" alt="Kovan Logo" class="logo">
+            </div>
+            <div class="asmr-badge">ASYNCHRONOUS SAFE MEMORY RECLAMATION</div>
+            <p class="tagline">ASMR for Lock-Free Data Structures</p>
+        </div>
+
+        <div class="description">
+            Kovan implements ASMR - a snapshot-free, slot-based approach that eliminates read overhead. Reference counting occurs only during reclamation, not during object access, delivering superior performance for read-heavy concurrent data structures.
+        </div>
+
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-value">2x</div>
+                <div class="stat-label">Throughput vs EBR</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">0</div>
+                <div class="stat-label">Read Overhead</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">O(1)</div>
+                <div class="stat-label">Object Load</div>
+            </div>
+        </div>
+
+        <div class="features">
+            <div class="features-grid">
+                <div class="feature">
+                    <h3>ASMR Algorithm</h3>
+                    <p>Snapshot-free memory reclamation using slot-based retirement lists with deferred reference counting.</p>
+                </div>
+                <div class="feature">
+                    <h3>Zero Read Overhead</h3>
+                    <p>Object loads require only a single atomic read - no reference count updates during access.</p>
+                </div>
+                <div class="feature">
+                    <h3>Slot-Based Architecture</h3>
+                    <p>Fixed k slots distribute load evenly across threads without global synchronization points.</p>
+                </div>
+                <div class="feature">
+                    <h3>Batch Retirement</h3>
+                    <p>Retire batches of nodes atomically for efficient amortized reclamation cost.</p>
+                </div>
+                <div class="feature">
+                    <h3>Wait-Free Progress</h3>
+                    <p>Wait-free progress guarantee without mutexes, spinlocks, or blocking primitives.</p>
+                </div>
+                <div class="feature">
+                    <h3>Flat Memory Usage</h3>
+                    <p>Predictable memory consumption - unlike EBR's growing memory usage pattern.</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="code-snippet">
+            <code><span class="highlight">use</span> kovan::{Guard, Atomic};
+
+<span class="highlight">let</span> atomic = Atomic::new(42);
+<span class="highlight">let</span> guard = Guard::new();
+
+<span class="highlight">let</span> shared = atomic.load(&guard);
+println!("Value: {}", shared);</code>
+        </div>
+
+        <div class="cta-section">
+            <div class="cta-buttons">
+                <a href="https://github.com/vertexclique/kovan" class="btn btn-primary">View on GitHub</a>
+                <a href="https://docs.rs/kovan" class="btn btn-secondary">Read Documentation</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
