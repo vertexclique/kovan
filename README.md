@@ -75,9 +75,7 @@ The guard ensures any pointers you load stay valid. When all guards are dropped,
 
 ## Examples
 
-See the [`examples/`](examples/) directory for complete implementations:
-- [`simple.rs`](examples/simple.rs) - Basic usage patterns
-- [`treiber_stack.rs`](examples/treiber_stack.rs) - Lock-free stack implementation
+See the [`examples/`](examples/) directory for complete implementations.
 
 Run examples:
 ```bash
