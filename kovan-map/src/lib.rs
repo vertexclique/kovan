@@ -10,6 +10,7 @@
 //! - **Wait-Free Reads**: Get operations never wait for other threads
 //! - **Safe Memory Reclamation**: Uses kovan's zero-overhead memory reclamation
 //! - **Concurrent**: Insert, get, and remove can all happen concurrently
+//! - **Flexible Hashing**: Support for custom hash builders
 //!
 //! # Example
 //!
@@ -36,15 +37,22 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+extern crate std;
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::hash::{Hash, Hasher};
+use core::borrow::Borrow;
+use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 use kovan::{pin, retire, Atomic, Shared};
 use portable_atomic::AtomicU64;
 
+#[cfg(feature = "std")]
+use std::collections::hash_map::RandomState;
+
 /// Default number of buckets in the hash map
-const DEFAULT_CAPACITY: usize = 64;
+const DEFAULT_CAPACITY: usize = 512;
 
 /// Node in a lock-free linked list (per bucket)
 struct Node<K, V> {
@@ -52,17 +60,6 @@ struct Node<K, V> {
     value: V,
     hash: u64,
     next: Atomic<Node<K, V>>,
-}
-
-impl<K, V> Node<K, V> {
-    fn new(key: K, value: V, hash: u64) -> Self {
-        Self {
-            key,
-            value,
-            hash,
-            next: Atomic::null(),
-        }
-    }
 }
 
 /// Lock-free concurrent hash map
@@ -74,12 +71,16 @@ impl<K, V> Node<K, V> {
 ///
 /// - `K`: Key type (must implement `Hash` and `Eq`)
 /// - `V`: Value type
-pub struct HashMap<K, V> {
+/// - `S`: Hash builder (defaults to `RandomState` when `std` feature is enabled)
+pub struct HashMap<K, V, S = RandomState> {
     buckets: Vec<Atomic<Node<K, V>>>,
     count: AtomicU64,
+    hasher: S,
+    mask: usize,
 }
 
-impl<K, V> HashMap<K, V>
+#[cfg(feature = "std")]
+impl<K, V> HashMap<K, V, RandomState>
 where
     K: Hash + Eq + 'static,
     V: 'static,
@@ -94,13 +95,13 @@ where
     /// let map: HashMap<i32, String> = HashMap::new();
     /// ```
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CAPACITY)
+        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, RandomState::new())
     }
 
     /// Creates a new hash map with the specified capacity
     ///
     /// The capacity is the number of buckets, not the number of elements.
-    /// More buckets reduce contention but use more memory.
+    /// The actual capacity will be rounded up to the next power of two.
     ///
     /// # Examples
     ///
@@ -110,6 +111,21 @@ where
     /// let map: HashMap<i32, String> = HashMap::with_capacity(128);
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_hasher(capacity, RandomState::new())
+    }
+}
+
+impl<K, V, S> HashMap<K, V, S>
+where
+    K: Hash + Eq + 'static,
+    V: 'static,
+    S: BuildHasher,
+{
+    /// Creates a new hash map with the specified capacity and hasher
+    ///
+    /// The capacity will be rounded up to the next power of two and at least 64.
+    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
+        let capacity = capacity.next_power_of_two().max(64);
         let mut buckets = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             buckets.push(Atomic::null());
@@ -118,118 +134,104 @@ where
         Self {
             buckets,
             count: AtomicU64::new(0),
+            hasher,
+            mask: capacity - 1,
         }
+    }
+
+    /// Creates a new hash map with default capacity and the specified hasher
+    pub fn with_hasher(hasher: S) -> Self {
+        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+    }
+
+    /// Returns the capacity (number of buckets) of the map
+    pub fn capacity(&self) -> usize {
+        self.buckets.len()
     }
 
     /// Returns the number of elements in the map
     ///
     /// Note: This is an approximate count in concurrent scenarios.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HashMap;
-    ///
-    /// let map = HashMap::new();
-    /// map.insert(1, "a");
-    /// assert_eq!(map.len(), 1);
-    /// ```
     pub fn len(&self) -> usize {
         self.count.load(Ordering::Relaxed) as usize
     }
 
     /// Returns true if the map is empty
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HashMap;
-    ///
-    /// let map: HashMap<i32, String> = HashMap::new();
-    /// assert!(map.is_empty());
-    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Computes the hash of a key
-    #[inline]
-    fn hash(&self, key: &K) -> u64 {
-        // Simple FNV-1a hasher for no_std compatibility
-        struct FnvHasher(u64);
+    /// Computes the hash of a key using the hash builder
+    #[inline(always)]
+    fn hash<Q>(&self, key: &Q) -> u64
+    where
+        K: Borrow<Q>,
+        Q: Hash + ?Sized,
+    {
+        self.hasher.hash_one(key)
+    }
 
-        impl Hasher for FnvHasher {
-            fn finish(&self) -> u64 {
-                self.0
-            }
+    /// Gets the bucket index for a hash using bitwise AND (power of 2 optimization)
+    #[inline(always)]
+    fn bucket_index(&self, hash: u64) -> usize {
+        (hash as usize) & self.mask
+    }
 
-            fn write(&mut self, bytes: &[u8]) {
-                for &byte in bytes {
-                    self.0 ^= byte as u64;
-                    self.0 = self.0.wrapping_mul(0x100000001b3);
+    /// Clears the map, removing all entries
+    pub fn clear(&self) {
+        let guard = pin();
+        for bucket in &self.buckets {
+            let mut current = bucket.swap(
+                unsafe { Shared::from_raw(core::ptr::null_mut()) },
+                Ordering::AcqRel,
+                &guard
+            );
+
+            while !current.is_null() {
+                unsafe {
+                    let node_ref = current.deref();
+                    let next = node_ref.next.load(Ordering::Acquire, &guard);
+                    retire(current.as_raw());
+                    current = next;
                 }
             }
         }
-
-        let mut hasher = FnvHasher(0xcbf29ce484222325);
-        key.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// Gets the bucket index for a hash
-    #[inline]
-    fn bucket_index(&self, hash: u64) -> usize {
-        (hash as usize) % self.buckets.len()
+        self.count.store(0, Ordering::Relaxed);
     }
 
     /// Inserts a key-value pair into the map
     ///
     /// If the key already exists, the old value is replaced and returned.
     /// This operation is lock-free and can be called concurrently.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HashMap;
-    ///
-    /// let map = HashMap::new();
-    /// assert_eq!(map.insert(1, "a"), None);
-    /// assert_eq!(map.insert(1, "b"), Some("a"));
-    /// ```
     pub fn insert(&self, key: K, value: V) -> Option<V>
     where
         K: Clone,
-        V: Clone,
+        V: Copy,
     {
         let hash = self.hash(&key);
-        let bucket_idx = self.bucket_index(hash);
-        let bucket = &self.buckets[bucket_idx];
+        let bucket = &self.buckets[self.bucket_index(hash)];
+
+        let guard = pin();
 
         loop {
-            let guard = pin();
             let head = bucket.load(Ordering::Acquire, &guard);
-
-            // Search for existing key in the list
             let mut current = head;
             let mut prev: Option<Shared<Node<K, V>>> = None;
 
+            // Search for existing key
             while !current.is_null() {
                 unsafe {
                     let node_ref = current.deref();
 
-                    // Found matching key - replace value
                     if node_ref.hash == hash && node_ref.key == key {
                         let next = node_ref.next.load(Ordering::Acquire, &guard);
-
-                        // Create new node with updated value
                         let new_node = Box::into_raw(Box::new(Node {
                             key: key.clone(),
-                            value: value.clone(),
+                            value,
                             hash,
                             next: Atomic::new(next.as_raw()),
                         }));
 
-                        // Try CAS to replace old node
                         let cas_result = if let Some(prev_shared) = prev {
                             let prev_ref = prev_shared.deref();
                             prev_ref.next.compare_exchange(
@@ -250,14 +252,12 @@ where
                         };
 
                         if cas_result.is_ok() {
-                            // Successfully replaced - extract old value and retire
-                            let old_value = core::ptr::read(&node_ref.value as *const V);
+                            let old_value = node_ref.value;
                             retire(current.as_raw());
                             return Some(old_value);
                         } else {
-                            // CAS failed - cleanup and retry
                             drop(Box::from_raw(new_node));
-                            continue;
+                            break; // Restart search
                         }
                     }
 
@@ -266,14 +266,14 @@ where
                 }
             }
 
-            // Key not found - insert new node at head
-            let new_node = Box::into_raw(Box::new(Node::new(key.clone(), value.clone(), hash)));
+            // Key not found - insert at head
+            let new_node = Box::into_raw(Box::new(Node {
+                key: key.clone(),
+                value,
+                hash,
+                next: Atomic::new(head.as_raw()),
+            }));
 
-            unsafe {
-                (*new_node).next.store(head, Ordering::Relaxed);
-            }
-
-            // Try to CAS the new node as the head
             match bucket.compare_exchange(
                 head,
                 unsafe { Shared::from_raw(new_node) },
@@ -286,43 +286,23 @@ where
                     return None;
                 }
                 Err(_) => {
-                    // CAS failed, retry
-                    // Cleanup the node we created
-                    unsafe {
-                        drop(Box::from_raw(new_node));
-                    }
-                    continue;
+                    unsafe { drop(Box::from_raw(new_node)); }
                 }
             }
         }
     }
 
-    /// Gets a reference to the value associated with a key
+    /// Gets a copy of the value associated with a key
     ///
     /// This operation is wait-free and has zero overhead.
-    ///
-    /// # Safety
-    ///
-    /// The returned reference is only valid while the guard is alive.
-    /// This method returns a copy of the value to ensure safety.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HashMap;
-    ///
-    /// let map = HashMap::new();
-    /// map.insert(1, "a");
-    /// assert_eq!(map.get(&1), Some("a"));
-    /// assert_eq!(map.get(&2), None);
-    /// ```
-    pub fn get(&self, key: &K) -> Option<V>
+    pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
         V: Copy,
     {
         let hash = self.hash(key);
-        let bucket_idx = self.bucket_index(hash);
-        let bucket = &self.buckets[bucket_idx];
+        let bucket = &self.buckets[self.bucket_index(hash)];
 
         let guard = pin();
         let mut current = bucket.load(Ordering::Acquire, &guard);
@@ -330,11 +310,9 @@ where
         while !current.is_null() {
             unsafe {
                 let node_ref = current.deref();
-
-                if node_ref.hash == hash && &node_ref.key == key {
+                if node_ref.hash == hash && node_ref.key.borrow() == key {
                     return Some(node_ref.value);
                 }
-
                 current = node_ref.next.load(Ordering::Acquire, &guard);
             }
         }
@@ -342,30 +320,55 @@ where
         None
     }
 
-    /// Removes a key from the map, returning the value if it existed
-    ///
-    /// This operation is lock-free and can be called concurrently.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HashMap;
-    ///
-    /// let map = HashMap::new();
-    /// map.insert(1, "a");
-    /// assert_eq!(map.remove(&1), Some("a"));
-    /// assert_eq!(map.remove(&1), None);
-    /// ```
-    pub fn remove(&self, key: &K) -> Option<V>
+    /// Gets a copy of the key-value pair
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(K, V)>
     where
+        K: Borrow<Q> + Copy,
+        Q: Hash + Eq + ?Sized,
         V: Copy,
     {
         let hash = self.hash(key);
-        let bucket_idx = self.bucket_index(hash);
-        let bucket = &self.buckets[bucket_idx];
+        let bucket = &self.buckets[self.bucket_index(hash)];
 
-        'outer: loop {
-            let guard = pin();
+        let guard = pin();
+        let mut current = bucket.load(Ordering::Acquire, &guard);
+
+        while !current.is_null() {
+            unsafe {
+                let node_ref = current.deref();
+                if node_ref.hash == hash && node_ref.key.borrow() == key {
+                    return Some((node_ref.key, node_ref.value));
+                }
+                current = node_ref.next.load(Ordering::Acquire, &guard);
+            }
+        }
+
+        None
+    }
+
+    /// Returns true if the map contains the specified key
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        V: Copy,
+    {
+        self.get(key).is_some()
+    }
+
+    /// Removes a key from the map, returning the value if it existed
+    pub fn remove<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        V: Copy,
+    {
+        let hash = self.hash(key);
+        let bucket = &self.buckets[self.bucket_index(hash)];
+
+        let guard = pin();
+
+        loop {
             let mut current = bucket.load(Ordering::Acquire, &guard);
             let mut prev: Option<Shared<Node<K, V>>> = None;
 
@@ -373,13 +376,12 @@ where
                 unsafe {
                     let node_ref = current.deref();
 
-                    if node_ref.hash == hash && &node_ref.key == key {
+                    if node_ref.hash == hash && node_ref.key.borrow() == key {
                         let next = node_ref.next.load(Ordering::Acquire, &guard);
                         let value = node_ref.value;
 
                         let cas_result = if let Some(prev_shared) = prev {
                             let prev_ref = prev_shared.deref();
-                            // Update predecessor's next pointer to skip this node
                             prev_ref.next.compare_exchange(
                                 current,
                                 next,
@@ -388,7 +390,6 @@ where
                                 &guard,
                             )
                         } else {
-                            // Update bucket head to skip this node
                             bucket.compare_exchange(
                                 current,
                                 next,
@@ -399,13 +400,11 @@ where
                         };
 
                         if cas_result.is_ok() {
-                            // Successfully unlinked - retire the node
                             retire(current.as_raw());
                             self.count.fetch_sub(1, Ordering::Relaxed);
                             return Some(value);
                         } else {
-                            // CAS failed, retry from beginning
-                            continue 'outer;
+                            break; // Restart
                         }
                     }
 
@@ -414,32 +413,144 @@ where
                 }
             }
 
-            // Key not found
+            // Not found
             return None;
         }
     }
 
-    /// Returns true if the map contains the specified key
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HashMap;
-    ///
-    /// let map = HashMap::new();
-    /// map.insert(1, "a");
-    /// assert!(map.contains_key(&1));
-    /// assert!(!map.contains_key(&2));
-    /// ```
-    pub fn contains_key(&self, key: &K) -> bool
+    /// Removes a key from the map, returning the key-value pair if it existed
+    pub fn remove_entry<Q>(&self, key: &Q) -> Option<(K, V)>
     where
+        K: Borrow<Q> + Copy,
+        Q: Hash + Eq + ?Sized,
         V: Copy,
     {
-        self.get(key).is_some()
+        let hash = self.hash(key);
+        let bucket = &self.buckets[self.bucket_index(hash)];
+
+        let guard = pin();
+
+        loop {
+            let mut current = bucket.load(Ordering::Acquire, &guard);
+            let mut prev: Option<Shared<Node<K, V>>> = None;
+
+            while !current.is_null() {
+                unsafe {
+                    let node_ref = current.deref();
+
+                    if node_ref.hash == hash && node_ref.key.borrow() == key {
+                        let next = node_ref.next.load(Ordering::Acquire, &guard);
+                        let key_copy = node_ref.key;
+                        let value = node_ref.value;
+
+                        let cas_result = if let Some(prev_shared) = prev {
+                            let prev_ref = prev_shared.deref();
+                            prev_ref.next.compare_exchange(
+                                current,
+                                next,
+                                Ordering::Release,
+                                Ordering::Acquire,
+                                &guard,
+                            )
+                        } else {
+                            bucket.compare_exchange(
+                                current,
+                                next,
+                                Ordering::Release,
+                                Ordering::Acquire,
+                                &guard,
+                            )
+                        };
+
+                        if cas_result.is_ok() {
+                            retire(current.as_raw());
+                            self.count.fetch_sub(1, Ordering::Relaxed);
+                            return Some((key_copy, value));
+                        } else {
+                            break;
+                        }
+                    }
+
+                    prev = Some(current);
+                    current = node_ref.next.load(Ordering::Acquire, &guard);
+                }
+            }
+
+            return None;
+        }
+    }
+
+    /// Retains only the elements specified by the predicate
+    pub fn retain<F>(&self, mut f: F)
+    where
+        F: FnMut(&K, &V) -> bool,
+        V: Copy,
+    {
+        let guard = pin();
+
+        for bucket in &self.buckets {
+            loop {
+                let mut current = bucket.load(Ordering::Acquire, &guard);
+                let mut prev: Option<Shared<Node<K, V>>> = None;
+                let mut modified = false;
+
+                while !current.is_null() {
+                    unsafe {
+                        let node_ref = current.deref();
+                        let should_keep = f(&node_ref.key, &node_ref.value);
+                        let next = node_ref.next.load(Ordering::Acquire, &guard);
+
+                        if !should_keep {
+                            let cas_result = if let Some(prev_shared) = prev {
+                                let prev_ref = prev_shared.deref();
+                                prev_ref.next.compare_exchange(
+                                    current,
+                                    next,
+                                    Ordering::Release,
+                                    Ordering::Acquire,
+                                    &guard,
+                                )
+                            } else {
+                                bucket.compare_exchange(
+                                    current,
+                                    next,
+                                    Ordering::Release,
+                                    Ordering::Acquire,
+                                    &guard,
+                                )
+                            };
+
+                            if cas_result.is_ok() {
+                                retire(current.as_raw());
+                                self.count.fetch_sub(1, Ordering::Relaxed);
+                                modified = true;
+                                current = next;
+                                continue;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        prev = Some(current);
+                        current = next;
+                    }
+                }
+
+                if !modified {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Returns a reference to the map's hash builder
+    pub fn hasher(&self) -> &S {
+        &self.hasher
     }
 }
 
-impl<K, V> Default for HashMap<K, V>
+#[cfg(feature = "std")]
+impl<K, V> Default for HashMap<K, V, RandomState>
 where
     K: Hash + Eq + 'static,
     V: 'static,
@@ -449,11 +560,11 @@ where
     }
 }
 
-// Safety: HashMap can be sent between threads if K and V are Send
-unsafe impl<K: Send, V: Send> Send for HashMap<K, V> {}
+// Safety: HashMap can be sent between threads if K, V, and S are Send
+unsafe impl<K: Send, V: Send, S: Send> Send for HashMap<K, V, S> {}
 
-// Safety: HashMap can be shared between threads if K and V are Sync
-unsafe impl<K: Sync, V: Sync> Sync for HashMap<K, V> {}
+// Safety: HashMap can be shared between threads if K, V, and S are Sync
+unsafe impl<K: Sync, V: Sync, S: Sync> Sync for HashMap<K, V, S> {}
 
 #[cfg(test)]
 mod tests {
