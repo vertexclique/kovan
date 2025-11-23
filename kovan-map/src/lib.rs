@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
-use kovan::{pin, retire, Atomic, Shared};
+use kovan::{Atomic, Shared, pin, retire};
 
 #[cfg(feature = "std")]
 use std::collections::hash_map::RandomState;
@@ -241,7 +241,9 @@ where
             ) {
                 Ok(_) => return None,
                 Err(_) => {
-                    unsafe { drop(Box::from_raw(new_node)); }
+                    unsafe {
+                        drop(Box::from_raw(new_node));
+                    }
                     continue 'outer;
                 }
             }

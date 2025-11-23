@@ -124,10 +124,7 @@ fn main() {
     }
 
     let duration = start.elapsed();
-    println!(
-        "Mixed operations completed in {:?}",
-        duration
-    );
+    println!("Mixed operations completed in {:?}", duration);
     println!("Final map size: {} entries\n", map.len());
 
     // Verify some data
