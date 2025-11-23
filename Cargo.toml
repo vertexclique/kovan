@@ -1,26 +1,28 @@
-[package]
-name = "kovan"
+[workspace]
+resolver = "2"
+members = [
+    "kovan", 
+    "kovan-map",
+]
+
+[workspace.package]
 version = "0.1.3"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
-description = "High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency."
 license = "Apache-2.0"
 repository = "https://github.com/vertexclique/kovan"
-keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
-categories = ["concurrency", "memory-management", "no-std"]
 
-[package.metadata.docs.rs]
+[workspace.dependencies]
+# Shared dependencies across workspace members
+once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
+portable-atomic = { version = "1.11.1", default-features = false, features = ["require-cas", "fallback"] }
+
+# Internal dependencies
+kovan = { version = "0.1.3", path = "kovan" }
+
+[workspace.metadata.docs.rs]
 rustdoc-args = ["-C", "target-feature=+cmpxchg16b"]
-
-[lib]
-name = "kovan"
-path = "src/lib.rs"
-
-[features]
-default = []
-robust = []  # Enable robustness extensions (to have stalled thread detection).
-nightly = []  # Enable nightly-only optimizations (e.g. faster thread-local access).
 
 [profile.release]
 opt-level = 3
@@ -29,19 +31,3 @@ codegen-units = 1
 
 [profile.bench]
 inherits = "release"
-
-[dependencies]
-once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
-portable-atomic = { version = "1.11.1", default-features = false, features = ["require-cas", "fallback"] }
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-crossbeam-epoch = "0.9"
-
-[[bench]]
-name = "comparison"
-harness = false
-
-[[bench]]
-name = "throughput"
-harness = false
