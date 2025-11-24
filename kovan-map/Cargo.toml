@@ -20,6 +20,7 @@ std = []
 
 [dependencies]
 kovan = { workspace = true }
+foldhash = { version = "0.2" }
 portable-atomic = { workspace = true }
 
 [dev-dependencies]
