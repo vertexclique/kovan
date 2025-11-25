@@ -14,7 +14,8 @@ path = "src/lib.rs"
 [dependencies]
 uuid = { version = "1.18", features = ["v4"] }
 
-kovan = { workspace = true }
+# kovan = { workspace = true }
+crossbeam-epoch = "0.9"
 kovan-map = { workspace = true }
 dashmap = "6.1.0"
 

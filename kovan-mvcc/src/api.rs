@@ -1,6 +1,6 @@
 use crate::storage::Storage;
 use crate::transaction::{InMemoryTxnManager, TransactionRecord, TxnState, TxnResolver};
-use kovan::pin;
+use crossbeam_epoch as epoch;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -60,7 +60,7 @@ impl Txn {
             return value_opt.as_ref().map(|arc| (**arc).clone());
         }
 
-        let guard = pin();
+        let guard = epoch::pin();
         let row = self.storage.get_row(key);
 
         let resolver = |id| {
@@ -76,7 +76,7 @@ impl Txn {
     }
 
     pub fn write(&mut self, key: &str, value: Vec<u8>) -> Result<(), String> {
-        let guard = pin();
+        let guard = epoch::pin();
         let resolver = |id| self.txn_manager.check_status(id);
 
         let value_arc = Arc::new(value);
@@ -94,7 +94,7 @@ impl Txn {
     }
 
     pub fn delete(&mut self, key: &str) -> Result<(), String> {
-        let guard = pin();
+        let guard = epoch::pin();
         let resolver = |id| self.txn_manager.check_status(id);
 
         // Pass self.read_ts for SI checks
@@ -113,18 +113,29 @@ impl Txn {
         // Allocate commit timestamp
         let commit_ts = self.clock.fetch_add(1, Ordering::SeqCst) + 1;
 
+        eprintln!("[COMMIT_START] Txn {} read_ts={} commit_ts={} write_set={:?}",
+                  self.record.id, self.read_ts, commit_ts, self.write_set);
+
         // Mark transaction as Staging (write intents are committed but not yet resolved)
         self.txn_manager.set_state(self.record.id, TxnState::Staging, Some(commit_ts));
 
         // Eagerly resolve all write intents (convert Intent → Committed)
         // This is the CockroachDB parallel commits approach
-        let guard = pin();
+        let guard = epoch::pin();
+        let mut resolved_count = 0;
         for key in &self.write_set {
-            self.storage.resolve_intent(key, self.record.id, commit_ts, &guard);
+            if self.storage.resolve_intent(key, self.record.id, commit_ts, &guard) {
+                resolved_count += 1;
+            }
         }
+
+        eprintln!("[COMMIT_RESOLVED] Txn {} commit_ts={} resolved={}/{} intents",
+                  self.record.id, commit_ts, resolved_count, self.write_set.len());
 
         // Mark transaction as fully Committed (all intents resolved)
         self.txn_manager.set_state(self.record.id, TxnState::Committed, Some(commit_ts));
+
+        eprintln!("[COMMIT_DONE] Txn {} commit_ts={}", self.record.id, commit_ts);
 
         Ok(commit_ts)
     }

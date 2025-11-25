@@ -368,8 +368,8 @@ dependencies = [
 name = "kovan-mvcc"
 version = "0.1.3"
 dependencies = [
+ "crossbeam-epoch",
  "dashmap",
- "kovan",
  "kovan-map",
  "rand",
  "uuid",

@@ -1,9 +1,7 @@
-use kovan::Reclaimable;
-use kovan::RetiredNode;
-use kovan::{Atomic, Guard};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::alloc::{Layout, alloc, dealloc};
+use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::ptr;
 
 /// Represents the status of a specific version in the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,65 +21,37 @@ pub enum VersionStatus {
 pub type Value = Arc<Vec<u8>>;
 
 /// The Version node in the MVCC chain.
-/// This struct is managed by Kovan for memory reclamation.
-#[repr(C)]
+/// This struct is managed by crossbeam-epoch for memory reclamation.
 pub struct Version {
-    /// Kovan header for reclamation. Must be first or accessible.
-    pub retired: RetiredNode,
-    
-    /// The actual data. 
+    /// The actual data.
     /// Using `Arc` here is crucial for large payload performance.
     pub value: Option<Value>,
-    
+
     /// Metadata for the version.
     pub status: VersionStatus,
-    
+
     /// Pointer to the next older version in the chain.
     pub next: Atomic<Version>,
 }
 
 impl Version {
-    pub fn new(value: Option<Value>, status: VersionStatus, next: *mut Version) -> *mut Self {
-        let layout = Layout::new::<Self>();
-        unsafe {
-            let ptr = alloc(layout) as *mut Self;
-            // Initialize the RetiredNode (Kovan requirement)
-            let retired = RetiredNode::new();
-            
-            // Write to the memory
-            std::ptr::write(ptr, Self {
-                retired,
-                value,
-                status,
-                next: Atomic::new(next),
-            });
-            ptr
-        }
-    }
-}
-
-// Implement Kovan's Reclaimable trait
-unsafe impl Reclaimable for Version {
-    fn retired_node(&self) -> &RetiredNode {
-        &self.retired
+    pub fn new<'g>(value: Option<Value>, status: VersionStatus, next: Shared<'g, Version>) -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            value,
+            status,
+            next: Atomic::from(next),
+        }))
     }
 
-    fn retired_node_mut(&mut self) -> &mut RetiredNode {
-        &mut self.retired
-    }
-
-    unsafe fn dealloc(ptr: *mut Self) {
-        // Drop the internal data (Arc<Vec<u8>>)
-        unsafe {
-            std::ptr::drop_in_place(ptr);
-            let layout = Layout::new::<Self>();
-            dealloc(ptr as *mut u8, layout);
+    pub unsafe fn dealloc(ptr: *mut Self) {
+        if !ptr.is_null() {
+            drop(Box::from_raw(ptr));
         }
     }
 }
 
 /// A Row represents a key's version chain head.
-/// It uses Kovan's Atomic to point to the latest Version.
+/// It uses crossbeam-epoch's Atomic to point to the latest Version.
 pub struct Row {
     pub head: Atomic<Version>,
 }
@@ -95,40 +65,62 @@ impl Row {
 
     /// Reads the latest version visible to the given snapshot timestamp.
     /// Returns a reference to the bytes.
+    ///
+    /// IMPORTANT: This function treats Intent nodes from committed transactions
+    /// as if they were Committed nodes with the transaction's commit timestamp.
+    /// This is safe because once a transaction is marked as Committed in the
+    /// transaction manager, its outcome is immutable - the Intent values are final.
     pub fn read<'g>(
-        &self, 
-        read_ts: u64, 
-        guard: &'g Guard, 
+        &self,
+        read_ts: u64,
+        guard: &'g Guard,
         txn_resolver: &impl Fn(u128) -> Option<u64>
     ) -> Option<&'g [u8]> {
         let mut curr_shared = self.head.load(Ordering::Acquire, guard);
+        let mut chain_pos = 0;
 
         while let Some(ver) = unsafe { curr_shared.as_ref() } {
+            chain_pos += 1;
             match ver.status {
                 VersionStatus::Committed(ts) => {
                     if ts <= read_ts {
                         // Return ref to Arc's content
-                        return ver.value.as_deref().map(|v| v.as_slice());
+                        let val = ver.value.as_deref().map(|v| v.as_slice());
+                        eprintln!("[READ_COMMITTED] read_ts={} chain_pos={} found Committed({}) <= read_ts",
+                                  read_ts, chain_pos, ts);
+                        return val;
+                    } else {
+                        eprintln!("[READ_SKIP_COMMITTED] read_ts={} chain_pos={} skipping Committed({}) > read_ts",
+                                  read_ts, chain_pos, ts);
                     }
                 }
                 VersionStatus::Intent(txn_id) => {
-                    // Lazy Intent Resolution
+                    // Lazy Intent Resolution: check transaction status
+                    // If committed/staging, treat Intent as if it were Committed(commit_ts)
                     if let Some(commit_ts) = txn_resolver(txn_id) {
                         if commit_ts <= read_ts {
-                            return ver.value.as_deref().map(|v| v.as_slice());
+                            let val = ver.value.as_deref().map(|v| v.as_slice());
+                            eprintln!("[READ_INTENT] read_ts={} chain_pos={} found Intent(txn={}) with commit_ts={} <= read_ts",
+                                      read_ts, chain_pos, txn_id, commit_ts);
+                            return val;
                         } else {
-                            // eprintln!("Ignored Intent txn_id={} commit_ts={} read_ts={}", txn_id, commit_ts, read_ts);
+                            eprintln!("[READ_SKIP_INTENT] read_ts={} chain_pos={} skipping Intent(txn={}) with commit_ts={} > read_ts",
+                                      read_ts, chain_pos, txn_id, commit_ts);
                         }
                     } else {
-                        // eprintln!("Ignored Intent txn_id={} (Pending/Aborted)", txn_id);
+                        // Pending or Aborted - skip this version
+                        eprintln!("[READ_SKIP_PENDING] read_ts={} chain_pos={} skipping Intent(txn={}) (Pending/Aborted)",
+                                  read_ts, chain_pos, txn_id);
                     }
                 }
                 VersionStatus::Aborted => {
-                    // Skip
+                    eprintln!("[READ_SKIP_ABORTED] read_ts={} chain_pos={} skipping Aborted",
+                              read_ts, chain_pos);
                 }
             }
             curr_shared = ver.next.load(Ordering::Acquire, guard);
         }
+        eprintln!("[READ_NONE] read_ts={} - no visible version found", read_ts);
         None
     }
 }

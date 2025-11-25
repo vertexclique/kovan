@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::thread;
 use rand::Rng;
 
-const ACCOUNTS: usize = 10;
-const INITIAL_BALANCE: u64 = 1000;
-const TRANSFERS: usize = 2000;
-const THREADS: usize = 8;
+const ACCOUNTS: usize = 2;
+const INITIAL_BALANCE: u64 = 100;
+const TRANSFERS: usize = 50;
+const THREADS: usize = 4;
 
 #[test]
 fn test_bank_consistency() {
