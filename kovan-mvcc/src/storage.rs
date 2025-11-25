@@ -121,22 +121,21 @@ impl Storage {
     ) -> bool {
         let row = self.get_row(key);
 
-        // Walk the version chain looking for our intent
-        let mut parent_ptr: Option<*const Version> = None;
-        let mut current_shared = row.head.load(Ordering::Acquire, guard);
+        // CRITICAL: Only resolve intents at HEAD to avoid racy parent pointer updates
+        // Intents deeper in the chain will be lazily resolved during reads
+        loop {
+            let current_shared = row.head.load(Ordering::Acquire, guard);
 
-        while let Some(ver) = unsafe { current_shared.as_ref() } {
-            match ver.status {
-                VersionStatus::Intent(intent_txn_id) if intent_txn_id == txn_id => {
-                    // Found it! Replace with Committed.
-                    let new_version_ptr = Version::new(
-                        ver.value.clone(),
-                        VersionStatus::Committed(commit_ts),
-                        ver.next.load(Ordering::Acquire, guard).as_raw(),
-                    );
+            if let Some(ver) = unsafe { current_shared.as_ref() } {
+                match ver.status {
+                    VersionStatus::Intent(intent_txn_id) if intent_txn_id == txn_id => {
+                        // Found our intent at head! Replace with Committed version
+                        let new_version_ptr = Version::new(
+                            ver.value.clone(),
+                            VersionStatus::Committed(commit_ts),
+                            ver.next.load(Ordering::Acquire, guard).as_raw(),
+                        );
 
-                    // If we are at head, CAS head
-                    if parent_ptr.is_none() {
                         match row.head.compare_exchange(
                             current_shared,
                             unsafe { kovan::Shared::from_raw(new_version_ptr) },
@@ -149,39 +148,22 @@ impl Storage {
                                 return true;
                             }
                             Err(_) => {
+                                // CAS failed, head changed - retry
                                 unsafe { Version::dealloc(new_version_ptr); }
-                                return false;
-                            }
-                        }
-                    } else {
-                        // If we are not at head, we can't easily replace in lock-free list
-                        // without CASing the parent's next pointer.
-                        let parent = unsafe { &*parent_ptr.unwrap() };
-                        
-                        match parent.next.compare_exchange(
-                            current_shared,
-                            unsafe { kovan::Shared::from_raw(new_version_ptr) },
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                            guard,
-                        ) {
-                            Ok(_) => {
-                                unsafe { retire(current_shared.as_raw()); }
-                                return true;
-                            }
-                            Err(_) => {
-                                unsafe { Version::dealloc(new_version_ptr); }
-                                return false;
+                                continue;
                             }
                         }
                     }
+                    _ => {
+                        // Intent is not at head (or doesn't exist)
+                        // Rely on lazy resolution during reads
+                        return false;
+                    }
                 }
-                _ => {
-                    parent_ptr = Some(ver as *const Version);
-                    current_shared = ver.next.load(Ordering::Acquire, guard);
-                }
+            } else {
+                // Head is null - intent not found
+                return false;
             }
         }
-        false
     }
 }

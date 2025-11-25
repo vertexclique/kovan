@@ -29,6 +29,7 @@ impl KovanMVCC {
             clock: self.clock.clone(),
             write_set: Vec::new(),
             read_ts: now,
+            local_writes: std::collections::HashMap::new(),
         }
     }
 }
@@ -40,6 +41,7 @@ pub struct Txn {
     clock: Arc<AtomicU64>,
     write_set: Vec<String>,
     read_ts: u64,
+    local_writes: std::collections::HashMap<String, Option<Arc<Vec<u8>>>>,
 }
 
 impl Drop for Txn {
@@ -53,9 +55,14 @@ impl Drop for Txn {
 
 impl Txn {
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
+        // Check local writes first (Read-Your-Own-Writes)
+        if let Some(value_opt) = self.local_writes.get(key) {
+            return value_opt.as_ref().map(|arc| (**arc).clone());
+        }
+
         let guard = pin();
         let row = self.storage.get_row(key);
-        
+
         let resolver = |id| {
             let (state, ts) = self.txn_manager.check_status(id);
             match state {
@@ -72,11 +79,14 @@ impl Txn {
         let guard = pin();
         let resolver = |id| self.txn_manager.check_status(id);
 
+        let value_arc = Arc::new(value);
+
         // Pass self.read_ts for SI checks
-        let success = self.storage.write_intent(key, Some(Arc::new(value)), self.record.id, self.read_ts, &guard, &resolver);
+        let success = self.storage.write_intent(key, Some(value_arc.clone()), self.record.id, self.read_ts, &guard, &resolver);
 
         if success {
             self.write_set.push(key.to_string());
+            self.local_writes.insert(key.to_string(), Some(value_arc));
             Ok(())
         } else {
             Err("Write Conflict".to_string())
@@ -86,11 +96,12 @@ impl Txn {
     pub fn delete(&mut self, key: &str) -> Result<(), String> {
         let guard = pin();
         let resolver = |id| self.txn_manager.check_status(id);
-        
+
         // Pass self.read_ts for SI checks
         let success = self.storage.write_intent(key, None, self.record.id, self.read_ts, &guard, &resolver);
         if success {
             self.write_set.push(key.to_string());
+            self.local_writes.insert(key.to_string(), None);
             Ok(())
         } else {
             Err("Write Conflict".to_string())
@@ -110,8 +121,6 @@ impl Txn {
         let guard = pin();
         for key in &self.write_set {
             self.storage.resolve_intent(key, self.record.id, commit_ts, &guard);
-            // Note: We don't check the return value - if intent was already resolved or
-            // not found, that's fine (idempotent operation)
         }
 
         // Mark transaction as fully Committed (all intents resolved)

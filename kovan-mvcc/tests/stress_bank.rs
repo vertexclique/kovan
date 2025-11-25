@@ -42,7 +42,7 @@ fn test_bank_consistency() {
                 // Retry loop for conflicts
                 loop {
                     let mut txn = db_clone.begin();
-                    
+
                     // Read phase
                     let b_from_bytes = txn.read(&k_from).unwrap();
                     let b_to_bytes = txn.read(&k_to).unwrap();
@@ -59,7 +59,7 @@ fn test_bank_consistency() {
                     let new_to = b_to + amount;
 
                     // Note: Order of writes matters for deadlocks in locking systems,
-                    // but here we use pessimistic intent writing. 
+                    // but here we use pessimistic intent writing.
                     // If we fail to write, we abort and retry.
                     if txn.write(&k_from, new_from.to_le_bytes().to_vec()).is_ok() {
                         if txn.write(&k_to, new_to.to_le_bytes().to_vec()).is_ok() {
