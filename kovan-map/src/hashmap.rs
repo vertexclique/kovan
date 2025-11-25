@@ -29,9 +29,6 @@ use core::sync::atomic::Ordering;
 use foldhash::fast::FixedState;
 use kovan::{Atomic, Shared, pin, retire};
 
-#[cfg(feature = "std")]
-use std::collections::hash_map::RandomState;
-
 /// Number of buckets.
 /// 524,288 = 2^19.
 /// Size of bucket array = 512k * 8 bytes = 4MB.

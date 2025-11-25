@@ -32,3 +32,7 @@ evmap = "10.0"
 [[bench]]
 name = "comparison"
 harness = false
+
+[[bench]]
+name = "hopscotch"
+harness = false

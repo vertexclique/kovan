@@ -3,7 +3,7 @@
 //! This example shows multiple threads performing concurrent inserts, reads,
 //! and removes without any locks or blocking.
 
-use kovan_map::HashMap;
+use kovan_map::HopscotchMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -12,7 +12,7 @@ fn main() {
     println!("=== Lock-Free Concurrent HashMap Demo ===\n");
 
     // Create a shared hash map
-    let map = Arc::new(HashMap::with_capacity(256));
+    let map = Arc::new(HopscotchMap::with_capacity(256));
 
     // Benchmark concurrent inserts
     println!("Benchmarking concurrent inserts...");
