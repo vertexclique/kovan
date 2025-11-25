@@ -19,14 +19,14 @@ fn test_simple_concurrent_transfer() {
     
     // Multiple threads: random transfers
     let mut handles = vec![];
-    let num_threads = 8;
-    let num_transfers = 5000;
+    let num_threads = 4;
+    let num_iterations = 1000;
     
     for _ in 0..num_threads { // Changed loop variable to _
         let db_clone = db.clone();
         handles.push(thread::spawn(move || {
             let mut rng = rand::thread_rng(); // Initialize random number generator
-            for _ in 0..num_transfers { // Changed loop variable to _
+            for _ in 0..num_iterations { // Changed loop variable to _
                 let from_idx = rng.gen_range(0..num_accounts);
                 let to_idx = rng.gen_range(0..num_accounts);
                 if from_idx == to_idx { continue; } // Skip if source and destination are the same

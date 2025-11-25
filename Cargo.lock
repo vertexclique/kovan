@@ -368,6 +368,7 @@ dependencies = [
 name = "kovan-mvcc"
 version = "0.1.3"
 dependencies = [
+ "dashmap",
  "kovan",
  "kovan-map",
  "rand",

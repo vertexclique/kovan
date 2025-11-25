@@ -71,10 +71,10 @@ impl Txn {
     pub fn write(&mut self, key: &str, value: Vec<u8>) -> Result<(), String> {
         let guard = pin();
         let resolver = |id| self.txn_manager.check_status(id);
-        
+
         // Pass self.read_ts for SI checks
         let success = self.storage.write_intent(key, Some(Arc::new(value)), self.record.id, self.read_ts, &guard, &resolver);
-        
+
         if success {
             self.write_set.push(key.to_string());
             Ok(())
@@ -101,22 +101,22 @@ impl Txn {
     pub fn commit(self) -> Result<u64, String> {
         // Allocate commit timestamp
         let commit_ts = self.clock.fetch_add(1, Ordering::SeqCst) + 1;
-        
+
         // Mark transaction as Staging (write intents are committed but not yet resolved)
         self.txn_manager.set_state(self.record.id, TxnState::Staging, Some(commit_ts));
-        
+
         // Eagerly resolve all write intents (convert Intent → Committed)
         // This is the CockroachDB parallel commits approach
         let guard = pin();
         for key in &self.write_set {
             self.storage.resolve_intent(key, self.record.id, commit_ts, &guard);
-            // Note: We don't check the return value - if intent was already resolved or 
+            // Note: We don't check the return value - if intent was already resolved or
             // not found, that's fine (idempotent operation)
         }
-        
+
         // Mark transaction as fully Committed (all intents resolved)
         self.txn_manager.set_state(self.record.id, TxnState::Committed, Some(commit_ts));
-        
+
         Ok(commit_ts)
     }
 }

@@ -86,8 +86,11 @@ fn test_bank_consistency() {
     for i in 0..ACCOUNTS {
         let key = format!("acc_{}", i);
         let val = txn.read(&key).unwrap();
-        total += u64::from_le_bytes(val.try_into().unwrap());
+        let balance = u64::from_le_bytes(val.try_into().unwrap());
+        eprintln!("[FINAL] {} = {}", key, balance);
+        total += balance;
     }
 
+    eprintln!("[FINAL] total={} expected={}", total, (ACCOUNTS as u64) * INITIAL_BALANCE);
     assert_eq!(total, (ACCOUNTS as u64) * INITIAL_BALANCE, "Money was created or destroyed!");
 }
