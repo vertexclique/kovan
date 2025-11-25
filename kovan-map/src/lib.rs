@@ -101,4 +101,4 @@ mod hashmap;
 mod hopscotch;
 
 pub use hashmap::*;
-pub use hopscotch::HopscotchMap;
+pub use hopscotch::*;

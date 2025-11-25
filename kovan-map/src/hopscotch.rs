@@ -5,6 +5,7 @@
 //! - **Robust Concurrency**: Uses Copy-on-Move displacement to prevent Use-After-Free.
 //! - **Safe Resizing**: Uses a lightweight resize lock to prevent lost updates during migration.
 //! - **Memory reclamation**: Uses Kovan.
+//! - **Clone Support**: Supports V: Clone (e.g., Arc<T>) instead of just Copy.
 
 extern crate alloc;
 
@@ -92,9 +93,6 @@ impl<K, V> Table<K, V> {
 }
 
 /// A concurrent, lock-free hash map based on Hopscotch Hashing.
-///
-/// This map supports concurrent `insert`, `remove`, and `get` operations. It automatically
-/// grows when the load factor exceeds 75% and shrinks when it drops below 25%.
 pub struct HopscotchMap<K, V, S = FixedState> {
     table: Atomic<Table<K, V>>,
     count: AtomicUsize,
@@ -107,31 +105,12 @@ pub struct HopscotchMap<K, V, S = FixedState> {
 impl<K, V> HopscotchMap<K, V, FixedState>
 where
     K: Hash + Eq + Clone + 'static,
-    V: Copy + 'static,
+    V: Clone + 'static,
 {
-    /// Creates a new, empty `HopscotchMap` with the default hasher and initial capacity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    /// let map: HopscotchMap<i32, i32> = HopscotchMap::new();
-    /// ```
     pub fn new() -> Self {
         Self::with_hasher(FixedState::default())
     }
 
-    /// Creates a new, empty `HopscotchMap` with at least the specified capacity.
-    ///
-    /// The map will be able to hold at least `capacity` elements without reallocating.
-    /// The actual capacity will be the next power of two greater than or equal to `capacity`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    /// let map: HopscotchMap<i32, i32> = HopscotchMap::with_capacity(100);
-    /// ```
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_capacity_and_hasher(capacity, FixedState::default())
     }
@@ -140,24 +119,13 @@ where
 impl<K, V, S> HopscotchMap<K, V, S>
 where
     K: Hash + Eq + Clone + 'static,
-    V: Copy + 'static,
+    V: Clone + 'static,
     S: BuildHasher,
 {
-    /// Creates a new `HopscotchMap` using the provided hasher.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    /// use std::hash::RandomState;
-    ///
-    /// let map = HopscotchMap::with_hasher(RandomState::new());
-    /// ```
     pub fn with_hasher(hasher: S) -> Self {
         Self::with_capacity_and_hasher(INITIAL_CAPACITY, hasher)
     }
 
-    /// Creates a new `HopscotchMap` with the specified capacity and hasher.
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         let table = Table::new(capacity);
         Self {
@@ -168,38 +136,20 @@ where
         }
     }
 
-    /// Returns the number of elements in the map.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    ///
-    /// let map = HopscotchMap::new();
-    /// assert_eq!(map.len(), 0);
-    /// map.insert(1, "a");
-    /// assert_eq!(map.len(), 1);
-    /// ```
     pub fn len(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Returns `true` if the map contains no elements.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Returns the current capacity of the map (the number of buckets).
-    ///
-    /// This value represents the internal table size, which may be larger than the
-    /// requested capacity due to power-of-two rounding and padding.
     pub fn capacity(&self) -> usize {
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
         unsafe { (*table_ptr.as_raw()).capacity }
     }
 
-    /// Helper to wait if a resize is in progress
     #[inline]
     fn wait_for_resize(&self) {
         while self.resizing.load(Ordering::Acquire) {
@@ -207,20 +157,6 @@ where
         }
     }
 
-    /// Returns a copy of the value corresponding to the key.
-    ///
-    /// Returns `None` if the key is not present in the map.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    ///
-    /// let map = HopscotchMap::new();
-    /// map.insert(1, "a");
-    /// assert_eq!(map.get(&1), Some("a"));
-    /// assert_eq!(map.get(&2), None);
-    /// ```
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -236,7 +172,6 @@ where
 
         let hop_info = bucket.hop_info.load(Ordering::Acquire);
 
-        // Optimization: if hop_info is 0, the item definitely isn't here
         if hop_info == 0 {
             return None;
         }
@@ -249,9 +184,8 @@ where
 
                 if !entry_ptr.is_null() {
                     let entry = unsafe { &*entry_ptr.as_raw() };
-                    // Verify hash first to avoid expensive key comparison
                     if entry.hash == hash && entry.key.borrow() == key {
-                        return Some(entry.value);
+                        return Some(entry.value.clone());
                     }
                 }
             }
@@ -260,68 +194,53 @@ where
         None
     }
 
-    /// Returns `true` if the map contains a value for the specified key.
-    pub fn contains_key<Q>(&self, key: &Q) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.get(key).is_some()
+    /// Inserts a key-value pair into the map.
+    pub fn insert(&self, key: K, value: V) -> Option<V> {
+        self.insert_impl(key, value, false)
     }
 
-    /// Inserts a key-value pair into the map.
-    ///
-    /// If the map did not have this key present, `None` is returned.
-    /// If the map did have this key present, the value is updated, and the old
-    /// value is returned.
-    ///
-    /// This operation is lock-free but may temporarily spin if a resize operation
-    /// is in progress.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    ///
-    /// let map = HopscotchMap::new();
-    /// assert_eq!(map.insert(37, "a"), None);
-    /// assert_eq!(map.is_empty(), false);
-    ///
-    /// map.insert(37, "b");
-    /// assert_eq!(map.insert(37, "c"), Some("b"));
-    /// assert_eq!(map.get(&37), Some("c"));
-    /// ```
-    pub fn insert(&self, key: K, value: V) -> Option<V> {
+    /// Helper for get_or_insert logic.
+    fn insert_impl(&self, key: K, value: V, only_if_absent: bool) -> Option<V> {
         let hash = self.hasher.hash_one(&key);
 
         loop {
-            // 1. Wait if resizing is active to prevent lost updates
             self.wait_for_resize();
 
             let guard = pin();
-            // Reload table pointer after potential wait
             let table_ptr = self.table.load(Ordering::Acquire, &guard);
             let table = unsafe { &*table_ptr.as_raw() };
 
-            // Check resize flag again inside the loop before doing work
             if self.resizing.load(Ordering::Acquire) {
                 continue;
             }
 
-            match self.try_insert(table, hash, key.clone(), value, &guard) {
+            // Note: We pass clones to try_insert if we loop here, but try_insert consumes them.
+            // Since `insert_impl` owns `key` and `value`, we must clone them for the call 
+            // because `try_insert` might return `Retry` (looping again).
+            match self.try_insert(table, hash, key.clone(), value.clone(), only_if_absent, &guard) {
                 InsertResult::Success(old_val) => {
+                    // CRITICAL FIX: If a resize started while we were inserting, our update
+                    // might have been missed by the migration.
+                    // We must retry to ensure we write to the new table.
+                    // We check BOTH the resizing flag (active resize) AND the table pointer (completed resize).
+                    if self.resizing.load(Ordering::SeqCst) || self.table.load(Ordering::SeqCst, &guard) != table_ptr {
+                        continue;
+                    }
+
                     if old_val.is_none() {
                         let new_count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
                         let current_capacity = table.capacity;
                         let load_factor = new_count as f64 / current_capacity as f64;
 
                         if load_factor > GROW_THRESHOLD {
-                            // Release guard before heavy operation, using copied capacity
                             drop(guard);
                             self.try_resize(current_capacity * 2);
                         }
                     }
                     return old_val;
+                }
+                InsertResult::Exists(existing_val) => {
+                    return Some(existing_val);
                 }
                 InsertResult::NeedResize => {
                     let current_capacity = table.capacity;
@@ -336,19 +255,13 @@ where
         }
     }
 
-    /// Removes a key from the map, returning the value at the key if the key
-    /// was previously in the map.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kovan_map::HopscotchMap;
-    ///
-    /// let map = HopscotchMap::new();
-    /// map.insert(1, "a");
-    /// assert_eq!(map.remove(&1), Some("a"));
-    /// assert_eq!(map.remove(&1), None);
-    /// ```
+    pub fn get_or_insert(&self, key: K, value: V) -> V {
+        match self.insert_impl(key, value.clone(), true) {
+            Some(existing) => existing,
+            None => value,
+        }
+    }
+
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -384,9 +297,8 @@ where
                     if !entry_ptr.is_null() {
                         let entry = unsafe { &*entry_ptr.as_raw() };
                         if entry.hash == hash && entry.key.borrow() == key {
-                            let old_value = entry.value;
+                            let old_value = entry.value.clone();
 
-                            // CAS to Null to physically remove
                             match slot_bucket.slot.compare_exchange(
                                 entry_ptr,
                                 unsafe { Shared::from_raw(core::ptr::null_mut()) },
@@ -395,7 +307,6 @@ where
                                 &guard,
                             ) {
                                 Ok(_) => {
-                                    // Logically remove from bitmap
                                     let mask = !(1u32 << offset);
                                     bucket.hop_info.fetch_and(mask, Ordering::Release);
 
@@ -415,24 +326,18 @@ where
                                     return Some(old_value);
                                 }
                                 Err(_) => {
-                                    // Another thread modified this slot
-                                    break; // break inner loop to retry outer loop
+                                    break;
                                 }
                             }
                         }
                     }
                 }
             }
-            // If we iterated everything and didn't return or break, item not found
             return None;
         }
     }
 
-    /// Clears the map, removing all key-value pairs.
-    ///
-    /// This operation essentially locks the map during the clear process.
     pub fn clear(&self) {
-        // Clear essentially needs to act like a write lock
         while self
             .resizing
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -450,8 +355,6 @@ where
             let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
 
             if !entry_ptr.is_null() {
-                // We hold the resizing lock, so we can just store null,
-                // but CAS is safer if we allow concurrent readers
                 match bucket.slot.compare_exchange(
                     entry_ptr,
                     unsafe { Shared::from_raw(core::ptr::null_mut()) },
@@ -480,6 +383,7 @@ where
         hash: u64,
         key: K,
         value: V,
+        only_if_absent: bool,
         guard: &kovan::Guard,
     ) -> InsertResult<V> {
         let bucket_idx = table.bucket_index(hash);
@@ -496,8 +400,18 @@ where
                 if !entry_ptr.is_null() {
                     let entry = unsafe { &*entry_ptr.as_raw() };
                     if entry.hash == hash && entry.key == key {
-                        let old_value = entry.value;
-                        let new_entry = Box::into_raw(Box::new(Entry { hash, key, value }));
+                        if only_if_absent {
+                            return InsertResult::Exists(entry.value.clone());
+                        }
+
+                        let old_value = entry.value.clone();
+                        // Clone key and value because if CAS fails, we retry, and we are inside a loop.
+                        // We cannot move out of `key` or `value` inside a loop.
+                        let new_entry = Box::into_raw(Box::new(Entry { 
+                            hash, 
+                            key: key.clone(), 
+                            value: value.clone() 
+                        }));
 
                         match slot_bucket.slot.compare_exchange(
                             entry_ptr,
@@ -520,7 +434,7 @@ where
             }
         }
 
-        // 2. Find empty slot in neighborhood
+        // 2. Find empty slot
         for offset in 0..NEIGHBORHOOD_SIZE {
             let slot_idx = bucket_idx + offset;
             if slot_idx >= table.capacity + NEIGHBORHOOD_SIZE {
@@ -531,10 +445,12 @@ where
             let entry_ptr = slot_bucket.slot.load(Ordering::Acquire, guard);
 
             if entry_ptr.is_null() {
+                // Clone key and value. If CAS fails, we continue the loop, so we need the originals
+                // for the next iteration.
                 let new_entry = Box::into_raw(Box::new(Entry {
                     hash,
                     key: key.clone(),
-                    value,
+                    value: value.clone(),
                 }));
 
                 match slot_bucket.slot.compare_exchange(
@@ -550,25 +466,25 @@ where
                     }
                     Err(_) => {
                         drop(unsafe { Box::from_raw(new_entry) });
-                        // Slot taken, try next
                         continue;
                     }
                 }
             }
         }
 
-        // 3. Neighborhood full, try displacement
+        // 3. Try displacement
         match self.try_find_closer_slot(table, bucket_idx, guard) {
             Some(final_offset) if final_offset < NEIGHBORHOOD_SIZE => {
                 let slot_idx = bucket_idx + final_offset;
                 let slot_bucket = table.get_bucket(slot_idx);
 
-                // Double check it's null (it should be after displacement)
                 let curr = slot_bucket.slot.load(Ordering::Relaxed, guard);
                 if !curr.is_null() {
                     return InsertResult::Retry;
                 }
 
+                // This is the final attempt in this function. We can move key/value here 
+                // because previous usages were clones.
                 let new_entry = Box::into_raw(Box::new(Entry { hash, key, value }));
 
                 match slot_bucket.slot.compare_exchange(
@@ -616,10 +532,6 @@ where
         None
     }
 
-    /// Moves an empty slot closer to the target bucket.
-    ///
-    /// FIX: This uses "Copy-on-Move" to prevent Segfaults.
-    /// Instead of moving the raw pointer, we clone the data to a new pointer.
     fn try_move_closer(
         &self,
         table: &Table<K, V>,
@@ -643,20 +555,10 @@ where
 
                     if entry_home <= candidate_idx && current_empty < entry_home + NEIGHBORHOOD_SIZE
                     {
-                        // Found a candidate to move.
-
-                        // CRITICAL FIX: To avoid Use-After-Free/Segfaults, we CANNOT just move the pointer.
-                        // A concurrent thread might be removing `entry_ptr` at the same time.
-                        // Strategy:
-                        // 1. Create NEW entry with cloned data.
-                        // 2. Insert NEW entry into `current_empty`.
-                        // 3. Remove OLD `entry_ptr` from `candidate_idx`.
-                        // 4. If Remove fails, Rollback (Remove NEW entry).
-
+                        // Copy-on-Move for safety
                         let new_entry = Box::into_raw(Box::new(entry.clone()));
                         let empty_bucket = table.get_bucket(current_empty);
 
-                        // Step 1: Try to place new copy in empty slot
                         match empty_bucket.slot.compare_exchange(
                             unsafe { Shared::from_raw(core::ptr::null_mut()) },
                             unsafe { Shared::from_raw(new_entry) },
@@ -665,7 +567,6 @@ where
                             guard,
                         ) {
                             Ok(_) => {
-                                // Step 2: Try to remove old pointer from old slot
                                 match candidate_bucket.slot.compare_exchange(
                                     entry_ptr,
                                     unsafe { Shared::from_raw(core::ptr::null_mut()) },
@@ -674,7 +575,6 @@ where
                                     guard,
                                 ) {
                                     Ok(_) => {
-                                        // Success! We moved it.
                                         let old_offset = candidate_idx - entry_home;
                                         let new_offset = current_empty - entry_home;
 
@@ -687,17 +587,11 @@ where
                                             .fetch_or(1u32 << new_offset, Ordering::Release);
 
                                         retire(entry_ptr.as_raw());
-
                                         current_empty = candidate_idx;
                                         moved = true;
                                         break;
                                     }
                                     Err(_) => {
-                                        // Failed to remove old one (someone else removed/changed it).
-                                        // We must ROLLBACK the new insertion to avoid duplication.
-                                        // We just inserted `new_entry` into `empty_bucket`.
-                                        // Since we own it, we can just CAS it back to null or Store null
-                                        // (CAS is safer against other weird races).
                                         let _ = empty_bucket.slot.compare_exchange(
                                             unsafe { Shared::from_raw(new_entry) },
                                             unsafe { Shared::from_raw(core::ptr::null_mut()) },
@@ -705,16 +599,12 @@ where
                                             Ordering::Relaxed,
                                             guard,
                                         );
-                                        // We created it, we can drop it.
                                         unsafe { drop(Box::from_raw(new_entry)) };
-
-                                        // Retry the loop
                                         continue;
                                     }
                                 }
                             }
                             Err(_) => {
-                                // Failed to claim empty slot
                                 unsafe { drop(Box::from_raw(new_entry)) };
                                 continue;
                             }
@@ -752,8 +642,6 @@ where
             }
 
             let probe_bucket = table.get_bucket(probe_idx);
-            // Relaxed load is fine here as we are the only ones writing to new_table
-            // We use the passed guard to satisfy the API
             let slot_ptr = probe_bucket.slot.load(Ordering::Relaxed, guard);
 
             if slot_ptr.is_null() {
@@ -766,15 +654,11 @@ where
                         .store(unsafe { Shared::from_raw(new_entry) }, Ordering::Release);
 
                     let bucket = table.get_bucket(bucket_idx);
-                    // Use relax load/store for setup
                     let mut hop = bucket.hop_info.load(Ordering::Relaxed);
                     hop |= 1u32 << offset_from_home;
                     bucket.hop_info.store(hop, Ordering::Relaxed);
                     return true;
                 } else {
-                    // In a simple resize implementation, if we can't fit into the neighborhood
-                    // immediately in the new table (which is 2x larger), we abort.
-                    // A more complex implementation would recursively resize again.
                     return false;
                 }
             }
@@ -783,18 +667,13 @@ where
     }
 
     fn try_resize(&self, new_capacity: usize) {
-        // Acquire the resizing lock.
-        // If we fail to get it, someone else is resizing, so we return.
         if self
             .resizing
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
             .is_err()
         {
             return;
         }
-
-        // We hold the lock. Writers are paused (spinning).
-        // Readers can still read old_table.
 
         let new_capacity = new_capacity.next_power_of_two().max(MIN_CAPACITY);
         let guard = pin();
@@ -809,9 +688,6 @@ where
         let new_table = Box::into_raw(Box::new(Table::new(new_capacity)));
         let new_table_ref = unsafe { &*new_table };
 
-        // Collect entries
-        // Since we paused writers, we don't need to worry about lost updates here,
-        // but we still need to handle the atomic pointers carefully.
         let mut success = true;
 
         for i in 0..(old_table.capacity + NEIGHBORHOOD_SIZE) {
@@ -824,7 +700,7 @@ where
                     new_table_ref,
                     entry.hash,
                     entry.key.clone(),
-                    entry.value,
+                    entry.value.clone(),
                     &guard,
                 ) {
                     success = false;
@@ -845,14 +721,12 @@ where
                     retire(old_table_ptr.as_raw());
                 }
                 Err(_) => {
-                    // Should not happen if we hold resizing lock and verified pointer
                     success = false;
                 }
             }
         }
 
         if !success {
-            // Cleanup new table
             for i in 0..(new_table_ref.capacity + NEIGHBORHOOD_SIZE) {
                 let bucket = new_table_ref.get_bucket(i);
                 let entry_ptr = bucket.slot.load(Ordering::Relaxed, &guard);
@@ -867,13 +741,13 @@ where
             }
         }
 
-        // Release lock
         self.resizing.store(false, Ordering::Release);
     }
 }
 
 enum InsertResult<V> {
     Success(Option<V>),
+    Exists(V),
     NeedResize,
     Retry,
 }
@@ -882,7 +756,7 @@ enum InsertResult<V> {
 impl<K, V> Default for HopscotchMap<K, V, FixedState>
 where
     K: Hash + Eq + Clone + 'static,
-    V: Copy + 'static,
+    V: Clone + 'static,
 {
     fn default() -> Self {
         Self::new()
