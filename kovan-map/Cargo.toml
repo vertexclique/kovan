@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Lock-free concurrent hash map using kovan memory reclamation"
+description = "Lock-free concurrent hash maps using kovan memory reclamation"
 keywords = ["concurrency", "hashmap", "lock-free", "wait-free"]
 categories = ["concurrency", "data-structures", "no-std"]
 

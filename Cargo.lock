@@ -354,6 +354,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kovan-stm"
+version = "0.1.3"
+dependencies = [
+ "kovan",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.177"
 source = "registry+https://github.com/rust-lang/crates.io-index"
