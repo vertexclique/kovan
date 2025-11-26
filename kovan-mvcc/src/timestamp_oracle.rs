@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Timestamp Oracle trait - can be implemented by consensus algorithms
-/// (Raft, OmniPaxos, Paxos) or by a local atomic counter
+/// (Raft, MultiPaxos, Paxos), oracle server, or by a local atomic counter
 pub trait TimestampOracle: Send + Sync {
     /// Get a strictly increasing timestamp
     /// In distributed mode: consensus algorithm provides this

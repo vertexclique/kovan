@@ -13,3 +13,4 @@ path = "src/lib.rs"
 
 [dependencies]
 kovan = { workspace = true }
+kovan-map = { workspace = true }

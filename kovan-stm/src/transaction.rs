@@ -3,8 +3,9 @@ use super::{Stm, StmError, TVar};
 use alloc::boxed::Box;
 use kovan::Shared;
 use kovan::{Guard, retire};
+use kovan_map::HashMap;
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -13,6 +14,7 @@ type TVarId = usize;
 type Committer = Box<dyn Fn(&Box<dyn Any + Send>) + Send>;
 
 /// Internal entry for the Read Set.
+#[derive(Clone)]
 struct ReadEntry {
     /// The version of the TVar observed when reading.
     version: u64,
@@ -247,7 +249,7 @@ impl<'a> Transaction<'a> {
         let mut valid = true;
         for (id, entry) in &self.read_set {
             // If writing to this var, we have lock, no need to check
-            if write_set.contains_key(id) {
+            if write_set.contains_key(&id) {
                 continue;
             }
 
