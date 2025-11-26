@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use dashmap::DashMap;
+use std::sync::Arc;
 
 /// Lock information stored separately from version chains
 /// This is TiKV's CF_LOCK approach
@@ -36,11 +36,9 @@ impl LockTable {
     /// Returns Ok(()) if successful, Err if key is already locked
     pub fn try_lock(&self, key: &str, lock_info: LockInfo) -> Result<(), String> {
         use dashmap::mapref::entry::Entry;
-        
+
         match self.locks.entry(key.to_string()) {
-            Entry::Occupied(_) => {
-                Err(format!("Key {} is locked", key))
-            }
+            Entry::Occupied(_) => Err(format!("Key {} is locked", key)),
             Entry::Vacant(e) => {
                 e.insert(lock_info);
                 Ok(())
@@ -60,15 +58,17 @@ impl LockTable {
 
     /// Check if a key is locked by a specific transaction
     pub fn is_locked_by(&self, key: &str, txn_id: u128) -> bool {
-        self.locks.get(key)
+        self.locks
+            .get(key)
             .map(|lock| lock.txn_id == txn_id)
             .unwrap_or(false)
     }
-    
+
     /// Check if key has any lock with start_ts <= given timestamp
     /// Used during reads to detect conflicts
     pub fn has_lock_before(&self, key: &str, ts: u64) -> Option<LockInfo> {
-        self.locks.get(key)
+        self.locks
+            .get(key)
             .filter(|lock| lock.start_ts <= ts)
             .map(|r| r.value().clone())
     }
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn test_lock_table() {
         let table = LockTable::new();
-        
+
         let lock = LockInfo {
             txn_id: 1,
             start_ts: 10,
@@ -89,16 +89,16 @@ mod tests {
             lock_type: LockType::Put,
             short_value: None,
         };
-        
+
         // Can lock an unlocked key
         assert!(table.try_lock("key1", lock.clone()).is_ok());
-        
+
         // Cannot lock an already locked key
         assert!(table.try_lock("key1", lock.clone()).is_err());
-        
+
         // Can get lock info
         assert!(table.get_lock("key1").is_some());
-        
+
         // Can unlock
         assert!(table.unlock("key1").is_some());
         assert!(table.get_lock("key1").is_none());

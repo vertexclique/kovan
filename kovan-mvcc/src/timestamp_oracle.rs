@@ -21,7 +21,7 @@ impl LocalTimestampOracle {
             counter: AtomicU64::new(0),
         }
     }
-    
+
     pub fn with_initial(initial: u64) -> Self {
         Self {
             counter: AtomicU64::new(initial),
@@ -47,7 +47,7 @@ impl MockTimestampOracle {
             counter: AtomicU64::new(0),
         }
     }
-    
+
     pub fn set(&self, ts: u64) {
         self.counter.store(ts, Ordering::SeqCst);
     }

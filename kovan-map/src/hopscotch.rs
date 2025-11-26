@@ -215,15 +215,24 @@ where
             }
 
             // Note: We pass clones to try_insert if we loop here, but try_insert consumes them.
-            // Since `insert_impl` owns `key` and `value`, we must clone them for the call 
+            // Since `insert_impl` owns `key` and `value`, we must clone them for the call
             // because `try_insert` might return `Retry` (looping again).
-            match self.try_insert(table, hash, key.clone(), value.clone(), only_if_absent, &guard) {
+            match self.try_insert(
+                table,
+                hash,
+                key.clone(),
+                value.clone(),
+                only_if_absent,
+                &guard,
+            ) {
                 InsertResult::Success(old_val) => {
                     // CRITICAL FIX: If a resize started while we were inserting, our update
                     // might have been missed by the migration.
                     // We must retry to ensure we write to the new table.
                     // We check BOTH the resizing flag (active resize) AND the table pointer (completed resize).
-                    if self.resizing.load(Ordering::SeqCst) || self.table.load(Ordering::SeqCst, &guard) != table_ptr {
+                    if self.resizing.load(Ordering::SeqCst)
+                        || self.table.load(Ordering::SeqCst, &guard) != table_ptr
+                    {
                         continue;
                     }
 
@@ -407,10 +416,10 @@ where
                         let old_value = entry.value.clone();
                         // Clone key and value because if CAS fails, we retry, and we are inside a loop.
                         // We cannot move out of `key` or `value` inside a loop.
-                        let new_entry = Box::into_raw(Box::new(Entry { 
-                            hash, 
-                            key: key.clone(), 
-                            value: value.clone() 
+                        let new_entry = Box::into_raw(Box::new(Entry {
+                            hash,
+                            key: key.clone(),
+                            value: value.clone(),
                         }));
 
                         match slot_bucket.slot.compare_exchange(
@@ -483,7 +492,7 @@ where
                     return InsertResult::Retry;
                 }
 
-                // This is the final attempt in this function. We can move key/value here 
+                // This is the final attempt in this function. We can move key/value here
                 // because previous usages were clones.
                 let new_entry = Box::into_raw(Box::new(Entry { hash, key, value }));
 

@@ -1,7 +1,7 @@
 use kovan_mvcc::KovanMVCC;
+use rand::Rng;
 use std::sync::Arc;
 use std::thread;
-use rand::Rng;
 
 const ACCOUNTS: usize = 10;
 const INITIAL_BALANCE: u64 = 100;
@@ -33,7 +33,9 @@ fn test_bank_consistency() {
             for _ in 0..TRANSFERS {
                 let from = rng.gen_range(0..ACCOUNTS);
                 let to = rng.gen_range(0..ACCOUNTS);
-                if from == to { continue; }
+                if from == to {
+                    continue;
+                }
 
                 let k_from = format!("acc_{}", from);
                 let k_to = format!("acc_{}", to);
@@ -91,6 +93,14 @@ fn test_bank_consistency() {
         total += balance;
     }
 
-    eprintln!("[FINAL] total={} expected={}", total, (ACCOUNTS as u64) * INITIAL_BALANCE);
-    assert_eq!(total, (ACCOUNTS as u64) * INITIAL_BALANCE, "Money was created or destroyed!");
+    eprintln!(
+        "[FINAL] total={} expected={}",
+        total,
+        (ACCOUNTS as u64) * INITIAL_BALANCE
+    );
+    assert_eq!(
+        total,
+        (ACCOUNTS as u64) * INITIAL_BALANCE,
+        "Money was created or destroyed!"
+    );
 }

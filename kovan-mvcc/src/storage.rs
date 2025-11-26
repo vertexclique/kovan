@@ -1,7 +1,7 @@
+use crate::lock_table::LockInfo;
+use dashmap::DashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use dashmap::DashMap;
-use crate::lock_table::LockInfo;
 
 /// Represents the type of write operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +72,10 @@ impl Storage {
     // === CF_WRITE Operations ===
 
     pub fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo) {
-        let mut entry = self.writes.entry(key.to_string()).or_insert_with(BTreeMap::new);
+        let mut entry = self
+            .writes
+            .entry(key.to_string())
+            .or_insert_with(BTreeMap::new);
         entry.insert(commit_ts, info);
     }
 
@@ -90,7 +93,10 @@ impl Storage {
     // === CF_DATA Operations ===
 
     pub fn put_data(&self, key: &str, start_ts: u64, value: Value) {
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(BTreeMap::new);
+        let mut entry = self
+            .data
+            .entry(key.to_string())
+            .or_insert_with(BTreeMap::new);
         entry.insert(start_ts, value);
     }
 
@@ -101,7 +107,7 @@ impl Storage {
             None
         }
     }
-    
+
     pub fn delete_data(&self, key: &str, start_ts: u64) {
         if let Some(mut entry) = self.data.get_mut(key) {
             entry.remove(&start_ts);
