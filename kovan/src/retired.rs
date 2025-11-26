@@ -32,7 +32,15 @@ impl RetiredNode {
             birth_era: 0,
         }
     }
+}
 
+impl Default for RetiredNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RetiredNode {
     /// Create a new RetiredNode with birth era
     #[cfg(feature = "robust")]
     pub fn new_with_era(era: u64) -> Self {

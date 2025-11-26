@@ -94,7 +94,7 @@ fn test_no_premature_free() {
 
         if !old.is_null() {
             unsafe {
-                retire(old.as_raw() as *mut TestNode);
+                retire(old.as_raw());
             }
         }
 
@@ -102,7 +102,7 @@ fn test_no_premature_free() {
         for i in 0..70 {
             let dummy = TestNode::new(i, Arc::new(AtomicBool::new(false)));
             unsafe {
-                retire(dummy as *mut TestNode);
+                retire(dummy);
             }
         }
 
@@ -142,7 +142,7 @@ fn test_eventual_reclamation() {
 
         if !old.is_null() {
             unsafe {
-                retire(old.as_raw() as *mut TestNode);
+                retire(old.as_raw());
             }
         }
 
@@ -165,7 +165,7 @@ fn test_eventual_reclamation() {
 
         if !old.is_null() {
             unsafe {
-                retire(old.as_raw() as *mut TestNode);
+                retire(old.as_raw());
             }
         }
     }
@@ -228,7 +228,7 @@ fn test_concurrent_access() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut TestNode);
+                        retire(old.as_raw());
                     }
                 }
             }
@@ -249,7 +249,7 @@ fn test_concurrent_access() {
 
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut TestNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -276,7 +276,7 @@ fn test_guard_drop_triggers_reclamation() {
 
             if !old.is_null() {
                 unsafe {
-                    retire(old.as_raw() as *mut TestNode);
+                    retire(old.as_raw());
                 }
             }
         }
@@ -290,7 +290,7 @@ fn test_guard_drop_triggers_reclamation() {
         );
         if !old.is_null() {
             unsafe {
-                retire(old.as_raw() as *mut TestNode);
+                retire(old.as_raw());
             }
         }
     });

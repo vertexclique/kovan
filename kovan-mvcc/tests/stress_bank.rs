@@ -76,12 +76,11 @@ fn test_bank_consistency() {
                     // Note: Order of writes matters for deadlocks in locking systems,
                     // but here we use pessimistic intent writing.
                     // If we fail to write, we abort and retry.
-                    if txn.write(&k_from, new_from.to_le_bytes().to_vec()).is_ok() {
-                        if txn.write(&k_to, new_to.to_le_bytes().to_vec()).is_ok() {
-                            if txn.commit().is_ok() {
-                                break; // Success
-                            }
-                        }
+                    if txn.write(&k_from, new_from.to_le_bytes().to_vec()).is_ok()
+                        && txn.write(&k_to, new_to.to_le_bytes().to_vec()).is_ok()
+                        && txn.commit().is_ok()
+                    {
+                        break; // Success
                     }
                     // If we get here, conflict happened. Retry.
                     // Backoff with random jitter to avoid livelock

@@ -93,7 +93,7 @@ impl<K, V> Table<K, V> {
 }
 
 /// A concurrent, lock-free hash map based on Hopscotch Hashing.
-pub struct HopscotchMap<K, V, S = FixedState> {
+pub struct HopscotchMap<K: 'static, V: 'static, S = FixedState> {
     table: Atomic<Table<K, V>>,
     count: AtomicUsize,
     /// Prevents concurrent writes during resize migration to avoid lost updates
@@ -107,10 +107,12 @@ where
     K: Hash + Eq + Clone + 'static,
     V: Clone + 'static,
 {
+    /// Creates a new `HopscotchMap` with default capacity and hasher.
     pub fn new() -> Self {
         Self::with_hasher(FixedState::default())
     }
 
+    /// Creates a new `HopscotchMap` with the specified capacity and default hasher.
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_capacity_and_hasher(capacity, FixedState::default())
     }
@@ -122,10 +124,12 @@ where
     V: Clone + 'static,
     S: BuildHasher,
 {
+    /// Creates a new `HopscotchMap` with the specified hasher and default capacity.
     pub fn with_hasher(hasher: S) -> Self {
         Self::with_capacity_and_hasher(INITIAL_CAPACITY, hasher)
     }
 
+    /// Creates a new `HopscotchMap` with the specified capacity and hasher.
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         let table = Table::new(capacity);
         Self {
@@ -136,14 +140,17 @@ where
         }
     }
 
+    /// Returns the number of elements in the map.
     pub fn len(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
 
+    /// Returns `true` if the map contains no elements.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns the current capacity of the map.
     pub fn capacity(&self) -> usize {
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
@@ -157,6 +164,7 @@ where
         }
     }
 
+    /// Returns the value corresponding to the key.
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -264,6 +272,7 @@ where
         }
     }
 
+    /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
         match self.insert_impl(key, value.clone(), true) {
             Some(existing) => existing,
@@ -277,6 +286,7 @@ where
         self.insert_impl(key, value, true)
     }
 
+    /// Removes a key from the map, returning the value at the key if the key was previously in the map.
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -352,6 +362,7 @@ where
         }
     }
 
+    /// Clears the map, removing all key-value pairs.
     pub fn clear(&self) {
         while self
             .resizing
@@ -369,17 +380,19 @@ where
             let bucket = table.get_bucket(i);
             let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
 
-            if !entry_ptr.is_null() {
-                match bucket.slot.compare_exchange(
-                    entry_ptr,
-                    unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                    &guard,
-                ) {
-                    Ok(_) => retire(entry_ptr.as_raw()),
-                    Err(_) => {}
-                }
+            if !entry_ptr.is_null()
+                && bucket
+                    .slot
+                    .compare_exchange(
+                        entry_ptr,
+                        unsafe { Shared::from_raw(core::ptr::null_mut()) },
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                        &guard,
+                    )
+                    .is_ok()
+            {
+                retire(entry_ptr.as_raw());
             }
 
             if i < table.capacity {
@@ -747,7 +760,7 @@ where
                 let entry_ptr = bucket.slot.load(Ordering::Relaxed, &guard);
                 if !entry_ptr.is_null() {
                     unsafe {
-                        drop(Box::from_raw(entry_ptr.as_raw() as *mut Entry<K, V>));
+                        drop(Box::from_raw(entry_ptr.as_raw()));
                     }
                 }
             }
@@ -762,10 +775,9 @@ where
     pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
-        let table = unsafe { &*table_ptr.as_raw() };
+        let _table = unsafe { &*table_ptr.as_raw() };
         HopscotchIter {
-            _map: self,
-            table,
+            map: self,
             bucket_idx: 0,
             guard,
         }
@@ -783,9 +795,8 @@ where
 }
 
 /// Iterator over HopscotchMap entries.
-pub struct HopscotchIter<'a, K, V, S> {
-    _map: &'a HopscotchMap<K, V, S>,
-    table: *const Table<K, V>,
+pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
+    map: &'a HopscotchMap<K, V, S>,
     bucket_idx: usize,
     guard: kovan::Guard,
 }
@@ -798,7 +809,8 @@ where
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let table = unsafe { &*self.table };
+        let table_ptr = self.map.table.load(Ordering::Acquire, &self.guard);
+        let table = unsafe { &*table_ptr.as_raw() };
 
         while self.bucket_idx < table.buckets.len() {
             let bucket = table.get_bucket(self.bucket_idx);
@@ -815,7 +827,7 @@ where
 }
 
 /// Iterator over HopscotchMap keys.
-pub struct HopscotchKeys<'a, K, V, S> {
+pub struct HopscotchKeys<'a, K: 'static, V: 'static, S> {
     iter: HopscotchIter<'a, K, V, S>,
 }
 
@@ -877,15 +889,11 @@ impl<K, V, S> Drop for HopscotchMap<K, V, S> {
             let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
 
             if !entry_ptr.is_null() {
-                unsafe {
-                    drop(Box::from_raw(entry_ptr.as_raw() as *mut Entry<K, V>));
-                }
+                retire(entry_ptr.as_raw());
             }
         }
 
-        unsafe {
-            drop(Box::from_raw(table_ptr.as_raw() as *mut Table<K, V>));
-        }
+        retire(table_ptr.as_raw());
     }
 }
 

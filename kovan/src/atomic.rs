@@ -276,10 +276,7 @@ impl<'g, T> Shared<'g, T> {
 
 impl<'g, T> Clone for Shared<'g, T> {
     fn clone(&self) -> Self {
-        Self {
-            data: self.data,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 

@@ -1,5 +1,4 @@
-use kovan_mvcc::{KovanMVCC, Txn};
-use std::sync::Arc;
+use kovan_mvcc::KovanMVCC;
 
 #[test]
 fn test_single_txn_read_write() {

@@ -1,3 +1,4 @@
+#![doc(html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan.svg")]
 //! High-performance STM using Kovan for memory reclamation.
 //!
 //! # Architecture
@@ -39,7 +40,15 @@ impl Stm {
             global_clock: AtomicU64::new(0),
         }
     }
+}
 
+impl Default for Stm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Stm {
     /// Execute a closure atomically.
     ///
     /// This function handles transaction retries automatically.
@@ -47,6 +56,7 @@ impl Stm {
     /// # Example
     ///
     /// ```
+    /// use kovan_stm::Stm;
     /// let stm = Stm::new();
     /// let var = stm.tvar(10);
     ///

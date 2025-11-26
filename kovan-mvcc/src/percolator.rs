@@ -14,7 +14,15 @@ impl KovanMVCC {
     pub fn new() -> Self {
         Self::with_oracle(Arc::new(LocalTimestampOracle::new()))
     }
+}
 
+impl Default for KovanMVCC {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KovanMVCC {
     pub fn with_oracle(ts_oracle: Arc<dyn TimestampOracle>) -> Self {
         Self {
             storage: Arc::new(InMemoryStorage::new()),
@@ -62,30 +70,30 @@ impl Txn {
             attempts += 1;
 
             // 1. Check for locks with start_ts <= self.start_ts
-            if let Some(lock) = self.storage.get_lock(key) {
-                if lock.start_ts <= self.start_ts {
-                    // Key is locked by an active transaction that started before us.
-                    if lock.txn_id == self.txn_id {
-                        // Read-your-own-writes
-                        return self
-                            .writes
-                            .get(key)
-                            .and_then(|(_, v)| v.map(|arc| (*arc).clone()));
-                    }
-
-                    // Locked by another transaction.
-                    // Backoff and retry.
-                    if attempts < 5 {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                        continue;
-                    }
-
-                    eprintln!(
-                        "[READ_CONFLICT] key={} locked by txn={} at ts={}",
-                        key, lock.txn_id, lock.start_ts
-                    );
-                    return None; // Or Err("Locked")
+            if let Some(lock) = self.storage.get_lock(key)
+                && lock.start_ts <= self.start_ts
+            {
+                // Key is locked by an active transaction that started before us.
+                if lock.txn_id == self.txn_id {
+                    // Read-your-own-writes
+                    return self
+                        .writes
+                        .get(key)
+                        .and_then(|(_, v)| v.map(|arc| (*arc).clone()));
                 }
+
+                // Locked by another transaction.
+                // Backoff and retry.
+                if attempts < 5 {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+
+                eprintln!(
+                    "[READ_CONFLICT] key={} locked by txn={} at ts={}",
+                    key, lock.txn_id, lock.start_ts
+                );
+                return None; // Or Err("Locked")
             }
 
             // 2. Find latest write in CF_WRITE with commit_ts <= self.start_ts
@@ -175,25 +183,22 @@ impl Txn {
                 txn_id: self.txn_id,
                 start_ts: self.start_ts,
                 primary_key: primary_key.to_string(),
-                lock_type: lock_type,
+                lock_type,
                 short_value: None,
             };
 
-            if let Err(e) = self.storage.put_lock(&key, lock_info) {
-                // Failed to acquire lock (already locked by someone else)
-                return Err(e);
-            }
+            self.storage.put_lock(&key, lock_info)?;
 
             // 2. Check for write-write conflicts (CF_WRITE)
             // Now that we hold the lock, no one can commit a new version.
             // We check if anyone committed a version > start_ts.
-            if let Some((commit_ts, _)) = self.storage.get_latest_write(&key, u64::MAX) {
-                if commit_ts >= self.start_ts {
-                    // Conflict found!
-                    // Must release the lock we just acquired
-                    self.storage.delete_lock(&key);
-                    return Err(format!("Write conflict on key {}", key));
-                }
+            if let Some((commit_ts, _)) = self.storage.get_latest_write(&key, u64::MAX)
+                && commit_ts >= self.start_ts
+            {
+                // Conflict found!
+                // Must release the lock we just acquired
+                self.storage.delete_lock(&key);
+                return Err(format!("Write conflict on key {}", key));
             }
 
             // 3. Write Data (CF_DATA)
@@ -239,21 +244,21 @@ impl Txn {
                 continue;
             }
 
-            if let Some(lock) = self.storage.get_lock(&key) {
-                if lock.txn_id == self.txn_id {
-                    let kind = match lock_type {
-                        LockType::Put => WriteKind::Put,
-                        LockType::Delete => WriteKind::Delete,
-                    };
+            if let Some(lock) = self.storage.get_lock(&key)
+                && lock.txn_id == self.txn_id
+            {
+                let kind = match lock_type {
+                    LockType::Put => WriteKind::Put,
+                    LockType::Delete => WriteKind::Delete,
+                };
 
-                    let write_info = WriteInfo {
-                        start_ts: self.start_ts,
-                        kind,
-                    };
+                let write_info = WriteInfo {
+                    start_ts: self.start_ts,
+                    kind,
+                };
 
-                    self.storage.put_write(&key, commit_ts, write_info);
-                    self.storage.delete_lock(&key);
-                }
+                self.storage.put_write(&key, commit_ts, write_info);
+                self.storage.delete_lock(&key);
             }
         }
     }
@@ -261,12 +266,12 @@ impl Txn {
     fn rollback(&self) {
         for (key, _) in &self.writes {
             // Only remove our own locks
-            if let Some(lock) = self.storage.get_lock(&key) {
-                if lock.txn_id == self.txn_id {
-                    self.storage.delete_lock(&key);
-                    // Also delete data we wrote
-                    self.storage.delete_data(&key, self.start_ts);
-                }
+            if let Some(lock) = self.storage.get_lock(&key)
+                && lock.txn_id == self.txn_id
+            {
+                self.storage.delete_lock(&key);
+                // Also delete data we wrote
+                self.storage.delete_data(&key, self.start_ts);
             }
         }
     }

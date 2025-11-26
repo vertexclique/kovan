@@ -96,7 +96,7 @@ impl Handle {
     fn pin(&self) -> Guard {
         // Optimization: Cache slot selection for 100 operations
         let pin_count = self.pin_count.get();
-        if pin_count % 100 == 0 {
+        if pin_count.is_multiple_of(100) {
             let slot = Self::select_slot();
             self.slot.set(slot);
         }
@@ -297,7 +297,7 @@ static HANDLE: Handle = Handle::new();
 // Fall back to stable thread_local! macro
 #[cfg(not(feature = "nightly"))]
 thread_local! {
-    static HANDLE: Handle = Handle::new();
+    static HANDLE: Handle = const { Handle::new() };
 }
 
 /// Enter a critical section

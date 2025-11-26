@@ -1,12 +1,14 @@
 //! Memory reclamation trait and implementation
 
-use crate::retired::{NRefNode, RetiredNode};
+use crate::retired::RetiredNode;
 use alloc::boxed::Box;
 
 /// Trait for types that can be reclaimed
 ///
 /// Types implementing this trait can be safely retired and reclaimed
 /// by the memory reclamation system.
+/// # Safety
+/// Implementors must ensure that `reclaim` is safe to call when the object is no longer reachable.
 pub unsafe trait Reclaimable: Sized {
     /// Get a reference to the embedded RetiredNode
     fn retired_node(&self) -> &RetiredNode;
@@ -129,7 +131,7 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
                     }
 
                     // Free the NRefNode itself
-                    drop(Box::from_raw(node.nref_ptr as *mut NRefNode));
+                    drop(Box::from_raw(node.nref_ptr));
                 }
             }
         }

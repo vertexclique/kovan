@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 
 /// Unique ID for a TVar (memory address) to sort locks.
 type TVarId = usize;
+type Committer = Box<dyn Fn(&Box<dyn Any + Send>) + Send>;
 
 /// Internal entry for the Read Set.
 struct ReadEntry {
@@ -25,7 +26,7 @@ struct WriteEntry {
     /// The new value prepared for commit.
     new_node: Box<dyn Any + Send>,
     /// Function pointer to perform the actual swap and retirement type-safely.
-    committer: Box<dyn Fn(&Box<dyn Any + Send>) + Send>,
+    committer: Committer,
     /// Reference to the version lock atomic for locking.
     lock_atomic: *const AtomicU64,
 }
@@ -189,7 +190,7 @@ impl<'a> Transaction<'a> {
         });
 
         let entry = WriteEntry {
-            new_node: new_node,
+            new_node,
             committer,
             lock_atomic: &tvar.version_lock as *const _,
         };
@@ -217,7 +218,7 @@ impl<'a> Transaction<'a> {
         }
 
         // 1. Acquire Locks
-        for (_, entry) in &write_set {
+        for entry in write_set.values() {
             let lock_atomic = unsafe { &*entry.lock_atomic };
             let mut current = lock_atomic.load(Ordering::Acquire);
             loop {
@@ -262,7 +263,7 @@ impl<'a> Transaction<'a> {
 
         if !valid {
             // Release locks and abort
-            for (_, entry) in &write_set {
+            for entry in write_set.values() {
                 let lock_atomic = unsafe { &*entry.lock_atomic };
                 lock_atomic.fetch_and(!1, Ordering::Release);
             }

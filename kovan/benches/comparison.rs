@@ -41,9 +41,7 @@ mod kovan_bench {
                             let guard = pin();
                             let head = stack.load(Ordering::Acquire, &guard);
                             unsafe {
-                                (*node)
-                                    .next
-                                    .store(head.as_raw() as *mut Node, Ordering::Relaxed);
+                                (*node).next.store(head.as_raw(), Ordering::Relaxed);
                             }
 
                             match stack.compare_exchange(
@@ -79,9 +77,7 @@ mod kovan_bench {
                                 &guard,
                             ) {
                                 Ok(_) => {
-                                    unsafe {
-                                        retire(head.as_raw() as *mut Node);
-                                    }
+                                    retire(head.as_raw());
                                     break;
                                 }
                                 Err(_) => continue,
@@ -111,9 +107,7 @@ mod kovan_bench {
                 Ordering::Acquire,
                 &guard,
             ) {
-                Ok(old) => unsafe {
-                    retire(old.as_raw() as *mut Node);
-                },
+                Ok(old) => retire(old.as_raw()),
                 Err(_) => continue,
             }
         }
@@ -125,6 +119,7 @@ mod crossbeam_bench {
     use super::*;
     use crossbeam_epoch::{self as epoch, Atomic, Owned};
 
+    #[allow(dead_code)]
     pub struct Node {
         pub value: usize,
         pub next: Atomic<Node>,
@@ -212,7 +207,7 @@ mod crossbeam_bench {
         while let Some(head) = unsafe { stack.load(Ordering::Acquire, &guard).as_ref() } {
             let next = head.next.load(Ordering::Relaxed, &guard);
             match stack.compare_exchange(
-                unsafe { epoch::Shared::from(head as *const Node) },
+                epoch::Shared::from(head as *const Node),
                 next,
                 Ordering::Release,
                 Ordering::Acquire,
@@ -313,11 +308,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                                             &write_guard,
                                         );
                                         if !old.is_null() {
-                                            unsafe {
-                                                kovan::retire(
-                                                    old.as_raw() as *mut kovan_bench::Node
-                                                );
-                                            }
+                                            kovan::retire(old.as_raw());
                                         }
                                         drop(write_guard);
                                         // Recreate guard for continued reads
@@ -344,9 +335,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                         &guard,
                     );
                     if !old.is_null() {
-                        unsafe {
-                            kovan::retire(old.as_raw() as *mut kovan_bench::Node);
-                        }
+                        kovan::retire(old.as_raw());
                     }
                 });
             },

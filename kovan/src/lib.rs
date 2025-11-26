@@ -1,3 +1,4 @@
+#![doc(html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan.svg")]
 //! Kovan: High-performance wait-free memory reclamation for lock-free data structures.
 //! Bounded memory usage, predictable latency.
 //!

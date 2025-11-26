@@ -1,5 +1,4 @@
 use kovan_mvcc::KovanMVCC;
-use std::sync::Arc;
 
 #[test]
 fn test_large_blob_handling() {

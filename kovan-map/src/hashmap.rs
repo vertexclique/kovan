@@ -68,7 +68,7 @@ struct Node<K, V> {
 }
 
 /// High-Performance Lock-Free Map.
-pub struct HashMap<K, V, S = FixedState> {
+pub struct HashMap<K: 'static, V: 'static, S = FixedState> {
     buckets: Box<[Atomic<Node<K, V>>]>,
     mask: usize,
     hasher: S,
@@ -460,7 +460,7 @@ where
 }
 
 /// Iterator over HashMap entries.
-pub struct Iter<'a, K, V, S> {
+pub struct Iter<'a, K: 'static, V: 'static, S> {
     map: &'a HashMap<K, V, S>,
     bucket_idx: usize,
     current: *const Node<K, V>,
@@ -498,7 +498,7 @@ where
 }
 
 /// Iterator over HashMap keys.
-pub struct Keys<'a, K, V, S> {
+pub struct Keys<'a, K: 'static, V: 'static, S> {
     iter: Iter<'a, K, V, S>,
 }
 
@@ -555,7 +555,7 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
                     let node = current.deref();
                     let next = node.next.load(Ordering::Relaxed, &guard);
                     // Drop the Box manually
-                    drop(Box::from_raw(current.as_raw() as *mut Node<K, V>));
+                    retire(current.as_raw());
                     current = next;
                 }
             }

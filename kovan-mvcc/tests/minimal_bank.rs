@@ -27,11 +27,11 @@ fn test_simple_concurrent_transfer() {
         // Changed loop variable to _
         let db_clone = db.clone();
         handles.push(thread::spawn(move || {
-            let mut rng = rand::thread_rng(); // Initialize random number generator
+            let mut rng = rand::rng(); // Initialize random number generator
             for _ in 0..num_iterations {
                 // Changed loop variable to _
-                let from_idx = rng.gen_range(0..num_accounts);
-                let to_idx = rng.gen_range(0..num_accounts);
+                let from_idx = rng.random_range(0..num_accounts);
+                let to_idx = rng.random_range(0..num_accounts);
                 if from_idx == to_idx {
                     continue;
                 } // Skip if source and destination are the same

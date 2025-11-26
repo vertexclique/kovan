@@ -47,7 +47,15 @@ impl<T: 'static> TreiberStack<T> {
             head: Atomic::null(),
         }
     }
+}
 
+impl<T: 'static> Default for TreiberStack<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: 'static> TreiberStack<T> {
     pub fn push(&self, value: T, guard: &Guard) {
         let node = Node::new(value);
 
@@ -93,7 +101,7 @@ impl<T: 'static> TreiberStack<T> {
                     let value = unsafe { core::ptr::read(&(*head.as_raw()).value) };
 
                     // Retire the node (will be reclaimed when safe)
-                    retire(head.as_raw() as *mut Node<T>);
+                    retire(head.as_raw());
 
                     return Some(value);
                 }

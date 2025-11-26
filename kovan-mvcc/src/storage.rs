@@ -70,6 +70,12 @@ impl InMemoryStorage {
     }
 }
 
+impl Default for InMemoryStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Storage for InMemoryStorage {
     fn get_lock(&self, key: &str) -> Option<LockInfo> {
         self.locks.get(key)
@@ -104,17 +110,16 @@ impl Storage for InMemoryStorage {
         // Wait, we inserted `Arc`. We have a clone of it (or we can clone before inserting).
         // Actually, we construct `Arc` to insert.
 
-        let map_mutex = loop {
-            if let Some(mutex) = self.writes.get(key) {
-                break mutex;
-            }
+        let map_mutex = if let Some(mutex) = self.writes.get(key) {
+            mutex
+        } else {
             let new_map = Arc::new(Mutex::new(BTreeMap::new()));
             match self
                 .writes
                 .insert_if_absent(key.to_string(), new_map.clone())
             {
-                None => break new_map,            // Inserted
-                Some(existing) => break existing, // Lost race, use existing
+                None => new_map,            // Inserted
+                Some(existing) => existing, // Lost race, use existing
             }
         };
 
@@ -135,14 +140,13 @@ impl Storage for InMemoryStorage {
     }
 
     fn put_data(&self, key: &str, start_ts: u64, value: Value) {
-        let map_mutex = loop {
-            if let Some(mutex) = self.data.get(key) {
-                break mutex;
-            }
+        let map_mutex = if let Some(mutex) = self.data.get(key) {
+            mutex
+        } else {
             let new_map = Arc::new(Mutex::new(BTreeMap::new()));
             match self.data.insert_if_absent(key.to_string(), new_map.clone()) {
-                None => break new_map,
-                Some(existing) => break existing,
+                None => new_map,
+                Some(existing) => existing,
             }
         };
 

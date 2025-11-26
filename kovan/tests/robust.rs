@@ -88,7 +88,7 @@ fn test_adaptive_slot_selection() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut RobustNode);
+                        retire(old.as_raw());
                     }
                 }
             }
@@ -110,7 +110,7 @@ fn test_adaptive_slot_selection() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut RobustNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -162,7 +162,7 @@ fn test_stalled_thread_handling() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut RobustNode);
+                        retire(old.as_raw());
                     }
                 }
 
@@ -191,7 +191,7 @@ fn test_stalled_thread_handling() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut RobustNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -241,7 +241,7 @@ fn test_bounded_memory_with_stalls() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut RobustNode);
+                        retire(old.as_raw());
                     }
                 }
 
@@ -273,7 +273,7 @@ fn test_bounded_memory_with_stalls() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut RobustNode);
+            retire(old.as_raw());
         }
     }
 }

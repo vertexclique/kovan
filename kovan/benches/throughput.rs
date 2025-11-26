@@ -104,9 +104,7 @@ fn bench_atomic_load(c: &mut Criterion) {
         &guard,
     );
     if !old.is_null() {
-        unsafe {
-            retire(old.as_raw() as *mut Node);
-        }
+        retire(old.as_raw());
     }
 
     group.finish();
@@ -136,9 +134,7 @@ fn bench_atomic_swap(c: &mut Criterion) {
                                         &guard,
                                     );
                                     if !old.is_null() {
-                                        unsafe {
-                                            retire(old.as_raw() as *mut Node);
-                                        }
+                                        retire(old.as_raw());
                                     }
                                 }
                             })
@@ -157,9 +153,7 @@ fn bench_atomic_swap(c: &mut Criterion) {
                         &guard,
                     );
                     if !old.is_null() {
-                        unsafe {
-                            retire(old.as_raw() as *mut Node);
-                        }
+                        retire(old.as_raw());
                     }
                 });
             },
@@ -194,9 +188,7 @@ fn bench_contention(c: &mut Criterion) {
                                         &guard,
                                     );
                                     if !old.is_null() {
-                                        unsafe {
-                                            retire(old.as_raw() as *mut Node);
-                                        }
+                                        retire(old.as_raw());
                                     }
                                 }
                             })
@@ -215,9 +207,7 @@ fn bench_contention(c: &mut Criterion) {
                         &guard,
                     );
                     if !old.is_null() {
-                        unsafe {
-                            retire(old.as_raw() as *mut Node);
-                        }
+                        retire(old.as_raw());
                     }
                 });
             },

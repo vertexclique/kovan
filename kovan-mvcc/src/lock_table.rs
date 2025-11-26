@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 /// Lock information stored separately from version chains
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
@@ -31,7 +29,15 @@ impl LockTable {
             locks: HashMap::new(),
         }
     }
+}
 
+impl Default for LockTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LockTable {
     /// Try to acquire a lock on a key
     /// Returns Ok(()) if successful, Err if key is already locked
     pub fn try_lock(&self, key: &str, lock_info: LockInfo) -> Result<(), String> {
@@ -97,7 +103,9 @@ mod tests {
         assert!(table.try_lock("key1", lock.clone()).is_ok());
 
         // Cannot lock an already locked key
-        assert!(table.try_lock("key1", lock.clone()).is_err());
+        let mut lock2 = lock.clone();
+        lock2.txn_id = 2;
+        assert!(table.try_lock("key1", lock2).is_err());
 
         // Can get lock info
         assert!(table.get_lock("key1").is_some());

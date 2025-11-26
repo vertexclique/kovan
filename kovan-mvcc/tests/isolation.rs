@@ -1,7 +1,6 @@
 use kovan_mvcc::KovanMVCC;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn test_snapshot_isolation_readers_ignore_new_commits() {

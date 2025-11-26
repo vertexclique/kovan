@@ -54,7 +54,7 @@ fn test_high_contention() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut StressNode);
+                        retire(old.as_raw());
                     }
                 }
 
@@ -84,7 +84,7 @@ fn test_high_contention() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut StressNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -119,7 +119,7 @@ fn test_read_heavy_workload() {
 
                     if !old.is_null() {
                         unsafe {
-                            retire(old.as_raw() as *mut StressNode);
+                            retire(old.as_raw());
                         }
                     }
                 } else {
@@ -154,7 +154,7 @@ fn test_read_heavy_workload() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut StressNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -191,7 +191,7 @@ fn test_oversubscription() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut StressNode);
+                        retire(old.as_raw());
                     }
                 }
             }
@@ -222,7 +222,7 @@ fn test_oversubscription() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut StressNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -304,7 +304,7 @@ fn test_long_running_guards() {
 
                 if !old.is_null() {
                     unsafe {
-                        retire(old.as_raw() as *mut StressNode);
+                        retire(old.as_raw());
                     }
                 }
             }
@@ -335,7 +335,7 @@ fn test_long_running_guards() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut StressNode);
+            retire(old.as_raw());
         }
     }
 }
@@ -370,7 +370,7 @@ fn test_burst_workload() {
 
                     if !old.is_null() {
                         unsafe {
-                            retire(old.as_raw() as *mut StressNode);
+                            retire(old.as_raw());
                         }
                     }
                 }
@@ -396,7 +396,7 @@ fn test_burst_workload() {
     );
     if !old.is_null() {
         unsafe {
-            retire(old.as_raw() as *mut StressNode);
+            retire(old.as_raw());
         }
     }
 }
