@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 /// Lock information stored separately from version chains
-/// This is TiKV's CF_LOCK approach
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
     pub txn_id: u128,
     pub start_ts: u64,
     pub primary_key: String,
     pub lock_type: LockType,
-    /// For short value optimization: if value is small, embed it in lock
-    pub short_value: Option<Arc<Vec<u8>>>,
+    /// Optimization: Store small values directly in lock
+    pub short_value: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,8 +19,8 @@ pub enum LockType {
 
 use kovan_map::HashMap;
 
-/// Separate lock table (CF_LOCK in TiKV)
-/// Locks are independent of version chains, preventing intent overwriting bugs
+/// Lock Table
+/// Manages active locks for transactions.
 pub struct LockTable {
     locks: HashMap<String, LockInfo>,
 }

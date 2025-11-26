@@ -1,12 +1,12 @@
 use crate::lock_table::{LockInfo, LockType};
-use crate::storage::{Storage, Value, WriteInfo, WriteKind};
+use crate::storage::{InMemoryStorage, Storage, Value, WriteInfo, WriteKind};
 use crate::timestamp_oracle::{LocalTimestampOracle, TimestampOracle};
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
 
 /// KovanMVCC (Percolator-style)
 pub struct KovanMVCC {
-    storage: Arc<Storage>,
+    storage: Arc<dyn Storage>,
     ts_oracle: Arc<dyn TimestampOracle>,
 }
 
@@ -17,8 +17,15 @@ impl KovanMVCC {
 
     pub fn with_oracle(ts_oracle: Arc<dyn TimestampOracle>) -> Self {
         Self {
-            storage: Arc::new(Storage::new()),
+            storage: Arc::new(InMemoryStorage::new()),
             ts_oracle,
+        }
+    }
+
+    pub fn with_storage(storage: Arc<dyn Storage>) -> Self {
+        Self {
+            storage,
+            ts_oracle: Arc::new(LocalTimestampOracle::new()),
         }
     }
 
@@ -39,7 +46,7 @@ impl KovanMVCC {
 pub struct Txn {
     txn_id: u128,
     start_ts: u64,
-    storage: Arc<Storage>,
+    storage: Arc<dyn Storage>,
     ts_oracle: Arc<dyn TimestampOracle>,
     /// Buffered writes: key -> (lock_type, value)
     writes: HopscotchMap<String, (LockType, Option<Value>)>,

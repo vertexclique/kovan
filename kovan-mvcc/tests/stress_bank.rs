@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::thread;
 
 const ACCOUNTS: usize = 10;
-const INITIAL_BALANCE: u64 = 100;
-const TRANSFERS: usize = 500;
+const INITIAL_BALANCE: u64 = 10000;
+const TRANSFERS: usize = 2000;
 const THREADS: usize = 10;
 
 #[test]

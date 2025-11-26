@@ -24,25 +24,43 @@ pub type Value = Arc<Vec<u8>>;
 use kovan_map::HashMap;
 use std::sync::Mutex;
 
-/// Storage Engine
-/// Simulates a Key-Value store with Column Families
-pub struct Storage {
+/// Storage Trait
+/// Defines the interface for the underlying storage engine.
+pub trait Storage: Send + Sync {
+    /// Get a lock for a key
+    fn get_lock(&self, key: &str) -> Option<LockInfo>;
+    /// Acquire a lock for a key
+    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), String>;
+    /// Release a lock for a key
+    fn delete_lock(&self, key: &str);
+
+    /// Get the latest write for a key with commit_ts <= ts
+    fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)>;
+    /// Record a write (commit)
+    fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo);
+
+    /// Get data for a key at a specific start_ts
+    fn get_data(&self, key: &str, start_ts: u64) -> Option<Value>;
+    /// Write data for a key at a specific start_ts
+    fn put_data(&self, key: &str, start_ts: u64, value: Value);
+    /// Delete data for a key at a specific start_ts
+    fn delete_data(&self, key: &str, start_ts: u64);
+}
+
+/// In-Memory Storage Implementation
+/// Uses HashMap for concurrent access.
+pub struct InMemoryStorage {
     /// CF_LOCK: Key -> LockInfo
-    /// Stores active locks during prewrite phase
     locks: HashMap<String, LockInfo>,
 
     /// CF_WRITE: Key -> CommitTS -> WriteInfo
-    /// Stores commit history. Used to find the latest committed version.
-    /// We use BTreeMap for range queries.
-    /// Wrapped in Arc<Mutex<...>> to allow atomic updates to the history for a given key.
     writes: HashMap<String, Arc<Mutex<BTreeMap<u64, WriteInfo>>>>,
 
     /// CF_DATA: Key -> StartTS -> Value
-    /// Stores the actual data.
     data: HashMap<String, Arc<Mutex<BTreeMap<u64, Value>>>>,
 }
 
-impl Storage {
+impl InMemoryStorage {
     pub fn new() -> Self {
         Self {
             locks: HashMap::new(),
@@ -50,14 +68,14 @@ impl Storage {
             data: HashMap::new(),
         }
     }
+}
 
-    // === CF_LOCK Operations ===
-
-    pub fn get_lock(&self, key: &str) -> Option<LockInfo> {
+impl Storage for InMemoryStorage {
+    fn get_lock(&self, key: &str) -> Option<LockInfo> {
         self.locks.get(key)
     }
 
-    pub fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), String> {
+    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), String> {
         match self.locks.insert_if_absent(key.to_string(), lock.clone()) {
             None => Ok(()), // Acquired
             Some(existing) => {
@@ -72,13 +90,11 @@ impl Storage {
         }
     }
 
-    pub fn delete_lock(&self, key: &str) {
+    fn delete_lock(&self, key: &str) {
         self.locks.remove(key);
     }
 
-    // === CF_WRITE Operations ===
-
-    pub fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo) {
+    fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo) {
         // We use get_or_insert logic manually with insert_if_absent because we need Arc<Mutex>
         // Actually, we can use insert_if_absent.
         // If it exists, we get the existing Arc<Mutex>.
@@ -107,7 +123,7 @@ impl Storage {
     }
 
     /// Find the latest write with commit_ts <= ts
-    pub fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
+    fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
         if let Some(map_mutex) = self.writes.get(key) {
             let map = map_mutex.lock().unwrap();
             // range(..=ts) gives all entries with key <= ts
@@ -118,9 +134,7 @@ impl Storage {
         }
     }
 
-    // === CF_DATA Operations ===
-
-    pub fn put_data(&self, key: &str, start_ts: u64, value: Value) {
+    fn put_data(&self, key: &str, start_ts: u64, value: Value) {
         let map_mutex = loop {
             if let Some(mutex) = self.data.get(key) {
                 break mutex;
@@ -136,7 +150,7 @@ impl Storage {
         map.insert(start_ts, value);
     }
 
-    pub fn get_data(&self, key: &str, start_ts: u64) -> Option<Value> {
+    fn get_data(&self, key: &str, start_ts: u64) -> Option<Value> {
         if let Some(map_mutex) = self.data.get(key) {
             let map = map_mutex.lock().unwrap();
             map.get(&start_ts).cloned()
@@ -145,7 +159,7 @@ impl Storage {
         }
     }
 
-    pub fn delete_data(&self, key: &str, start_ts: u64) {
+    fn delete_data(&self, key: &str, start_ts: u64) {
         if let Some(map_mutex) = self.data.get(key) {
             let mut map = map_mutex.lock().unwrap();
             map.remove(&start_ts);
