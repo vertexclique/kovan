@@ -1,7 +1,7 @@
 use crate::lock_table::{LockInfo, LockType};
 use crate::storage::{Storage, Value, WriteInfo, WriteKind};
 use crate::timestamp_oracle::{LocalTimestampOracle, TimestampOracle};
-use std::collections::HashMap;
+use kovan_map::HopscotchMap;
 use std::sync::Arc;
 
 /// KovanMVCC (Percolator-style)
@@ -30,7 +30,7 @@ impl KovanMVCC {
             start_ts,
             storage: self.storage.clone(),
             ts_oracle: self.ts_oracle.clone(),
-            writes: HashMap::new(),
+            writes: HopscotchMap::new(),
             primary_key: None,
         }
     }
@@ -42,7 +42,7 @@ pub struct Txn {
     storage: Arc<Storage>,
     ts_oracle: Arc<dyn TimestampOracle>,
     /// Buffered writes: key -> (lock_type, value)
-    writes: HashMap<String, (LockType, Option<Value>)>,
+    writes: HopscotchMap<String, (LockType, Option<Value>)>,
     /// Primary key for 2PC
     primary_key: Option<String>,
 }
@@ -63,13 +63,12 @@ impl Txn {
                         return self
                             .writes
                             .get(key)
-                            .and_then(|(_, v)| v.as_ref())
-                            .map(|arc| (**arc).clone());
+                            .and_then(|(_, v)| v.map(|arc| (*arc).clone()));
                     }
 
                     // Locked by another transaction.
                     // Backoff and retry.
-                    if attempts < 50 {
+                    if attempts < 5 {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         continue;
                     }
@@ -83,7 +82,8 @@ impl Txn {
             }
 
             // 2. Find latest write in CF_WRITE with commit_ts <= self.start_ts
-            if let Some((commit_ts, write_info)) = self.storage.get_latest_write(key, self.start_ts)
+            if let Some((_commit_ts, write_info)) =
+                self.storage.get_latest_write(key, self.start_ts)
             {
                 match write_info.kind {
                     WriteKind::Put => {
@@ -155,18 +155,24 @@ impl Txn {
     }
 
     fn prewrite(&mut self, primary_key: &str) -> Result<(), String> {
-        for (key, (lock_type, value_opt)) in &self.writes {
+        // Sort keys to prevent deadlocks/livelocks
+        let mut keys: Vec<_> = self.writes.keys().collect();
+        keys.sort();
+
+        for key in keys {
+            let (lock_type, value_opt) = self.writes.get(&key).unwrap();
+
             // 1. Acquire Lock (CF_LOCK)
             // We must lock first to prevent race conditions with concurrent commits.
             let lock_info = LockInfo {
                 txn_id: self.txn_id,
                 start_ts: self.start_ts,
                 primary_key: primary_key.to_string(),
-                lock_type: *lock_type,
+                lock_type: lock_type,
                 short_value: None,
             };
 
-            if let Err(e) = self.storage.put_lock(key, lock_info) {
+            if let Err(e) = self.storage.put_lock(&key, lock_info) {
                 // Failed to acquire lock (already locked by someone else)
                 return Err(e);
             }
@@ -174,18 +180,18 @@ impl Txn {
             // 2. Check for write-write conflicts (CF_WRITE)
             // Now that we hold the lock, no one can commit a new version.
             // We check if anyone committed a version > start_ts.
-            if let Some((commit_ts, _)) = self.storage.get_latest_write(key, u64::MAX) {
+            if let Some((commit_ts, _)) = self.storage.get_latest_write(&key, u64::MAX) {
                 if commit_ts >= self.start_ts {
                     // Conflict found!
                     // Must release the lock we just acquired
-                    self.storage.delete_lock(key);
+                    self.storage.delete_lock(&key);
                     return Err(format!("Write conflict on key {}", key));
                 }
             }
 
             // 3. Write Data (CF_DATA)
             if let Some(value) = value_opt {
-                self.storage.put_data(key, self.start_ts, value.clone());
+                self.storage.put_data(&key, self.start_ts, value.clone());
             }
         }
         Ok(())
@@ -226,7 +232,7 @@ impl Txn {
                 continue;
             }
 
-            if let Some(lock) = self.storage.get_lock(key) {
+            if let Some(lock) = self.storage.get_lock(&key) {
                 if lock.txn_id == self.txn_id {
                     let kind = match lock_type {
                         LockType::Put => WriteKind::Put,
@@ -238,8 +244,8 @@ impl Txn {
                         kind,
                     };
 
-                    self.storage.put_write(key, commit_ts, write_info);
-                    self.storage.delete_lock(key);
+                    self.storage.put_write(&key, commit_ts, write_info);
+                    self.storage.delete_lock(&key);
                 }
             }
         }
@@ -248,11 +254,11 @@ impl Txn {
     fn rollback(&self) {
         for (key, _) in &self.writes {
             // Only remove our own locks
-            if let Some(lock) = self.storage.get_lock(key) {
+            if let Some(lock) = self.storage.get_lock(&key) {
                 if lock.txn_id == self.txn_id {
-                    self.storage.delete_lock(key);
+                    self.storage.delete_lock(&key);
                     // Also delete data we wrote
-                    self.storage.delete_data(key, self.start_ts);
+                    self.storage.delete_data(&key, self.start_ts);
                 }
             }
         }

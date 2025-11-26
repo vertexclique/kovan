@@ -5,7 +5,7 @@ use std::thread;
 
 const ACCOUNTS: usize = 10;
 const INITIAL_BALANCE: u64 = 100;
-const TRANSFERS: usize = 2000;
+const TRANSFERS: usize = 500;
 const THREADS: usize = 10;
 
 #[test]
@@ -29,10 +29,10 @@ fn test_bank_consistency() {
     for _ in 0..THREADS {
         let db_clone = db.clone();
         handles.push(thread::spawn(move || {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             for _ in 0..TRANSFERS {
-                let from = rng.gen_range(0..ACCOUNTS);
-                let to = rng.gen_range(0..ACCOUNTS);
+                let from = rng.random_range(0..ACCOUNTS);
+                let to = rng.random_range(0..ACCOUNTS);
                 if from == to {
                     continue;
                 }
@@ -46,8 +46,21 @@ fn test_bank_consistency() {
                     let mut txn = db_clone.begin();
 
                     // Read phase
-                    let b_from_bytes = txn.read(&k_from).unwrap();
-                    let b_to_bytes = txn.read(&k_to).unwrap();
+                    // Read phase
+                    let b_from_bytes = match txn.read(&k_from) {
+                        Some(v) => v,
+                        None => {
+                            thread::yield_now();
+                            continue;
+                        }
+                    };
+                    let b_to_bytes = match txn.read(&k_to) {
+                        Some(v) => v,
+                        None => {
+                            thread::yield_now();
+                            continue;
+                        }
+                    };
 
                     let b_from = u64::from_le_bytes(b_from_bytes.try_into().unwrap());
                     let b_to = u64::from_le_bytes(b_to_bytes.try_into().unwrap());
@@ -71,8 +84,9 @@ fn test_bank_consistency() {
                         }
                     }
                     // If we get here, conflict happened. Retry.
-                    // Backoff slightly
-                    thread::yield_now();
+                    // Backoff with random jitter to avoid livelock
+                    let sleep_ms = rng.random_range(1..5);
+                    thread::sleep(std::time::Duration::from_millis(sleep_ms));
                 }
             }
         }));

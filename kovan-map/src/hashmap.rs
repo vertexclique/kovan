@@ -78,7 +78,7 @@ pub struct HashMap<K, V, S = FixedState> {
 impl<K, V> HashMap<K, V, FixedState>
 where
     K: Hash + Eq + Clone + 'static,
-    V: Copy + 'static,
+    V: Clone + 'static,
 {
     /// Creates a new empty hash map with FoldHash (FixedState).
     pub fn new() -> Self {
@@ -89,7 +89,7 @@ where
 impl<K, V, S> HashMap<K, V, S>
 where
     K: Hash + Eq + Clone + 'static,
-    V: Copy + 'static,
+    V: Clone + 'static,
     S: BuildHasher,
 {
     /// Creates a new hash map with custom hasher.
@@ -134,7 +134,7 @@ where
                 let node = current.deref();
                 // Check hash first (integer compare is fast)
                 if node.hash == hash && node.key.borrow() == key {
-                    return Some(node.value);
+                    return Some(node.value.clone());
                 }
                 current = node.next.load(Ordering::Acquire, &guard);
             }
@@ -172,13 +172,13 @@ where
                     if node.hash == hash && node.key == key {
                         // Key matches. Replace node (COW style).
                         let next = node.next.load(Ordering::Relaxed, &guard);
-                        let old_value = node.value;
+                        let old_value = node.value.clone();
 
                         // Create new node pointing to existing next
                         let new_node = Box::into_raw(Box::new(Node {
                             hash,
                             key: key.clone(),
-                            value,
+                            value: value.clone(),
                             next: Atomic::new(next.as_raw()),
                         }));
 
@@ -212,7 +212,7 @@ where
             let new_node_ptr = Box::into_raw(Box::new(Node {
                 hash,
                 key: key.clone(),
-                value,
+                value: value.clone(),
                 next: Atomic::null(),
             }));
 
@@ -250,6 +250,74 @@ where
         }
     }
 
+    /// Insert a key-value pair only if the key does not exist.
+    /// Returns `None` if inserted, `Some(existing_value)` if the key already exists.
+    pub fn insert_if_absent(&self, key: K, value: V) -> Option<V> {
+        let hash = self.hasher.hash_one(&key);
+        let idx = self.get_bucket_idx(hash);
+        let bucket = self.get_bucket(idx);
+        let mut backoff = Backoff::new();
+
+        let guard = pin();
+
+        'outer: loop {
+            // 1. Search for existing key
+            let mut prev_link = bucket;
+            let mut current = prev_link.load(Ordering::Acquire, &guard);
+
+            while !current.is_null() {
+                unsafe {
+                    let node = current.deref();
+
+                    if node.hash == hash && node.key == key {
+                        // Key matches. Return existing value.
+                        return Some(node.value.clone());
+                    }
+
+                    prev_link = &node.next;
+                    current = node.next.load(Ordering::Acquire, &guard);
+                }
+            }
+
+            // 2. Key not found. Insert at TAIL (prev_link).
+            let new_node_ptr = Box::into_raw(Box::new(Node {
+                hash,
+                key: key.clone(),
+                value: value.clone(),
+                next: Atomic::null(),
+            }));
+
+            // Try to swap NULL -> NEW_NODE
+            match prev_link.compare_exchange(
+                unsafe { Shared::from_raw(core::ptr::null_mut()) },
+                unsafe { Shared::from_raw(new_node_ptr) },
+                Ordering::Release,
+                Ordering::Relaxed,
+                &guard,
+            ) {
+                Ok(_) => return None,
+                Err(actual_val) => {
+                    // Contention at the tail.
+                    unsafe {
+                        let actual_node = actual_val.deref();
+                        if actual_node.hash == hash && actual_node.key == key {
+                            // Race lost, key exists now. Return existing value.
+                            drop(Box::from_raw(new_node_ptr));
+                            return Some(actual_node.value.clone());
+                        }
+                    }
+
+                    // Otherwise, just retry the search/append loop
+                    unsafe {
+                        drop(Box::from_raw(new_node_ptr));
+                    }
+                    backoff.spin();
+                    continue 'outer;
+                }
+            }
+        }
+    }
+
     /// Remove a key-value pair.
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
@@ -273,7 +341,7 @@ where
 
                     if node.hash == hash && node.key.borrow() == key {
                         let next = node.next.load(Ordering::Acquire, &guard);
-                        let old_value = node.value;
+                        let old_value = node.value.clone();
 
                         match prev_link.compare_exchange(
                             current,
@@ -345,9 +413,118 @@ where
         }
     }
 
+    /// Returns true if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the number of elements in the map.
+    /// Note: This is an O(N) operation as it scans all buckets.
+    pub fn len(&self) -> usize {
+        let mut count = 0;
+        let guard = pin();
+        for bucket in self.buckets.iter() {
+            let mut current = bucket.load(Ordering::Acquire, &guard);
+            while !current.is_null() {
+                unsafe {
+                    let node = current.deref();
+                    count += 1;
+                    current = node.next.load(Ordering::Acquire, &guard);
+                }
+            }
+        }
+        count
+    }
+
+    /// Returns an iterator over the map entries.
+    /// Yields (K, V) clones.
+    pub fn iter(&self) -> Iter<'_, K, V, S> {
+        Iter {
+            map: self,
+            bucket_idx: 0,
+            current: core::ptr::null(),
+            guard: pin(),
+        }
+    }
+
+    /// Returns an iterator over the map keys.
+    /// Yields K clones.
+    pub fn keys(&self) -> Keys<'_, K, V, S> {
+        Keys { iter: self.iter() }
+    }
+
     /// Get the underlying hasher itself.
     pub fn hasher(&self) -> &S {
         &self.hasher
+    }
+}
+
+/// Iterator over HashMap entries.
+pub struct Iter<'a, K, V, S> {
+    map: &'a HashMap<K, V, S>,
+    bucket_idx: usize,
+    current: *const Node<K, V>,
+    guard: kovan::Guard,
+}
+
+impl<'a, K, V, S> Iterator for Iter<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if !self.current.is_null() {
+                unsafe {
+                    let node = &*self.current;
+                    // Advance current
+                    self.current = node.next.load(Ordering::Acquire, &self.guard).as_raw();
+                    return Some((node.key.clone(), node.value.clone()));
+                }
+            }
+
+            // Move to next bucket
+            if self.bucket_idx >= self.map.buckets.len() {
+                return None;
+            }
+
+            let bucket = unsafe { self.map.buckets.get_unchecked(self.bucket_idx) };
+            self.bucket_idx += 1;
+            self.current = bucket.load(Ordering::Acquire, &self.guard).as_raw();
+        }
+    }
+}
+
+/// Iterator over HashMap keys.
+pub struct Keys<'a, K, V, S> {
+    iter: Iter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for Keys<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(k, _)| k)
+    }
+}
+
+impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S>
+where
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
+    S: BuildHasher,
+{
+    type Item = (K, V);
+    type IntoIter = Iter<'a, K, V, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -355,7 +532,7 @@ where
 impl<K, V> Default for HashMap<K, V, FixedState>
 where
     K: Hash + Eq + Clone + 'static,
-    V: Copy + 'static,
+    V: Clone + 'static,
 {
     fn default() -> Self {
         Self::new()

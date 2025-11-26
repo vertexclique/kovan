@@ -752,6 +752,91 @@ where
 
         self.resizing.store(false, Ordering::Release);
     }
+    /// Returns an iterator over the map entries.
+    pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
+        let guard = pin();
+        let table_ptr = self.table.load(Ordering::Acquire, &guard);
+        let table = unsafe { &*table_ptr.as_raw() };
+        HopscotchIter {
+            _map: self,
+            table,
+            bucket_idx: 0,
+            guard,
+        }
+    }
+
+    /// Returns an iterator over the map keys.
+    pub fn keys(&self) -> HopscotchKeys<'_, K, V, S> {
+        HopscotchKeys { iter: self.iter() }
+    }
+
+    /// Get the underlying hasher.
+    pub fn hasher(&self) -> &S {
+        &self.hasher
+    }
+}
+
+/// Iterator over HopscotchMap entries.
+pub struct HopscotchIter<'a, K, V, S> {
+    _map: &'a HopscotchMap<K, V, S>,
+    table: *const Table<K, V>,
+    bucket_idx: usize,
+    guard: kovan::Guard,
+}
+
+impl<'a, K, V, S> Iterator for HopscotchIter<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let table = unsafe { &*self.table };
+
+        while self.bucket_idx < table.buckets.len() {
+            let bucket = table.get_bucket(self.bucket_idx);
+            self.bucket_idx += 1;
+
+            let entry_ptr = bucket.slot.load(Ordering::Acquire, &self.guard);
+            if !entry_ptr.is_null() {
+                let entry = unsafe { &*entry_ptr.as_raw() };
+                return Some((entry.key.clone(), entry.value.clone()));
+            }
+        }
+        None
+    }
+}
+
+/// Iterator over HopscotchMap keys.
+pub struct HopscotchKeys<'a, K, V, S> {
+    iter: HopscotchIter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for HopscotchKeys<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(k, _)| k)
+    }
+}
+
+impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>
+where
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
+    S: BuildHasher,
+{
+    type Item = (K, V);
+    type IntoIter = HopscotchIter<'a, K, V, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 enum InsertResult<V> {
