@@ -271,6 +271,12 @@ where
         }
     }
 
+    /// Insert a key-value pair only if the key does not exist.
+    /// Returns `None` if inserted, `Some(existing_value)` if the key already exists.
+    pub fn insert_if_absent(&self, key: K, value: V) -> Option<V> {
+        self.insert_impl(key, value, true)
+    }
+
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
