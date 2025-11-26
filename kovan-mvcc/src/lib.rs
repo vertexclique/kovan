@@ -1,4 +1,6 @@
-#![doc(html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan.svg")]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan-square.svg"
+)]
 //! # Kovan MVCC
 //!
 //! `kovan-mvcc` is a Multi-Version Concurrency Control (MVCC) implementation based on the Percolator model,

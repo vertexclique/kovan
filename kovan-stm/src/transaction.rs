@@ -220,7 +220,7 @@ impl<'a> Transaction<'a> {
         }
 
         // 1. Acquire Locks
-        for entry in write_set.values() {
+        for (id, entry) in &write_set {
             let lock_atomic = unsafe { &*entry.lock_atomic };
             let mut current = lock_atomic.load(Ordering::Acquire);
             loop {
@@ -239,11 +239,44 @@ impl<'a> Transaction<'a> {
                     Err(x) => current = x, // Retry CAS
                 }
             }
+
+            // Check if we read this variable. If so, validate version.
+            if let Some(read_entry) = self.read_set.get(id) {
+                // current is the value before we set bit 1
+                let locked_version = current;
+                if locked_version > read_entry.version {
+                    // Version changed since we read it -> Abort
+                    // We must release locks we already acquired!
+                    // But wait, we are in the middle of acquiring locks.
+                    // We need to release THIS lock and ALL PREVIOUS locks.
+
+                    // Release THIS lock
+                    lock_atomic.store(current, Ordering::Release);
+
+                    // Release PREVIOUS locks
+                    // We need to iterate write_set again up to this point?
+                    // Or just iterate all and release if locked by us?
+                    // Since we are iterating BTreeMap, order is deterministic.
+                    // We can iterate from start until `id`.
+
+                    for (prev_id, prev_entry) in &write_set {
+                        if prev_id == id {
+                            break;
+                        }
+                        let prev_lock = unsafe { &*prev_entry.lock_atomic };
+                        // Unlock: clear bit 1.
+                        prev_lock.fetch_and(!1, Ordering::Release);
+                    }
+
+                    return false;
+                }
+            }
         }
 
         // 2. Increment Global Clock
-        let global_ver = self.stm.global_clock.fetch_add(1, Ordering::AcqRel);
-        let write_version = global_ver + 1;
+        // We increment by 2 to keep the clock even (odd numbers indicate locks).
+        let global_ver = self.stm.global_clock.fetch_add(2, Ordering::AcqRel);
+        let write_version = global_ver + 2;
 
         // 3. Validate Read Set
         let mut valid = true;
