@@ -1,9 +1,9 @@
-mod api;
-mod mvcc_core;
-mod storage;
-mod transaction;
+mod timestamp_oracle;
+mod lock_table;
+pub mod storage;
+pub mod percolator;
 
-pub use crate::api::*;
-pub use crate::mvcc_core::*;
-pub use crate::storage::*;
-pub use crate::transaction::*;
+// Export KovanMVCC and Txn directly from percolator
+pub use crate::percolator::{KovanMVCC, Txn};
+pub use crate::timestamp_oracle::{TimestampOracle, LocalTimestampOracle, MockTimestampOracle};
+pub use crate::lock_table::{LockTable, LockInfo, LockType};

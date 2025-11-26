@@ -5,7 +5,8 @@ use std::thread;
 #[test]
 fn test_write_write_conflict() {
     let db = Arc::new(KovanMVCC::new());
-    let barrier = Arc::new(Barrier::new(2));
+    let barrier_start = Arc::new(Barrier::new(2));
+    let barrier_commit = Arc::new(Barrier::new(2));
 
     // Initial setup
     let mut t0 = db.begin();
@@ -13,26 +14,40 @@ fn test_write_write_conflict() {
     t0.commit().unwrap();
 
     let db1 = db.clone();
-    let b1 = barrier.clone();
+    let b_start1 = barrier_start.clone();
+    let b_commit1 = barrier_commit.clone();
     
     let h1 = thread::spawn(move || {
         let mut t1 = db1.begin();
-        // Acquire write lock/intent
-        t1.write("target", b"v1".to_vec()).expect("T1 should acquire lock");
-        b1.wait(); // Wait for T2 to try
-        // Hold lock...
-        thread::sleep(std::time::Duration::from_millis(50));
+        t1.write("target", b"v1".to_vec()).unwrap();
+        
+        // Wait for T2 to start
+        b_start1.wait();
+        
+        // T1 commits first
         t1.commit().unwrap();
+        
+        // Signal T2 that T1 has committed
+        b_commit1.wait();
     });
 
     let db2 = db.clone();
-    let b2 = barrier.clone();
+    let b_start2 = barrier_start.clone();
+    let b_commit2 = barrier_commit.clone();
+    
     let h2 = thread::spawn(move || {
-        b2.wait(); // Wait until T1 has written intent
         let mut t2 = db2.begin();
-        // Try to write same key
-        let res = t2.write("target", b"v2".to_vec());
-        // Should fail because T1 has an active intent
+        t2.write("target", b"v2".to_vec()).unwrap();
+        
+        // Signal T1 that T2 has started and written (locally)
+        b_start2.wait();
+        
+        // Wait for T1 to commit
+        b_commit2.wait();
+        
+        // T2 tries to commit. Should fail because T1 committed a newer version
+        // during T2's lifetime.
+        let res = t2.commit();
         assert!(res.is_err(), "T2 should fail due to write conflict");
     });
 
