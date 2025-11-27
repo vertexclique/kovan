@@ -93,24 +93,6 @@ kovan = { version = "0.1", features = ["nightly"] }
 kovan = { version = "0.1", features = ["robust"] }
 ```
 
-# TODO
-
-```
-  Root Cause is in MVCC Logic
-
-  Since the bug persists with crossbeam-epoch, the issue is in one of:
-  1. Conflict detection logic (storage.rs:44-86) - may miss concurrent writes
-  2. Intent resolution (storage.rs:115-169) - may have race conditions when intents get buried
-  3. Transaction state transitions (transaction.rs:74-106) - visibility issues despite SeqCst
-
-  The problem likely involves complex interactions between:
-  - Multiple concurrent transactions modifying the same keys
-  - Unresolved intents in the version chain
-  - The parallel commits protocol (Staging → resolving intents → Committed)
-
-  Further debugging would require tracing specific transaction sequences that create/destroy money to identify the exact race condition.
-```
-
 ## License
 
 Licensed under either of Apache License 2.0 or MIT license at your option.
