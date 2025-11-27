@@ -5,7 +5,7 @@
 //! - **Robust Concurrency**: Uses Copy-on-Move displacement to prevent Use-After-Free.
 //! - **Safe Resizing**: Uses a lightweight resize lock to prevent lost updates during migration.
 //! - **Memory reclamation**: Uses Kovan.
-//! - **Clone Support**: Supports V: Clone (e.g., Arc<T>) instead of just Copy.
+//! - **Clone Support**: Supports V: Clone (e.g., `Arc<T>`) instead of just Copy.
 
 extern crate alloc;
 

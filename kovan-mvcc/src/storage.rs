@@ -18,7 +18,7 @@ pub struct WriteInfo {
     pub kind: WriteKind,
 }
 
-/// The Value type for our storage (Arc<Vec<u8>> for efficient cloning)
+/// The Value type for our storage (`Arc<Vec<u8>>` for efficient cloning)
 pub type Value = Arc<Vec<u8>>;
 
 use kovan_map::HashMap;
