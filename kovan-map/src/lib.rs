@@ -1,3 +1,6 @@
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan-square.svg"
+)]
 //! A high-performance lock-free concurrent hash map built on top of the Kovan memory reclamation system.
 //!
 //! This crate provides two lock-free hash map implementations:

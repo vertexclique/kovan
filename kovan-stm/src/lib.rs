@@ -1,4 +1,6 @@
-#![doc(html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan.svg")]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan-square.svg"
+)]
 //! High-performance STM using Kovan for memory reclamation.
 //!
 //! # Architecture
