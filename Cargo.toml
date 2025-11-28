@@ -9,6 +9,7 @@ rust-version = "1.90"
 authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/vertexclique/kovan"
+exclude = ["model_chk"]
 
 [workspace.dependencies]
 kovan = { version = "0.1.3", path = "kovan" }

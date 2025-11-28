@@ -4,3 +4,6 @@ kovan-map/bench_*.png
 kovan-map/bench_show.py
 debug_mvcc.sh
 stress_bank.log
+model_chk/states/**
+model_chk/**.out
+.vscode/
