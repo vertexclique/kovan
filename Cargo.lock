@@ -254,6 +254,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kovan-channel"
+version = "0.1.3"
+dependencies = [
+ "crossbeam-utils",
+ "kovan",
+]
+
+[[package]]
 name = "kovan-map"
 version = "0.1.3"
 dependencies = [
