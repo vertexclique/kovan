@@ -1,5 +1,5 @@
 use crate::flavors::unbounded;
-use crate::signal::Signal;
+use crate::signal::{AsyncSignal, Notifier, Signal};
 use crossbeam_utils::Backoff;
 use std::collections::LinkedList;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,8 +10,8 @@ struct Channel<T: 'static> {
     receiver: unbounded::Receiver<T>,
     capacity: usize,
     len: AtomicUsize,
-    senders: Mutex<LinkedList<Arc<Signal>>>,
-    receivers: Mutex<LinkedList<Arc<Signal>>>,
+    senders: Mutex<LinkedList<Arc<dyn Notifier>>>,
+    receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
 }
 
 /// The sending half of a bounded channel.
@@ -112,9 +112,98 @@ impl<T: 'static> Sender<T> {
     /// Registers a signal for notification when space becomes available.
     ///
     /// This is used for `select!` implementation.
-    pub fn register_signal(&self, signal: Arc<Signal>) {
+    pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
         let mut senders = self.inner.senders.lock().unwrap();
         senders.push_back(signal);
+    }
+
+    /// Sends a message into the channel asynchronously.
+    pub async fn send_async(&self, t: T) {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct SendFuture<'a, T: 'static> {
+            sender: &'a Sender<T>,
+            t: Option<T>,
+            signal: Arc<AsyncSignal>,
+        }
+
+        impl<'a, T: 'static> Unpin for SendFuture<'a, T> {}
+
+        impl<'a, T: 'static> Future for SendFuture<'a, T> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let this = self.get_mut();
+                let len = this.sender.inner.len.load(Ordering::Relaxed);
+                if len < this.sender.inner.capacity
+                    && this
+                        .sender
+                        .inner
+                        .len
+                        .compare_exchange(len, len + 1, Ordering::Acquire, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    // Success, send the message
+                    let t = this.t.take().unwrap();
+                    this.sender.inner.sender.send(t);
+
+                    // Notify one receiver
+                    let mut receivers = this.sender.inner.receivers.lock().unwrap();
+                    if let Some(signal) = receivers.pop_front() {
+                        signal.notify();
+                    }
+
+                    return Poll::Ready(());
+                }
+
+                if this.signal.is_notified() {
+                    this.signal = Arc::new(AsyncSignal::new());
+                }
+                this.signal.register(cx.waker());
+
+                {
+                    let mut senders = this.sender.inner.senders.lock().unwrap();
+                    // Only push if full
+                    if this.sender.inner.len.load(Ordering::Relaxed) >= this.sender.inner.capacity {
+                        senders.push_back(this.signal.clone());
+                    }
+                }
+
+                // Re-check
+                let len = this.sender.inner.len.load(Ordering::Relaxed);
+                if len < this.sender.inner.capacity
+                    && this
+                        .sender
+                        .inner
+                        .len
+                        .compare_exchange(len, len + 1, Ordering::Acquire, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    // Success, send the message
+                    let t = this.t.take().unwrap();
+                    this.sender.inner.sender.send(t);
+
+                    // Notify one receiver
+                    let mut receivers = this.sender.inner.receivers.lock().unwrap();
+                    if let Some(signal) = receivers.pop_front() {
+                        signal.notify();
+                    }
+
+                    return Poll::Ready(());
+                }
+
+                Poll::Pending
+            }
+        }
+
+        SendFuture {
+            sender: self,
+            t: Some(t),
+            signal: Arc::new(AsyncSignal::new()),
+        }
+        .await
     }
 }
 
@@ -128,7 +217,7 @@ impl<T: 'static> Receiver<T> {
     /// Registers a signal for notification when a message arrives.
     ///
     /// This is used for `select!` implementation.
-    pub fn register_signal(&self, signal: Arc<Signal>) {
+    pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
         let mut receivers = self.inner.receivers.lock().unwrap();
         receivers.push_back(signal);
     }
@@ -159,14 +248,11 @@ impl<T: 'static> Receiver<T> {
             return Some(msg);
         }
 
-        let signal = Arc::new(Signal::new());
         loop {
+            let signal = Arc::new(Signal::new());
             // Register signal
             {
                 let mut receivers = self.inner.receivers.lock().unwrap();
-                // Only register if empty?
-                // Unbounded receiver returns None if empty.
-                // But we check `len` implicitly via `try_recv`.
                 receivers.push_back(signal.clone());
             }
 
@@ -181,6 +267,53 @@ impl<T: 'static> Receiver<T> {
                 return Some(msg);
             }
         }
+    }
+
+    /// Receives a message from the channel asynchronously.
+    pub async fn recv_async(&self) -> T {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct RecvFuture<'a, T: 'static> {
+            receiver: &'a Receiver<T>,
+            signal: Arc<AsyncSignal>,
+        }
+
+        impl<'a, T: 'static> Unpin for RecvFuture<'a, T> {}
+
+        impl<'a, T: 'static> Future for RecvFuture<'a, T> {
+            type Output = T;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let this = self.get_mut();
+                if let Some(msg) = this.receiver.try_recv() {
+                    return Poll::Ready(msg);
+                }
+
+                if this.signal.is_notified() {
+                    this.signal = Arc::new(AsyncSignal::new());
+                }
+                this.signal.register(cx.waker());
+
+                {
+                    let mut receivers = this.receiver.inner.receivers.lock().unwrap();
+                    receivers.push_back(this.signal.clone());
+                }
+
+                if let Some(msg) = this.receiver.try_recv() {
+                    return Poll::Ready(msg);
+                }
+
+                Poll::Pending
+            }
+        }
+
+        RecvFuture {
+            receiver: self,
+            signal: Arc::new(AsyncSignal::new()),
+        }
+        .await
     }
 }
 

@@ -3,7 +3,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-pub(crate) use crate::signal::Signal;
+use crate::signal::{AsyncSignal, Notifier, Signal};
 use std::collections::LinkedList;
 use std::sync::Mutex;
 
@@ -24,7 +24,7 @@ impl<T> Node<T> {
 pub(crate) struct Channel<T: 'static> {
     head: Atomic<Node<T>>,
     tail: Atomic<Node<T>>,
-    receivers: Mutex<LinkedList<Arc<Signal>>>,
+    receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
 }
 
 impl<T: 'static> Channel<T> {
@@ -221,13 +221,14 @@ impl<T: 'static> Receiver<T> {
     }
 
     /// Receives a message from the channel, blocking if empty.
+    /// Receives a message from the channel, blocking if empty.
     pub fn recv(&self) -> Option<T> {
         if let Some(msg) = self.try_recv() {
             return Some(msg);
         }
 
-        let signal = Arc::new(Signal::new());
         loop {
+            let signal = Arc::new(Signal::new());
             // Register signal
             {
                 let mut receivers = self.inner.receivers.lock().unwrap();
@@ -244,18 +245,8 @@ impl<T: 'static> Receiver<T> {
             signal.wait();
 
             // Woken up, try to receive
-            match self.try_recv() {
-                Some(msg) => return Some(msg),
-                None => {
-                    // Spurious wake or stolen?
-                    // Reset signal?
-                    // Signal is one-shot in current impl?
-                    // No, state is AtomicUsize.
-                    // We should create new signal or reset it?
-                    // For simplicity, let's loop.
-                    // But we need to re-register if we want to wait again.
-                    // The sender pops the signal. So we need to re-register.
-                }
+            if let Some(msg) = self.try_recv() {
+                return Some(msg);
             }
         }
     }
@@ -272,8 +263,65 @@ impl<T: 'static> Receiver<T> {
     /// Registers a signal for notification when a message arrives.
     ///
     /// This is used for `select!` implementation.
-    pub fn register_signal(&self, signal: Arc<Signal>) {
+    /// Registers a signal for notification when a message arrives.
+    ///
+    /// This is used for `select!` implementation.
+    pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
         let mut receivers = self.inner.receivers.lock().unwrap();
         receivers.push_back(signal);
+    }
+
+    /// Receives a message from the channel asynchronously.
+    pub async fn recv_async(&self) -> T {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct RecvFuture<'a, T: 'static> {
+            receiver: &'a Receiver<T>,
+            signal: Arc<AsyncSignal>,
+        }
+
+        impl<'a, T: 'static> Unpin for RecvFuture<'a, T> {}
+
+        impl<'a, T: 'static> Future for RecvFuture<'a, T> {
+            type Output = T;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let this = self.get_mut();
+                if let Some(msg) = this.receiver.try_recv() {
+                    return Poll::Ready(msg);
+                }
+
+                if this.signal.is_notified() {
+                    // We were notified but failed to get message (stolen).
+                    // We need a new signal.
+                    this.signal = Arc::new(AsyncSignal::new());
+                }
+
+                this.signal.register(cx.waker());
+
+                // Register signal
+                // Note: This might register duplicates if polled spuriously.
+                // But AsyncSignal handles multiple notifies.
+                {
+                    let mut receivers = this.receiver.inner.receivers.lock().unwrap();
+                    receivers.push_back(this.signal.clone());
+                }
+
+                // Re-check
+                if let Some(msg) = this.receiver.try_recv() {
+                    return Poll::Ready(msg);
+                }
+
+                Poll::Pending
+            }
+        }
+
+        RecvFuture {
+            receiver: self,
+            signal: Arc::new(AsyncSignal::new()),
+        }
+        .await
     }
 }

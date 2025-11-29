@@ -44,8 +44,8 @@ fn test_threads() {
 
     received.sort();
     assert_eq!(received.len(), 200);
-    for i in 0..200 {
-        assert_eq!(received[i], i);
+    for (i, &item) in received.iter().enumerate() {
+        assert_eq!(item, i);
     }
 }
 
@@ -63,4 +63,16 @@ fn test_recv_blocking() {
     // We haven't implemented blocking recv yet, but `recv` spins.
     assert_eq!(r_clone.recv(), Some(42));
     t.join().unwrap();
+}
+
+#[test]
+fn test_receiver_clone() {
+    let (s, r) = unbounded();
+    let r2 = r.clone();
+
+    s.send(1);
+    s.send(2);
+
+    assert_eq!(r.recv(), Some(1));
+    assert_eq!(r2.recv(), Some(2));
 }

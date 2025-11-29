@@ -60,7 +60,7 @@ fn test_bounded_threads() {
 
     received.sort();
     assert_eq!(received.len(), 200);
-    for i in 0..200 {
-        assert_eq!(received[i], i);
+    for (i, &item) in received.iter().enumerate() {
+        assert_eq!(item, i);
     }
 }
