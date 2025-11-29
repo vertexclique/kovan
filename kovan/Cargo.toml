@@ -1,0 +1,45 @@
+[package]
+name = "kovan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency."
+keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
+categories = ["concurrency", "memory-management", "no-std"]
+
+exclude = ["model_chk"]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["-C", "target-feature=+cmpxchg16b"]
+
+[lib]
+name = "kovan"
+path = "src/lib.rs"
+
+[features]
+default = []
+robust = [] # Enable robustness extensions (to have stalled thread detection).
+nightly = [
+] # Enable nightly-only optimizations (e.g. faster thread-local access).
+
+[dependencies]
+once_cell = { version = "1.21", default-features = false, features = ["alloc"] }
+portable-atomic = { version = "1.11.1", default-features = false, features = [
+    "require-cas",
+    "fallback",
+] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+crossbeam-epoch = "0.9"
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false

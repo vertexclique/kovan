@@ -95,4 +95,4 @@ kovan = { version = "0.1", features = ["robust"] }
 
 ## License
 
-Licensed under either of Apache License 2.0 or MIT license at your option.
+Licensed under Apache License 2.0.

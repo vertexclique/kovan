@@ -1,0 +1,23 @@
+[package]
+name = "kovan-mvcc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-Version Concurrency Control (MVCC) implementation based on the Percolator model using Kovan"
+keywords = ["concurrency", "mvcc", "transaction", "percolator", "database"]
+categories = ["concurrency", "database-implementations"]
+
+[lib]
+name = "kovan_mvcc"
+path = "src/lib.rs"
+
+[dependencies]
+uuid = { version = "1.18", features = ["v4"] }
+kovan = { workspace = true }
+kovan-map = { workspace = true }
+
+[dev-dependencies]
+rand = "0.9"

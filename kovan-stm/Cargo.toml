@@ -1,0 +1,19 @@
+[package]
+name = "kovan-stm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Software Transactional Memory (STM) implementation using Kovan for memory reclamation"
+keywords = ["concurrency", "stm", "transaction", "atomic"]
+categories = ["concurrency", "data-structures"]
+
+[lib]
+name = "kovan_stm"
+path = "src/lib.rs"
+
+[dependencies]
+kovan = { workspace = true }
+kovan-map = { workspace = true }

@@ -1,0 +1,30 @@
+[package]
+name = "kovan-map"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lock-free concurrent hash maps using kovan memory reclamation"
+keywords = ["concurrency", "hashmap", "lock-free", "wait-free"]
+categories = ["concurrency", "data-structures", "no-std"]
+
+[lib]
+name = "kovan_map"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+kovan = { workspace = true }
+foldhash = { version = "0.2" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "perf"
+harness = false
