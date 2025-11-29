@@ -101,15 +101,6 @@ impl Storage for InMemoryStorage {
     }
 
     fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo) {
-        // We use get_or_insert logic manually with insert_if_absent because we need Arc<Mutex>
-        // Actually, we can use insert_if_absent.
-        // If it exists, we get the existing Arc<Mutex>.
-        // If not, we insert new one.
-        // But insert_if_absent returns Option<V>.
-        // If None, we inserted. But we don't have the reference to what we inserted?
-        // Wait, we inserted `Arc`. We have a clone of it (or we can clone before inserting).
-        // Actually, we construct `Arc` to insert.
-
         let map_mutex = if let Some(mutex) = self.writes.get(key) {
             mutex
         } else {
