@@ -3,7 +3,7 @@ resolver = "2"
 members = ["kovan", "kovan-channel", "kovan-map", "kovan-mvcc", "kovan-stm"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
@@ -12,11 +12,11 @@ repository = "https://github.com/vertexclique/kovan"
 exclude = ["model_chk"]
 
 [workspace.dependencies]
-kovan = { version = "0.1.3", path = "kovan" }
-kovan-channel = { version = "0.1.3", path = "kovan-channel" }
-kovan-map = { version = "0.1.3", path = "kovan-map" }
-kovan-mvcc = { version = "0.1.3", path = "kovan-mvcc" }
-kovan-stm = { version = "0.1.3", path = "kovan-stm" }
+kovan = { version = "0.1.4", path = "kovan" }
+kovan-channel = { version = "0.1.4", path = "kovan-channel" }
+kovan-map = { version = "0.1.4", path = "kovan-map" }
+kovan-mvcc = { version = "0.1.4", path = "kovan-mvcc" }
+kovan-stm = { version = "0.1.4", path = "kovan-stm" }
 
 [workspace.metadata.docs.rs]
 rustdoc-args = ["-C", "target-feature=+cmpxchg16b"]

@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "kovan"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "criterion",
  "crossbeam-epoch",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "kovan-channel"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "crossbeam-utils",
  "futures",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "kovan-map"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "criterion",
  "foldhash",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "kovan-mvcc"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "kovan",
  "kovan-map",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "kovan-stm"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "kovan",
  "kovan-map",

@@ -40,17 +40,6 @@ impl<T: 'static> Channel<T> {
 
 impl<T: 'static> Drop for Channel<T> {
     fn drop(&mut self) {
-        // We need to drop all nodes in the channel
-        // Since we are in Drop, we have exclusive access, but we need to be careful with kovan reclamation
-        // Ideally, we should pop everything.
-        // However, kovan relies on `retire` which defers reclamation.
-        // If we just drop the Channel, the nodes might still be referenced by some stalled threads?
-        // No, if we are dropping Channel, there are no more references to it (Arc count 0).
-        // But there might be active guards referencing nodes.
-        // We should walk the list and retire everything?
-        // Or just let it leak? No, that's bad.
-        // We should traverse and drop.
-
         let guard = pin();
         let mut curr = self.head.load(Ordering::Relaxed, &guard);
 
