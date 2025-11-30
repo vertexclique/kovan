@@ -1,0 +1,16 @@
+[package]
+name = "kovan-queue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-performance queue primitives and disruptor implementation for Kovan."
+keywords = ["concurrency", "queue", "disruptor", "lock-free"]
+categories = ["concurrency", "data-structures", "no-std"]
+
+[dependencies]
+cuneiform = "0.1"
+crossbeam-utils = "0.8"
+kovan = { workspace = true }
