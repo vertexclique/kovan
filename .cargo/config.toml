@@ -1,5 +1,13 @@
-[build]
+# Enable CMPXCHG16B for 128-bit atomics on x86-64 targets only.
+# aarch64 has native 128-bit atomics (LDXP/STXP, CASP) without needing target-feature flags.
+[target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-feature=+cmpxchg16b"]
 
-[target.x86_64-unknown-linux-gnu]
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-feature=+cmpxchg16b"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+cmpxchg16b"]
+
+[target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+cmpxchg16b"]

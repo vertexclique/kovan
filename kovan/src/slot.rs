@@ -6,12 +6,12 @@
 use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
 
-// Use AtomicU128 from portable_atomic when available
-// On platforms without native 128-bit atomics, this will use a fallback
-#[cfg(target_has_atomic = "128")]
-use core::sync::atomic::AtomicU128;
-
-#[cfg(not(target_has_atomic = "128"))]
+// Always use portable_atomic for AtomicU128.
+// core::sync::atomic::AtomicU128 requires #![feature(integer_atomics)] (unstable).
+// portable_atomic uses native hardware instructions where available:
+// - aarch64: LDXP/STXP (LL/SC) or CASP — lock-free, always lock-free
+// - x86-64: CMPXCHG16B (when target-feature=+cmpxchg16b) — lock-free
+// - fallback: spinlock-based for platforms without native 128-bit atomics
 use portable_atomic::AtomicU128;
 
 #[cfg(feature = "robust")]
