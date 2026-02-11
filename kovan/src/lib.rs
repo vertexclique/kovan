@@ -43,6 +43,7 @@
 
 extern crate alloc;
 
+mod atom;
 mod atomic;
 mod guard;
 mod reclaim;
@@ -50,6 +51,7 @@ mod retired;
 mod robust;
 mod slot;
 
+pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption};
 pub use atomic::{Atomic, Shared};
 pub use guard::{Guard, pin};
 pub use reclaim::Reclaimable;
