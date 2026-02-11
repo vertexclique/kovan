@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Lock-free concurrent hash maps using kovan memory reclamation"
 keywords = ["concurrency", "hashmap", "lock-free", "wait-free"]
 categories = ["concurrency", "data-structures", "no-std"]
+readme.workspace = true
 
 [lib]
 name = "kovan_map"

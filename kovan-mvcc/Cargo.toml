@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Multi-Version Concurrency Control (MVCC) implementation based on the Percolator model using Kovan"
 keywords = ["concurrency", "mvcc", "transaction", "percolator", "database"]
 categories = ["concurrency", "database-implementations"]
+readme.workspace = true
 
 [lib]
 name = "kovan_mvcc"
