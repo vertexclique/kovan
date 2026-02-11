@@ -10,6 +10,7 @@ exclude.workspace = true
 description = "Multi-producer multi-consumer channels using Kovan for memory reclamation"
 keywords = ["concurrency", "channel", "mpmc", "lock-free", "atomic"]
 categories = ["concurrency", "data-structures"]
+readme.workspace = true
 
 [lib]
 name = "kovan_channel"

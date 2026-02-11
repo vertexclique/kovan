@@ -9,6 +9,7 @@ repository.workspace = true
 description = "High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency."
 keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
 categories = ["concurrency", "memory-management", "no-std"]
+readme.workspace = true
 
 exclude = ["model_chk"]
 

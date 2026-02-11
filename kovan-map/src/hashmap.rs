@@ -545,6 +545,8 @@ unsafe impl<K: Sync, V: Sync, S: Sync> Sync for HashMap<K, V, S> {}
 
 impl<K, V, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
+        // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
+        // readers can exist. Free nodes immediately instead of deferring via `retire()`.
         let guard = pin();
 
         for bucket in self.buckets.iter() {
@@ -554,8 +556,7 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
                 while !current.is_null() {
                     let node = current.deref();
                     let next = node.next.load(Ordering::Relaxed, &guard);
-                    // Drop the Box manually
-                    retire(current.as_raw());
+                    drop(Box::from_raw(current.as_raw()));
                     current = next;
                 }
             }

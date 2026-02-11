@@ -9,6 +9,7 @@ repository.workspace = true
 description = "High-performance queue primitives and disruptor implementation for Kovan."
 keywords = ["concurrency", "queue", "disruptor", "lock-free"]
 categories = ["concurrency", "data-structures", "no-std"]
+readme.workspace = true
 
 [dependencies]
 cuneiform = "0.1"

@@ -880,6 +880,8 @@ unsafe impl<K: Sync, V: Sync, S: Sync> Sync for HopscotchMap<K, V, S> {}
 
 impl<K, V, S> Drop for HopscotchMap<K, V, S> {
     fn drop(&mut self) {
+        // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
+        // readers can exist. Free nodes immediately instead of deferring via `retire()`.
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
         let table = unsafe { &*table_ptr.as_raw() };
@@ -889,11 +891,15 @@ impl<K, V, S> Drop for HopscotchMap<K, V, S> {
             let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
 
             if !entry_ptr.is_null() {
-                retire(entry_ptr.as_raw());
+                unsafe {
+                    drop(Box::from_raw(entry_ptr.as_raw()));
+                }
             }
         }
 
-        retire(table_ptr.as_raw());
+        unsafe {
+            drop(Box::from_raw(table_ptr.as_raw()));
+        }
     }
 }
 
