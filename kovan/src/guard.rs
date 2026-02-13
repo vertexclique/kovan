@@ -1,10 +1,10 @@
 //! Guard and Handle for critical section management
 
 use crate::retired::{NRefNode, Retired, RetiredNode};
-use crate::slot::{calculate_adjustment, global};
+use crate::slot::{GlobalState, global};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use core::cell::{Cell, UnsafeCell};
 use core::sync::atomic::Ordering;
 
 /// Batch size threshold for flushing
@@ -33,7 +33,7 @@ impl Drop for Guard {
 
         // Phase 2a: If last thread out and list non-empty, adjust predecessor
         if new_refs == 0 && current_list != 0 {
-            let addend = calculate_adjustment(global.slot_order());
+            let addend = global.addend();
             // SAFETY: current_list is valid from slot head
             unsafe {
                 adjust_refs(current_list, addend);
@@ -52,8 +52,9 @@ impl Drop for Guard {
 
 /// Thread-local handle for batch accumulation
 struct Handle {
+    global: Cell<Option<&'static GlobalState>>,
     slot: Cell<usize>,
-    batch: RefCell<Vec<Retired>>,
+    batch: UnsafeCell<Vec<Retired>>,
     batch_nref: Cell<*mut NRefNode>,
     pin_count: Cell<usize>,
 }
@@ -61,19 +62,33 @@ struct Handle {
 impl Handle {
     const fn new() -> Self {
         Self {
+            global: Cell::new(None),
             slot: Cell::new(0),
-            batch: RefCell::new(Vec::new()),
+            batch: UnsafeCell::new(Vec::new()),
             batch_nref: Cell::new(core::ptr::null_mut()),
             pin_count: Cell::new(0),
         }
     }
 
+    /// Get cached global state reference
+    #[inline]
+    fn global(&self) -> &'static GlobalState {
+        match self.global.get() {
+            Some(g) => g,
+            None => {
+                let g = global();
+                self.global.set(Some(g));
+                g
+            }
+        }
+    }
+
     /// Select a slot, avoiding stalled ones if robust feature enabled
-    fn select_slot() -> usize {
+    fn select_slot(&self) -> usize {
         use core::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-        let global = global();
+        let global = self.global();
         let start_slot = COUNTER.fetch_add(1, Ordering::Relaxed) % global.num_slots();
 
         #[cfg(feature = "robust")]
@@ -94,21 +109,19 @@ impl Handle {
     }
 
     fn pin(&self) -> Guard {
-        // Optimization: Cache slot selection for 100 operations
         let pin_count = self.pin_count.get();
-        if pin_count.is_multiple_of(100) {
-            let slot = Self::select_slot();
+        if pin_count & 127 == 0 {
+            let slot = self.select_slot();
             self.slot.set(slot);
         }
         self.pin_count.set(pin_count.wrapping_add(1));
 
         let slot = self.slot.get();
-        let global = global();
+        let global = self.global();
 
-        // Optimization: Lazy era updates - only every 64th pin
         #[cfg(feature = "robust")]
         {
-            if pin_count % 64 == 0 {
+            if pin_count & 63 == 0 {
                 let current_era = crate::robust::current_era();
                 global
                     .slot(slot)
@@ -128,40 +141,44 @@ impl Handle {
         T: 'static,
     {
         let retired_ptr = ptr as *mut RetiredNode;
-        let mut batch = self.batch.borrow_mut();
+        // SAFETY: Handle is thread-local, no concurrent access possible
+        let needs_flush = unsafe {
+            let batch = &mut *self.batch.get();
 
-        // Initialize batch NRefNode on first retire
-        if batch.is_empty() {
-            // Create type-erased destructor
-            unsafe fn destructor<T>(ptr: *mut RetiredNode) {
-                let typed_ptr = ptr as *mut T;
-                // SAFETY: Caller guarantees ptr is valid and this is called once
-                unsafe {
-                    drop(Box::from_raw(typed_ptr));
+            // Initialize batch NRefNode on first retire
+            if batch.is_empty() {
+                // Create type-erased destructor
+                unsafe fn destructor<T>(ptr: *mut RetiredNode) {
+                    let typed_ptr = ptr as *mut T;
+                    // SAFETY: Caller guarantees ptr is valid and this is called once
+                    unsafe {
+                        drop(Box::from_raw(typed_ptr));
+                    }
                 }
+
+                let nref_node =
+                    Box::into_raw(Box::new(NRefNode::new(retired_ptr, destructor::<T>)));
+                self.batch_nref.set(nref_node);
             }
 
-            let nref_node = Box::into_raw(Box::new(NRefNode::new(retired_ptr, destructor::<T>)));
-            self.batch_nref.set(nref_node);
-        }
+            batch.push(Retired { ptr: retired_ptr });
+            batch.len() >= BATCH_SIZE
+        };
+        // batch borrow is dropped here before flush_batch
 
-        batch.push(Retired { ptr: retired_ptr });
-
-        // Flush when batch reaches threshold
-        if batch.len() >= BATCH_SIZE {
-            drop(batch); // Release borrow
+        if needs_flush {
             self.flush_batch();
         }
     }
 
     fn flush_batch(&self) {
-        let mut batch = self.batch.borrow_mut();
+        // SAFETY: Handle is thread-local, no concurrent access possible
+        let batch = unsafe { &mut *self.batch.get() };
         if batch.is_empty() {
             return;
         }
 
-        let mut batch_vec = core::mem::take(&mut *batch);
-        drop(batch); // Release borrow
+        let mut batch_vec = core::mem::take(batch);
 
         // Link batch nodes via batch_next
         for i in 0..batch_vec.len() {
@@ -169,7 +186,7 @@ impl Handle {
                 // Set nref_ptr for all nodes in batch
                 (*batch_vec[i].ptr).nref_ptr = self.batch_nref.get();
 
-                // Link to next node (circular, last points to null)
+                // Link to next node (last points to null)
                 if i + 1 < batch_vec.len() {
                     (*batch_vec[i].ptr).batch_next = batch_vec[i + 1].ptr;
                 } else {
@@ -178,13 +195,13 @@ impl Handle {
             }
         }
 
-        let global = global();
+        let global = self.global();
         let num_slots = global.num_slots();
+        let addend = global.addend();
 
-        // Optimization: Insert to subset of slots to reduce cache coherency traffic
-        // Use sqrt(num_slots) slots per batch to balance coverage and performance
+        // Insert to subset of slots to reduce cache coherency traffic
         let slots_to_use = (num_slots as f64).sqrt().ceil() as usize;
-        let slots_to_use = slots_to_use.max(8).min(num_slots); // At least 8, at most all
+        let slots_to_use = slots_to_use.max(8).min(num_slots);
 
         let mut curr_idx = 0;
         let mut empty_slots = 0isize;
@@ -194,8 +211,6 @@ impl Handle {
         let nref_node = unsafe { &*self.batch_nref.get() };
         nref_node.nref.store(hold_value, Ordering::Release);
 
-        // Insert into subset of slots (sequential - parallel breaks correctness)
-        // Optimization: Use subset to reduce cache coherency traffic
         // Start from a random offset to distribute load
         use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         static SLOT_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -208,7 +223,7 @@ impl Handle {
             // Quick check: skip if slot is inactive
             let (refs, _) = slot.head.load();
             if refs == 0 {
-                empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
+                empty_slots = empty_slots.saturating_add(addend);
                 continue;
             }
 
@@ -220,8 +235,7 @@ impl Handle {
 
                 // Double-check: slot became inactive
                 if refs == 0 {
-                    empty_slots =
-                        empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
+                    empty_slots = empty_slots.saturating_add(addend);
                     break;
                 }
 
@@ -244,8 +258,7 @@ impl Handle {
 
                         // Adjust predecessor if list was non-empty
                         if list_ptr != 0 {
-                            let adj = calculate_adjustment(global.slot_order())
-                                .saturating_add(refs as isize);
+                            let adj = addend.saturating_add(refs as isize);
                             // SAFETY: list_ptr is valid from slot head
                             unsafe {
                                 adjust_refs(list_ptr, adj);
@@ -261,12 +274,10 @@ impl Handle {
             }
         }
 
-        // Account for slots we didn't visit (subset optimization)
+        // Account for slots we didn't visit
         let unvisited_slots = num_slots.saturating_sub(slots_to_use);
         if unvisited_slots > 0 {
-            let adjustment_per_slot = calculate_adjustment(global.slot_order());
-            let unvisited_adjustment =
-                (unvisited_slots as isize).saturating_mul(adjustment_per_slot);
+            let unvisited_adjustment = (unvisited_slots as isize).saturating_mul(addend);
             empty_slots = empty_slots.saturating_add(unvisited_adjustment);
         }
 
@@ -280,7 +291,6 @@ impl Handle {
         }
 
         // Release hold value: all insertions complete, set correct initial NRef
-        // The correct value is empty_slots (which already includes adjustments)
         let adjustment = empty_slots - hold_value;
         nref_node.nref.fetch_add(adjustment, Ordering::Release);
 

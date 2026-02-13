@@ -101,6 +101,9 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
     while !curr.is_null() && curr as usize != stop {
         let node = unsafe { &*curr };
 
+        // Save next pointer BEFORE any potential free (node may be freed below)
+        let next = node.smr_next;
+
         // Check for null nref_ptr before dereferencing
         if !node.nref_ptr.is_null() {
             let nref_node = unsafe { &*node.nref_ptr };
@@ -122,12 +125,12 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
 
                     // Call the type-erased destructor to free all nodes in batch
                     let destructor = nref_node.destructor;
-                    let mut curr = nref_node.batch_first;
+                    let mut batch_curr = nref_node.batch_first;
 
-                    while !curr.is_null() {
-                        let next = (*curr).batch_next;
-                        destructor(curr);
-                        curr = next;
+                    while !batch_curr.is_null() {
+                        let batch_next = (*batch_curr).batch_next;
+                        destructor(batch_curr);
+                        batch_curr = batch_next;
                     }
 
                     // Free the NRefNode itself
@@ -136,8 +139,8 @@ pub(crate) unsafe fn traverse_and_decrement(start: usize, stop: usize, slot: usi
             }
         }
 
-        // Move to next node in list
-        curr = node.smr_next;
+        // Move to next node in list (using saved pointer)
+        curr = next;
     }
 
     // Decrement ack counter for robustness

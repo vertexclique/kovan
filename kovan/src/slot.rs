@@ -132,6 +132,7 @@ impl Slot {
 pub(crate) struct GlobalState {
     slots: &'static [Slot],
     slot_order: u32,
+    addend: isize,
 }
 
 impl GlobalState {
@@ -153,6 +154,7 @@ impl GlobalState {
         Self {
             slots: Box::leak(slots),
             slot_order: order,
+            addend: calculate_adjustment(order),
         }
     }
 
@@ -174,10 +176,10 @@ impl GlobalState {
         (1usize << self.slot_order) - 1
     }
 
-    /// Get slot order (log2 of slot count)
+    /// Get pre-cached addend value for reference counting adjustments
     #[inline]
-    pub(crate) fn slot_order(&self) -> u32 {
-        self.slot_order
+    pub(crate) fn addend(&self) -> isize {
+        self.addend
     }
 }
 
@@ -196,6 +198,6 @@ pub(crate) fn global() -> &'static GlobalState {
 ///
 /// ADDEND = (~0 >> order) + 1
 #[inline]
-pub(crate) fn calculate_adjustment(order: u32) -> isize {
+fn calculate_adjustment(order: u32) -> isize {
     ((!0usize >> order) + 1) as isize
 }
