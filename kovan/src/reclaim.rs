@@ -1,12 +1,14 @@
-//! Memory reclamation: adjust_refs, traverse, and deferred batch freeing.
+//! Memory reclamation: Crystalline (WFR) traverse and free_list.
 //!
-//! Matches the reference Hyaline (lfsmr) implementation:
-//! - `adjust_refs`: follows batch_link to refs-node, fetch_add, deferred free
-//! - `traverse_and_decrement`: do-while from next to end (inclusive), deferred free
-//! - `free_batch_list`: walks deferred free list, frees all nodes per batch
+//! - `traverse`: exchange-based list walk with INVPTR sentinel
+//! - `traverse_cache`: cached traverse with periodic free_list drain
+//! - `free_list`: walks batch chain and calls per-node destructors
 
-use crate::retired::RetiredNode;
+use crate::retired::{INVPTR, RetiredNode, is_rnode, rnode_unmask};
 use core::sync::atomic::Ordering;
+
+/// Maximum cached free-list entries before draining
+const MAX_CACHE: usize = 12;
 
 /// Trait for types that can be reclaimed
 ///
@@ -27,147 +29,116 @@ pub unsafe trait Reclaimable: Sized {
     ///
     /// This must only be called once, when the node is no longer accessible
     unsafe fn dealloc(ptr: *mut Self) {
-        // Default implementation: drop via Box
-        // SAFETY: Caller guarantees ptr is valid and this is called once
         unsafe {
             drop(alloc::boxed::Box::from_raw(ptr));
         }
     }
 }
 
-/// Adjust reference count of a batch (matches `__lfsmr_adjust_refs`).
-///
-/// Follows `node_ptr -> batch_link` to find the refs-node, then atomically
-/// adds `delta` to the refs counter. If refs reaches 0 (old value was `-delta`),
-/// adds the refs-node to the deferred free list.
-///
-/// # Safety
-///
-/// - `node_ptr` must point to a valid RetiredNode with valid `batch_link`
-/// - `free_list` must be a valid pointer to a free-list head
-pub(crate) unsafe fn adjust_refs(node_ptr: usize, delta: isize, free_list: &mut *mut RetiredNode) {
-    if node_ptr == 0 {
-        return;
-    }
-
-    let node = unsafe { &*(node_ptr as *const RetiredNode) };
-    let refs_node_ptr = node.batch_link;
-    let refs_node = unsafe { &*refs_node_ptr };
-
-    // Atomic add; if old value was -delta, refs just reached 0
-    let old = refs_node.refs_or_next.fetch_add(delta, Ordering::AcqRel);
-    if old == -delta {
-        // Batch is ready for freeing — add refs-node to deferred free list.
-        // SAFETY: refs reached 0 means no thread can access any batch node.
-        // Reuse smr_next for the free-list chain.
-        unsafe {
-            (*refs_node_ptr).smr_next = *free_list;
-        }
-        *free_list = refs_node_ptr;
-    }
+/// Get the refs-node for a given node.
+/// If the node's batch_link has the RNODE bit set, the node itself is the refs-node.
+/// Otherwise, batch_link points to the refs-node.
+#[inline]
+pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
+    let refs = unsafe { (*node).batch_link.load(Ordering::Acquire) };
+    if is_rnode(refs) { node } else { refs }
 }
 
-/// Traverse retirement list and decrement references (matches `__lfsmr_traverse`).
+/// Traverse a slot's retirement list, decrementing refs for each node.
 ///
-/// Do-while loop from `start` to `end` (inclusive). For each node, follows
-/// `batch_link` to the refs-node and decrements refs by 1. If refs reaches 0,
-/// adds the refs-node to the deferred free list.
+/// Walks the list following `next` pointers. For each node:
+/// - Exchanges `next` with INVPTR (prevents double-traverse by concurrent helpers)
+/// - If RNODE: terminal refs-node, fetch_sub(1) on refs
+/// - Otherwise: follow batch_link to refs-node, fetch_sub(1)
+/// - If refs reaches 0: add refs-node to free list
 ///
 /// # Safety
 ///
-/// - `start` and `end` must be valid RetiredNode pointers or 0
-/// - Nodes in the range must have valid `batch_link` pointers
-/// - `free_list` must be a valid pointer to a free-list head
-#[allow(unused_variables)]
-pub(crate) unsafe fn traverse_and_decrement(
-    start: usize,
-    end: usize,
-    slot: usize,
-    free_list: &mut *mut RetiredNode,
-) {
-    let mut next = start;
-    #[cfg(feature = "robust")]
-    let mut count = 0usize;
-
-    // do-while: process curr, then check if curr == end
+/// `next` must be a valid RetiredNode pointer (not null, not INVPTR)
+/// or a valid RNODE-marked pointer.
+pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut RetiredNode) {
     loop {
         let curr = next;
-        if curr == 0 {
+        if curr.is_null() {
             break;
         }
-
-        let node = unsafe { &*(curr as *const RetiredNode) };
-        // Save next BEFORE any potential modification
-        next = node.smr_next as usize;
-
-        // Follow batch_link to refs-node
-        let refs_node_ptr = node.batch_link;
-        let refs_node = unsafe { &*refs_node_ptr };
-
-        // Atomic decrement
-        let old = refs_node.refs_or_next.fetch_sub(1, Ordering::AcqRel);
-        #[cfg(feature = "robust")]
-        {
-            count += 1;
-        }
-
-        // If old was 1, refs just reached 0 — batch ready for freeing
-        if old == 1 {
-            // SAFETY: refs reached 0, no thread can access any batch node
-            unsafe {
-                (*refs_node_ptr).smr_next = *free_list;
+        if is_rnode(curr) {
+            // Terminal refs-node case
+            let refs = rnode_unmask(curr);
+            let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
+            if old == 1 {
+                unsafe {
+                    (*refs).next.store(*free_list, Ordering::Relaxed);
+                }
+                *free_list = refs;
             }
-            *free_list = refs_node_ptr;
-        }
-
-        // Inclusive end: stop after processing `end`
-        if curr == end {
             break;
         }
-    }
-
-    // Decrement ack counter for robustness
-    #[cfg(feature = "robust")]
-    if count > 0 {
-        let global = crate::slot::global();
-        global
-            .slot(slot)
-            .ack_counter
-            .fetch_sub(count as isize, Ordering::Relaxed);
+        // Swap next with INVPTR to claim this node
+        next = unsafe {
+            (*curr)
+                .next
+                .swap(INVPTR as *mut RetiredNode, Ordering::AcqRel)
+        };
+        // Follow batch_link to refs-node and decrement
+        let refs = unsafe { (*curr).batch_link.load(Ordering::Relaxed) };
+        let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
+        if old == 1 {
+            unsafe {
+                (*refs).next.store(*free_list, Ordering::Relaxed);
+            }
+            *free_list = refs;
+        }
     }
 }
 
-/// Free all batches in the deferred free list (matches `__lfsmr_free`).
-///
-/// Each entry in the list is a refs-node (batch tail). Its `batch_link`
-/// points to the batch front. We walk the batch_next chain from front
-/// to tail, calling the type-erased destructor on each node.
+/// Traverse with caching: accumulates free-list entries and periodically drains.
 ///
 /// # Safety
 ///
-/// - All refs-nodes in the list must have refs == 0
-/// - The destructor on each refs-node must be valid
-/// - Each node must be a valid allocation that can be freed by the destructor
+/// Same as `traverse`.
+pub(crate) unsafe fn traverse_cache(
+    free_list: &mut *mut RetiredNode,
+    list_count: &mut usize,
+    next: *mut RetiredNode,
+) {
+    if !next.is_null() {
+        if *list_count >= MAX_CACHE {
+            unsafe { free_batch_list(*free_list) };
+            *free_list = core::ptr::null_mut();
+            *list_count = 0;
+        }
+        unsafe { traverse(free_list, next) };
+        *list_count += 1;
+    }
+}
+
+/// Free all batches in the deferred free list.
+///
+/// Each entry in the list is a refs-node. Its `batch_link` is RNODE(batch_front).
+/// We unmask to get batch_front, then walk the batch_next chain from front,
+/// calling the type-erased destructor on each node.
+///
+/// # Safety
+///
+/// All refs-nodes in the list must have refs == 0.
 pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
     while !list.is_null() {
-        let refs_node = unsafe { &*list };
-        // batch_link on refs-node points to batch front
-        let front = refs_node.batch_link;
-        // smr_next is reused for free-list chain — save before freeing
-        list = refs_node.smr_next;
+        let refs_node = list;
+        // batch_link on refs-node is RNODE(batch_front)
+        let batch_link = unsafe { (*refs_node).batch_link.load(Ordering::Relaxed) };
+        let front = rnode_unmask(batch_link);
+        // next is reused for free-list chain — save before freeing
+        list = unsafe { (*refs_node).next.load(Ordering::Relaxed) };
 
-        // Walk the batch_next chain: front → ... → tail (batch_next = null)
-        // Each node carries its own destructor (set during retire).
+        // Walk the batch_next chain: front -> ... -> refs_node (batch_next = null)
         let mut curr = front;
         while !curr.is_null() {
             let node = unsafe { &*curr };
-            // Read batch_next and destructor BEFORE freeing the node
             let next = node.batch_next();
             let destructor = node.destructor;
             if let Some(d) = destructor {
-                unsafe {
-                    d(curr);
-                }
+                unsafe { d(curr) };
             }
             curr = next;
         }

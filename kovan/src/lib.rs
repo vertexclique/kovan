@@ -4,14 +4,14 @@
 //! Kovan: High-performance wait-free memory reclamation for lock-free data structures.
 //! Bounded memory usage, predictable latency.
 //!
-//! Kovan implements the safe and transparent memory reclamation algorithm,
-//! providing snapshot-free memory reclamation with zero overhead on read operations.
+//! Kovan implements the asynchronous safe memory reclamation algorithm,
+//! providing wait-free memory reclamation with bounded memory usage.
 //!
 //! # Key Features
 //!
 //! - **Zero Read Overhead**: Object loads require only a single atomic read
-//! - **Lock-Free Progress**: System-wide progress guaranteed
-//! - **Slot-Based Architecture**: Fixed slots, not per-thread structures
+//! - **Wait-Free Progress**: Bounded steps even under contention
+//! - **Epoch-Based Architecture**: Per-thread slots with epoch tracking
 //! - **Batch Retirement**: Efficient amortized reclamation cost
 //!
 //! # Example
@@ -50,6 +50,7 @@ mod reclaim;
 mod retired;
 mod robust;
 mod slot;
+mod ttas;
 
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption};
 pub use atomic::{Atomic, Shared};

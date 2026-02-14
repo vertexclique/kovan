@@ -27,7 +27,7 @@ use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 use foldhash::fast::FixedState;
-use kovan::{Atomic, Shared, pin, retire};
+use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 
 /// Number of buckets.
 /// 524,288 = 2^19.
@@ -59,8 +59,9 @@ impl Backoff {
 }
 
 /// Node in the lock-free linked list.
-/// Layout optimized for scanning: `hash` and `key` are checked first.
+#[repr(C)]
 struct Node<K, V> {
+    retired: RetiredNode,
     hash: u64,
     key: K,
     value: V,
@@ -176,6 +177,7 @@ where
 
                         // Create new node pointing to existing next
                         let new_node = Box::into_raw(Box::new(Node {
+                            retired: RetiredNode::new(),
                             hash,
                             key: key.clone(),
                             value: value.clone(),
@@ -210,6 +212,7 @@ where
             // 2. Key not found. Insert at TAIL (prev_link).
             // Note: In low collision scenarios, prev_link is often the bucket head itself.
             let new_node_ptr = Box::into_raw(Box::new(Node {
+                retired: RetiredNode::new(),
                 hash,
                 key: key.clone(),
                 value: value.clone(),
@@ -281,6 +284,7 @@ where
 
             // 2. Key not found. Insert at TAIL (prev_link).
             let new_node_ptr = Box::into_raw(Box::new(Node {
+                retired: RetiredNode::new(),
                 hash,
                 key: key.clone(),
                 value: value.clone(),
@@ -315,6 +319,20 @@ where
                     continue 'outer;
                 }
             }
+        }
+    }
+
+    /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
+    ///
+    /// This is linearizable: concurrent callers for the same key are guaranteed to
+    /// agree on which value was inserted (exactly one thread's CAS succeeds at the
+    /// list tail, and all others see that node on retry).
+    pub fn get_or_insert(&self, key: K, value: V) -> V {
+        // HashMap's insert_if_absent is linearizable (CAS at list tail is atomic
+        // with the linked-list structure), so no post-insert get() needed.
+        match self.insert_if_absent(key, value.clone()) {
+            Some(existing) => existing,
+            None => value,
         }
     }
 

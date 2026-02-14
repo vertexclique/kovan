@@ -74,9 +74,6 @@ impl Default for BirthEra {
     }
 }
 
-// Note: SlotRobust and StallDetector removed - we use direct field access in Slot instead
-// Stall detection happens inline during slot selection, not periodically
-
 #[cfg(test)]
 mod tests {
     use super::*;
