@@ -50,17 +50,6 @@ impl SlotHead {
         (refs, ptr)
     }
 
-    /// Atomically decrement reference count by 1
-    ///
-    /// Returns: (new_refcount, current_list_ptr)
-    #[inline]
-    pub(crate) fn fetch_sub_ref(&self) -> (u64, usize) {
-        let old = self.data.fetch_sub(1, Ordering::AcqRel);
-        let refs = ((old & Self::REF_MASK) as u64).wrapping_sub(1);
-        let ptr = ((old & Self::PTR_MASK) >> Self::PTR_SHIFT) as usize;
-        (refs, ptr)
-    }
-
     /// Atomically load both reference count and list pointer
     ///
     /// Returns: (refcount, list_ptr)

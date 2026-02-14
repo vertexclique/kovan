@@ -1,18 +1,17 @@
 //! Guard and Handle for critical section management
+//!
+//! Implements the Hyaline enter/leave/retire protocol matching the reference
+//! lfsmr CAS2 implementation. Key differences from the previous version:
+//! - Leave uses a CAS loop (zeroes slot when last thread out)
+//! - Traverse direction: from current_head->next to handle_ptr (inclusive)
+//! - Batch size = num_slots + 1 (refs-node never inserted into a slot)
+//! - No separate NRefNode allocation — refs embedded in batch tail node
+//! - Deferred freeing via local free list
 
-use crate::retired::{NRefNode, Retired, RetiredNode};
+use crate::retired::RetiredNode;
 use crate::slot::{GlobalState, global};
 use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::cell::{Cell, UnsafeCell};
-use core::sync::atomic::Ordering;
-
-/// Batch size threshold for flushing
-///
-/// Must be ≥ 2×k where k is number of slots (64)
-/// Paper recommends batch ≥ MAX_THREADS + 1, where MAX_THREADS >> k
-/// Using 256 to reduce flush frequency and amortize overhead
-const BATCH_SIZE: usize = 256;
+use core::cell::Cell;
 
 /// RAII guard representing an active critical section
 ///
@@ -27,35 +26,95 @@ impl Drop for Guard {
     fn drop(&mut self) {
         let global = global();
         let slot = global.slot(self.slot);
+        let addend = global.addend();
+        let mut free_list: *mut RetiredNode = core::ptr::null_mut();
 
-        // Phase 1: Decrement reference count
-        let (new_refs, current_list) = slot.head.fetch_sub_ref();
+        // === Leave: CAS loop (matches __lfsmr_leave for CAS2) ===
+        //
+        // Atomically decrement ref count. If refs reaches 0, zero the entire
+        // slot (both refs and pointer) to detach the retirement list.
 
-        // Phase 2a: If last thread out and list non-empty, adjust predecessor
-        if new_refs == 0 && current_list != 0 {
-            let addend = global.addend();
-            // SAFETY: current_list is valid from slot head
-            unsafe {
-                adjust_refs(current_list, addend);
+        let mut curr: usize;
+        let mut next: usize = 0;
+
+        loop {
+            let (refs, ptr) = slot.head.load();
+            curr = ptr;
+
+            if curr != self.handle_ptr && curr != 0 {
+                // List changed since we entered — read next for traverse
+                let node = unsafe { &*(curr as *const RetiredNode) };
+                next = node.smr_next as usize;
+            }
+
+            let new_refs = refs - 1;
+            let (cas_new_refs, cas_new_ptr) = if new_refs == 0 {
+                (0u64, 0usize) // Zero everything when last thread out
+            } else {
+                (new_refs, ptr) // Keep pointer, just decrement refs
+            };
+
+            match slot
+                .head
+                .compare_exchange(refs, ptr, cas_new_refs, cas_new_ptr)
+            {
+                Ok(_) => {
+                    // CAS succeeded. If we zeroed and old list was non-empty,
+                    // give this slot's addend contribution to the head batch.
+                    let start = ptr; // pointer from the old value
+                    if new_refs == 0 && start != 0 {
+                        unsafe {
+                            crate::reclaim::adjust_refs(start, addend, &mut free_list);
+                        }
+                    }
+                    break;
+                }
+                Err(_) => continue, // Retry
             }
         }
 
-        // Phase 2b: Traverse from entry point and decrement references
-        if self.handle_ptr != 0 {
-            // SAFETY: handle_ptr is valid from slot head at entry time
+        // === Traverse: walk new nodes added during our critical section ===
+        //
+        // If the list changed (curr != handle_ptr), traverse from
+        // curr->next to handle_ptr (inclusive), decrementing each
+        // node's batch refs by 1.
+
+        if curr != self.handle_ptr && curr != 0 {
             unsafe {
-                traverse_and_decrement(self.handle_ptr, 0, self.slot);
+                crate::reclaim::traverse_and_decrement(
+                    next,
+                    self.handle_ptr,
+                    self.slot,
+                    &mut free_list,
+                );
+            }
+        }
+
+        // === Free any batches whose refs reached 0 ===
+        if !free_list.is_null() {
+            unsafe {
+                crate::reclaim::free_batch_list(free_list);
             }
         }
     }
 }
 
 /// Thread-local handle for batch accumulation
+///
+/// Batch construction matches the reference `lfsmr_retire`:
+/// - First node pushed becomes `batch_last` (tail = refs-node, batch_next=0, refs=0)
+/// - Subsequent nodes get `batch_link = batch_last`
+/// - On finalize: `batch_last.batch_link = batch_first` (for freeing)
+/// - Threshold: num_slots + 1 (refs-node + one node per slot)
 struct Handle {
     global: Cell<Option<&'static GlobalState>>,
     slot: Cell<usize>,
-    batch: UnsafeCell<Vec<Retired>>,
-    batch_nref: Cell<*mut NRefNode>,
+    /// Front of batch chain (most recently pushed)
+    batch_first: Cell<*mut RetiredNode>,
+    /// Tail of batch chain (first pushed = refs-node, carries atomic refs)
+    batch_last: Cell<*mut RetiredNode>,
+    /// Number of nodes in current batch
+    batch_count: Cell<usize>,
     pin_count: Cell<usize>,
 }
 
@@ -64,8 +123,9 @@ impl Handle {
         Self {
             global: Cell::new(None),
             slot: Cell::new(0),
-            batch: UnsafeCell::new(Vec::new()),
-            batch_nref: Cell::new(core::ptr::null_mut()),
+            batch_first: Cell::new(core::ptr::null_mut()),
+            batch_last: Cell::new(core::ptr::null_mut()),
+            batch_count: Cell::new(0),
             pin_count: Cell::new(0),
         }
     }
@@ -136,118 +196,106 @@ impl Handle {
         Guard { slot, handle_ptr }
     }
 
+    /// Retire a node into the thread-local batch (matches `lfsmr_retire`).
+    ///
+    /// Batch construction:
+    /// - First node pushed → `batch_last` (tail, refs-node, batch_next=0/refs=0)
+    /// - Subsequent nodes → `batch_link = batch_last`, `batch_next = batch_first`
+    /// - When batch reaches threshold (num_slots + 1): finalize and flush
     fn retire<T>(&self, ptr: *mut T)
     where
         T: 'static,
     {
-        let retired_ptr = ptr as *mut RetiredNode;
-        // SAFETY: Handle is thread-local, no concurrent access possible
-        let needs_flush = unsafe {
-            let batch = &mut *self.batch.get();
+        let node_ptr = ptr as *mut RetiredNode;
+        let node = unsafe { &mut *node_ptr };
 
-            // Initialize batch NRefNode on first retire
-            if batch.is_empty() {
-                // Create type-erased destructor
-                unsafe fn destructor<T>(ptr: *mut RetiredNode) {
-                    let typed_ptr = ptr as *mut T;
-                    // SAFETY: Caller guarantees ptr is valid and this is called once
-                    unsafe {
-                        drop(Box::from_raw(typed_ptr));
-                    }
-                }
+        // Set per-node destructor (matches reference: node->callback = smr->callback)
+        // Each node carries its own destructor because different types may be
+        // mixed in the same batch (e.g. AtomNode<T> and DeallocNode<T>).
+        unsafe fn destructor<T>(ptr: *mut RetiredNode) {
+            let typed_ptr = ptr as *mut T;
+            // SAFETY: Caller guarantees ptr is valid and this is called once
+            unsafe {
+                drop(Box::from_raw(typed_ptr));
+            }
+        }
+        node.destructor = Some(destructor::<T>);
 
-                let nref_node =
-                    Box::into_raw(Box::new(NRefNode::new(retired_ptr, destructor::<T>)));
-                self.batch_nref.set(nref_node);
+        let first = self.batch_first.get();
+        if first.is_null() {
+            // First node in batch → becomes batch_last (tail / refs-node)
+            self.batch_last.set(node_ptr);
+        } else {
+            // Subsequent nodes: batch_link = batch_last (refs-node)
+            node.batch_link = self.batch_last.get();
+        }
+
+        // Implicitly initializes refs to 0 for first node (batch_next = null = 0)
+        node.set_batch_next(first);
+        self.batch_first.set(node_ptr);
+
+        let count = self.batch_count.get() + 1;
+        self.batch_count.set(count);
+
+        let global = self.global();
+        if count >= global.num_slots() + 1 {
+            // Finalize: set tail's batch_link to front (for free_batch_list)
+            let last = self.batch_last.get();
+            unsafe {
+                (*last).batch_link = self.batch_first.get();
             }
 
-            batch.push(Retired { ptr: retired_ptr });
-            batch.len() >= BATCH_SIZE
-        };
-        // batch borrow is dropped here before flush_batch
-
-        if needs_flush {
             self.flush_batch();
+
+            // Reset batch state
+            self.batch_first.set(core::ptr::null_mut());
+            self.batch_last.set(core::ptr::null_mut());
+            self.batch_count.set(0);
         }
     }
 
+    /// Distribute batch nodes across all slots (matches `__lfsmr_retire`).
+    ///
+    /// Iterates through all k slots. For each active slot, CAS-inserts the
+    /// current batch node as the new head. For empty slots, accumulates
+    /// the addend adjustment. At the end, applies accumulated adjustments
+    /// to the batch's refs-node via the first node.
     fn flush_batch(&self) {
-        // SAFETY: Handle is thread-local, no concurrent access possible
-        let batch = unsafe { &mut *self.batch.get() };
-        if batch.is_empty() {
-            return;
-        }
-
-        let mut batch_vec = core::mem::take(batch);
-
-        // Link batch nodes via batch_next
-        for i in 0..batch_vec.len() {
-            unsafe {
-                // Set nref_ptr for all nodes in batch
-                (*batch_vec[i].ptr).nref_ptr = self.batch_nref.get();
-
-                // Link to next node (last points to null)
-                if i + 1 < batch_vec.len() {
-                    (*batch_vec[i].ptr).batch_next = batch_vec[i + 1].ptr;
-                } else {
-                    (*batch_vec[i].ptr).batch_next = core::ptr::null_mut();
-                }
-            }
-        }
-
         let global = self.global();
         let num_slots = global.num_slots();
         let addend = global.addend();
 
-        // Insert to subset of slots to reduce cache coherency traffic
-        let slots_to_use = (num_slots as f64).sqrt().ceil() as usize;
-        let slots_to_use = slots_to_use.max(8).min(num_slots);
+        let mut curr = self.batch_first.get();
+        let mut adjs: isize = 0;
+        let mut do_adjs = false;
+        let mut free_list: *mut RetiredNode = core::ptr::null_mut();
 
-        let mut curr_idx = 0;
-        let mut empty_slots = 0isize;
+        let first = self.batch_first.get();
 
-        // Initialize NRef with hold value to prevent premature freeing during insertion
-        let hold_value = isize::MAX / 2;
-        let nref_node = unsafe { &*self.batch_nref.get() };
-        nref_node.nref.store(hold_value, Ordering::Release);
+        for i in 0..num_slots {
+            let node = unsafe { &*curr };
+            let slot = global.slot(i);
 
-        // Start from a random offset to distribute load
-        use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-        static SLOT_OFFSET: AtomicUsize = AtomicUsize::new(0);
-        let start_offset = SLOT_OFFSET.fetch_add(1, AtomicOrdering::Relaxed) % num_slots;
-
-        for i in 0..slots_to_use {
-            let slot_idx = (start_offset + i) % num_slots;
-            let slot = global.slot(slot_idx);
-
-            // Quick check: skip if slot is inactive
-            let (refs, _) = slot.head.load();
-            if refs == 0 {
-                empty_slots = empty_slots.saturating_add(addend);
-                continue;
-            }
-
-            let node_ptr = batch_vec[curr_idx].ptr;
-
-            // Try to insert node into this active slot
+            // CAS loop to insert node into this slot
             loop {
                 let (refs, list_ptr) = slot.head.load();
 
-                // Double-check: slot became inactive
                 if refs == 0 {
-                    empty_slots = empty_slots.saturating_add(addend);
+                    // Slot is empty — accumulate addend, don't advance curr
+                    do_adjs = true;
+                    adjs = adjs.wrapping_add(addend);
                     break;
                 }
 
-                // Link node into list
+                // Link node into slot's retirement list
                 unsafe {
-                    (*node_ptr).smr_next = list_ptr as *mut RetiredNode;
+                    (*curr).smr_next = list_ptr as *mut RetiredNode;
                 }
 
-                // CAS: install node as new head
+                // CAS: keep refs, change pointer to our node
                 match slot
                     .head
-                    .compare_exchange(refs, list_ptr, refs, node_ptr as usize)
+                    .compare_exchange(refs, list_ptr, refs, curr as usize)
                 {
                     Ok(_) => {
                         // Increment ack counter for robustness
@@ -256,17 +304,19 @@ impl Handle {
                             slot.ack_counter.fetch_add(refs as isize, Ordering::Relaxed);
                         }
 
-                        // Adjust predecessor if list was non-empty
+                        // Adjust predecessor's batch refs
                         if list_ptr != 0 {
-                            let adj = addend.saturating_add(refs as isize);
-                            // SAFETY: list_ptr is valid from slot head
                             unsafe {
-                                adjust_refs(list_ptr, adj);
+                                crate::reclaim::adjust_refs(
+                                    list_ptr,
+                                    addend.wrapping_add(refs as isize),
+                                    &mut free_list,
+                                );
                             }
                         }
 
-                        // Move to next node only after successful insertion
-                        curr_idx = (curr_idx + 1) % batch_vec.len();
+                        // Advance to next batch node
+                        curr = node.batch_next();
                         break;
                     }
                     Err(_) => continue, // Retry CAS
@@ -274,28 +324,19 @@ impl Handle {
             }
         }
 
-        // Account for slots we didn't visit
-        let unvisited_slots = num_slots.saturating_sub(slots_to_use);
-        if unvisited_slots > 0 {
-            let unvisited_adjustment = (unvisited_slots as isize).saturating_mul(addend);
-            empty_slots = empty_slots.saturating_add(unvisited_adjustment);
-        }
-
-        // Adjust first node in batch for empty slots and unvisited slots
-        if empty_slots > 0 {
-            let first = batch_vec[0].ptr;
-            // SAFETY: first is valid from our batch
+        // Apply accumulated adjustments for empty slots to our batch
+        if do_adjs {
             unsafe {
-                adjust_refs(first as usize, empty_slots);
+                crate::reclaim::adjust_refs(first as usize, adjs, &mut free_list);
             }
         }
 
-        // Release hold value: all insertions complete, set correct initial NRef
-        let adjustment = empty_slots - hold_value;
-        nref_node.nref.fetch_add(adjustment, Ordering::Release);
-
-        // Reset for next batch
-        self.batch_nref.set(core::ptr::null_mut());
+        // Free any batches whose refs reached 0 during this retire
+        if !free_list.is_null() {
+            unsafe {
+                crate::reclaim::free_batch_list(free_list);
+            }
+        }
     }
 }
 
@@ -339,8 +380,8 @@ pub fn pin() -> Guard {
 
 /// Retire a node for later reclamation
 ///
-/// The node will be added to the local batch and eventually inserted
-/// into all active slots for safe reclamation.
+/// The node will be added to the local batch and eventually distributed
+/// across all active slots for safe reclamation.
 ///
 /// # Safety
 ///
@@ -357,6 +398,3 @@ pub fn retire<T: 'static>(ptr: *mut T) {
         HANDLE.with(|handle| handle.retire(ptr))
     }
 }
-
-// Import reclamation functions
-use crate::reclaim::{adjust_refs, traverse_and_decrement};
