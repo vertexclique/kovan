@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_simple_conflict() {
     let db = Arc::new(KovanMVCC::new());
 

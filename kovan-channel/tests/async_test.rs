@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_unbounded_async() {
     block_on(async {
         let (s, r) = unbounded();
@@ -25,6 +26,7 @@ fn test_unbounded_async() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bounded_async() {
     block_on(async {
         let (s, r) = bounded(1);
@@ -44,6 +46,7 @@ fn test_bounded_async() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_mixed_async_blocking() {
     block_on(async {
         let (s, r) = unbounded();

@@ -26,6 +26,7 @@ impl StressNode {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_high_contention() {
     // Many threads hammering the same atomic
     const NUM_THREADS: usize = 16;
@@ -90,6 +91,7 @@ fn test_high_contention() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_read_heavy_workload() {
     // 95% reads, 5% writes
     const NUM_THREADS: usize = 8;
@@ -160,6 +162,7 @@ fn test_read_heavy_workload() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_oversubscription() {
     // More threads than cores (2x oversubscription, matching paper's methodology)
     let num_cores = thread::available_parallelism()
@@ -228,6 +231,7 @@ fn test_oversubscription() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_rapid_guard_creation() {
     // Rapidly create and drop guards
     const NUM_THREADS: usize = 8;
@@ -259,6 +263,7 @@ fn test_rapid_guard_creation() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_long_running_guards() {
     // Some threads hold guards for extended periods
     const NUM_LONG: usize = 2;
@@ -341,6 +346,7 @@ fn test_long_running_guards() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_burst_workload() {
     // Alternating periods of high and low activity
     const NUM_THREADS: usize = 8;

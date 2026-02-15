@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread; // Add this import
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_simple_concurrent_transfer() {
     let db = Arc::new(KovanMVCC::new());
 

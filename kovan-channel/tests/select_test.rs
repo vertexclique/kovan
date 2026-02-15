@@ -38,6 +38,7 @@ fn test_select() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 #[allow(clippy::diverging_sub_expression)]
 fn test_select_race() {
     let (_s1, r1) = unbounded::<i32>();

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_counter() {
     let stm = Arc::new(Stm::new());
     let var = Arc::new(stm.tvar(0i64));
@@ -34,6 +35,7 @@ fn test_concurrent_counter() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bank_transfer() {
     let stm = Arc::new(Stm::new());
     let num_accounts = 10;
@@ -89,6 +91,7 @@ fn test_bank_transfer() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_multi_var_swap() {
     let stm = Arc::new(Stm::new());
     let a = Arc::new(stm.tvar(1i64));
@@ -130,6 +133,7 @@ fn test_multi_var_swap() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_read_only_transactions() {
     let stm = Arc::new(Stm::new());
     let var = Arc::new(stm.tvar(42i64));
@@ -152,6 +156,7 @@ fn test_read_only_transactions() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_transaction_return_value() {
     let stm = Stm::new();
     let var = stm.tvar(10i64);

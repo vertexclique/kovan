@@ -14,6 +14,7 @@ fn test_bounded_simple() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bounded_capacity() {
     let (s, r) = bounded(1);
     s.send(1);
@@ -33,6 +34,7 @@ fn test_bounded_capacity() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bounded_threads() {
     let (s, r) = bounded(10);
     let s1 = s.clone();

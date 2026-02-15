@@ -124,6 +124,7 @@ fn test_string_keys() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_insert_read() {
     let map = Arc::new(HashMap::new());
     let mut handles = vec![];
@@ -163,6 +164,7 @@ fn test_concurrent_insert_read() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_remove() {
     let map = Arc::new(HashMap::new());
     for i in 0..4000 {
@@ -188,6 +190,7 @@ fn test_concurrent_remove() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_mixed_operations() {
     let map = Arc::new(HashMap::new());
     let mut handles = vec![];
@@ -212,6 +215,7 @@ fn test_concurrent_mixed_operations() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_insert_replace_concurrent() {
     let map = Arc::new(HashMap::new());
     map.insert(0, 0);

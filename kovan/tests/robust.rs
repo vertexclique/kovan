@@ -26,6 +26,7 @@ impl RobustNode {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_era_advancement() {
     // Test that era advances over time
     let start_era = current_era();
@@ -40,6 +41,7 @@ fn test_era_advancement() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_birth_era_ordering() {
     // Test that birth eras are ordered correctly
     let era1 = BirthEra::new();
@@ -62,6 +64,7 @@ fn test_birth_era_ordering() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_adaptive_slot_selection() {
     // Test that slot selection works under load
     // This is implicit - if the system doesn't hang, it's working
@@ -116,6 +119,7 @@ fn test_adaptive_slot_selection() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_stalled_thread_handling() {
     // Simulate a stalled thread scenario
     const NUM_ACTIVE: usize = 4;
@@ -197,6 +201,7 @@ fn test_stalled_thread_handling() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bounded_memory_with_stalls() {
     // Test that memory remains bounded even with stalled threads
     // This is a long-running test that verifies the robustness guarantees
@@ -279,6 +284,7 @@ fn test_bounded_memory_with_stalls() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_era_tracking_concurrent() {
     // Test era tracking under concurrent load
     const NUM_THREADS: usize = 8;

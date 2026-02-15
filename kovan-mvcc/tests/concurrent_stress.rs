@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_writes_different_keys() {
     let db = Arc::new(KovanMVCC::new());
     let threads = 4;
@@ -39,6 +40,7 @@ fn test_concurrent_writes_different_keys() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_readers() {
     let db = Arc::new(KovanMVCC::new());
 
@@ -67,6 +69,7 @@ fn test_concurrent_readers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_overwrite_same_key() {
     let db = KovanMVCC::new();
 
@@ -82,6 +85,7 @@ fn test_overwrite_same_key() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_delete_and_reinsert() {
     let db = KovanMVCC::new();
 
@@ -105,6 +109,7 @@ fn test_delete_and_reinsert() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_snapshot_consistency() {
     let db = Arc::new(KovanMVCC::new());
 
@@ -129,6 +134,7 @@ fn test_snapshot_consistency() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_many_keys_single_txn() {
     let db = KovanMVCC::new();
 

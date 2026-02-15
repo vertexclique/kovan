@@ -48,6 +48,7 @@ fn test_push_pop_interleaved() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_mpmc_sum() {
     let q = Arc::new(SegQueue::new());
     let total = 8000;

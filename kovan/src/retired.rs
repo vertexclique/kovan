@@ -7,6 +7,7 @@
 //! - `birth_epoch`: epoch at which this node was allocated (on refs-node: min of batch)
 //! - `destructor`: type-erased destructor for deallocation
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicPtr, AtomicUsize};
 
 /// Type-erased destructor function
@@ -46,6 +47,12 @@ pub(crate) fn rnode_unmask(ptr: *mut RetiredNode) -> *mut RetiredNode {
 /// - `refs_or_next`: union — atomic refs counter on refs-node, batch_next pointer on others
 /// - `birth_epoch`: allocation epoch; on refs-node: minimum birth epoch of entire batch
 /// - `destructor`: type-erased destructor for deallocation
+///
+/// `birth_epoch` and `destructor` use `UnsafeCell` for interior mutability: these fields
+/// are written during `retire()` while other threads may hold guard-protected `&T` references
+/// to the outer struct (whose layout starts with this RetiredNode). Without `UnsafeCell`,
+/// Miri's Stacked Borrows model treats the shared `&T` retag as covering these fields,
+/// conflicting with the non-atomic writes.
 #[repr(C, align(8))]
 pub struct RetiredNode {
     /// Next node in slot's retirement list (atomic — exchanged during traverse).
@@ -65,11 +72,13 @@ pub struct RetiredNode {
 
     /// Birth epoch of this node's allocation.
     /// On the refs-node: minimum birth epoch across the entire batch.
-    pub(crate) birth_epoch: u64,
+    /// UnsafeCell: written during retire() while readers may hold &T to the outer struct.
+    pub(crate) birth_epoch: UnsafeCell<u64>,
 
     /// Type-erased destructor — set during retire().
     /// Used by free_list to deallocate each node in a batch.
-    pub(crate) destructor: Option<DestructorFn>,
+    /// UnsafeCell: written during retire() while readers may hold &T to the outer struct.
+    pub(crate) destructor: UnsafeCell<Option<DestructorFn>>,
 }
 
 impl RetiredNode {
@@ -83,9 +92,33 @@ impl RetiredNode {
             next: AtomicPtr::new(core::ptr::null_mut()),
             batch_link: AtomicPtr::new(core::ptr::null_mut()),
             refs_or_next: AtomicUsize::new(0),
-            birth_epoch: crate::slot::global().get_epoch(),
-            destructor: None,
+            birth_epoch: UnsafeCell::new(crate::slot::global().get_epoch()),
+            destructor: UnsafeCell::new(None),
         }
+    }
+
+    /// Read birth_epoch
+    #[inline]
+    pub(crate) fn birth_epoch(&self) -> u64 {
+        unsafe { *self.birth_epoch.get() }
+    }
+
+    /// Write birth_epoch
+    #[inline]
+    pub(crate) fn set_birth_epoch(&self, epoch: u64) {
+        unsafe { *self.birth_epoch.get() = epoch }
+    }
+
+    /// Read destructor
+    #[inline]
+    pub(crate) fn destructor(&self) -> Option<DestructorFn> {
+        unsafe { *self.destructor.get() }
+    }
+
+    /// Write destructor
+    #[inline]
+    pub(crate) fn set_destructor(&self, d: Option<DestructorFn>) {
+        unsafe { *self.destructor.get() = d }
     }
 
     /// Read the batch_next pointer (non-atomic, for batch construction and freeing)
@@ -127,7 +160,7 @@ impl Default for RetiredNode {
     }
 }
 
-// SAFETY: RetiredNode contains only raw pointers and atomics which are Send
+// SAFETY: RetiredNode contains only raw pointers, atomics, and UnsafeCell fields
+// whose access is synchronized by the SMR protocol (retire happens-before reclamation).
 unsafe impl Send for RetiredNode {}
-// SAFETY: RetiredNode synchronization handled by atomic operations
 unsafe impl Sync for RetiredNode {}

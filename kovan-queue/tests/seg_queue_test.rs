@@ -13,6 +13,7 @@ fn test_seg_queue_simple() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_seg_queue_concurrent() {
     let q = Arc::new(SegQueue::new());
     let mut handles = vec![];

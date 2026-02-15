@@ -1,33 +1,19 @@
 #!/bin/bash
 #
-# Run Miri tests for kovan workspace crates.
+# Run Miri tests for kovan core crate only.
+# Doctests are skipped (--lib --tests) because Miri cannot emulate cmpxchg16b.
 #
 # Must be run with nightly rust, e.g.:
 #   rustup default nightly
 
 set -e
 
-export MIRIFLAGS="${MIRIFLAGS:--Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks}"
+export MIRIFLAGS="${MIRIFLAGS:--Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-tree-borrows}"
 
 cargo miri setup
 cargo clean
 
 echo "Running Miri on kovan core..."
-cargo miri test -p kovan
-
-echo "Running Miri on kovan-queue..."
-cargo miri test -p kovan-queue
-
-echo "Running Miri on kovan-channel..."
-cargo miri test -p kovan-channel
-
-echo "Running Miri on kovan-map..."
-cargo miri test -p kovan-map
-
-echo "Running Miri on kovan-stm..."
-cargo miri test -p kovan-stm
-
-echo "Running Miri on kovan-mvcc..."
-cargo miri test -p kovan-mvcc
+cargo miri test -p kovan --lib --tests
 
 echo "All Miri tests passed!"

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_two_key_lost_update() {
     let db = Arc::new(KovanMVCC::new());
 

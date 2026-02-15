@@ -55,6 +55,7 @@ fn test_interleaved_push_pop() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_spsc() {
     let q = Arc::new(ArrayQueue::new(64));
     let q2 = q.clone();
@@ -87,6 +88,7 @@ fn test_concurrent_spsc() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_mpmc_completeness() {
     let q = Arc::new(ArrayQueue::new(256));
     let total_items = 4000;

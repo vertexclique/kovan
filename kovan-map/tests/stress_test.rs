@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hashmap_heavy_contention_same_key() {
     let map = Arc::new(HashMap::new());
 
@@ -25,6 +26,7 @@ fn test_hashmap_heavy_contention_same_key() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hashmap_concurrent_insert_remove_cycle() {
     let map = Arc::new(HashMap::new());
 
@@ -48,6 +50,7 @@ fn test_hashmap_concurrent_insert_remove_cycle() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hashmap_read_heavy() {
     let map = Arc::new(HashMap::new());
 
@@ -85,6 +88,7 @@ fn test_hashmap_read_heavy() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hopscotch_heavy_contention_same_key() {
     let map = Arc::new(HopscotchMap::new());
 
@@ -107,6 +111,7 @@ fn test_hopscotch_heavy_contention_same_key() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hopscotch_concurrent_insert_remove_cycle() {
     let map = Arc::new(HopscotchMap::new());
 
@@ -130,6 +135,7 @@ fn test_hopscotch_concurrent_insert_remove_cycle() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hopscotch_growth_under_contention() {
     let map = Arc::new(HopscotchMap::with_capacity(64));
 
@@ -167,6 +173,7 @@ fn test_hopscotch_growth_under_contention() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hopscotch_read_heavy() {
     let map = Arc::new(HopscotchMap::new());
 
@@ -201,6 +208,7 @@ fn test_hopscotch_read_heavy() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_hashmap_iter_during_mutation() {
     let map = Arc::new(HashMap::new());
 

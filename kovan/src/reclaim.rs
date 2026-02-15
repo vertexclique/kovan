@@ -136,7 +136,7 @@ pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
         while !curr.is_null() {
             let node = unsafe { &*curr };
             let next = node.batch_next();
-            let destructor = node.destructor;
+            let destructor = node.destructor();
             if let Some(d) = destructor {
                 unsafe { d(curr) };
             }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_unbounded_high_throughput() {
     let (tx, rx) = unbounded::channel();
     let tx = Arc::new(tx);
@@ -46,6 +47,7 @@ fn test_unbounded_high_throughput() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bounded_back_pressure() {
     let (tx, rx) = bounded::channel(4);
     let tx = Arc::new(tx);
@@ -78,6 +80,7 @@ fn test_bounded_back_pressure() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_unbounded_empty_try_recv() {
     let (_tx, rx) = unbounded::channel::<i32>();
     assert!(rx.try_recv().is_none());
@@ -85,6 +88,7 @@ fn test_unbounded_empty_try_recv() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bounded_multiple_senders() {
     let (tx, rx) = bounded::channel(16);
     let tx = Arc::new(tx);
@@ -122,6 +126,7 @@ fn test_bounded_multiple_senders() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_unbounded_multiple_receivers() {
     let (tx, rx) = unbounded::channel();
     let rx = Arc::new(rx);

@@ -559,7 +559,7 @@ impl Handle {
             }
         }
         unsafe {
-            core::ptr::addr_of_mut!((*node_ptr).destructor).write(Some(destructor::<T>));
+            (*node_ptr).set_destructor(Some(destructor::<T>));
         }
 
         // birth_epoch is already set at allocation time (RetiredNode::new)
@@ -582,9 +582,9 @@ impl Handle {
             // Subsequent nodes: batch_link = batch_last (refs-node)
             // Track min birth_epoch on refs-node
             let last = self.batch_last.get();
-            let birth_epoch = unsafe { (*node_ptr).birth_epoch };
-            if unsafe { (*last).birth_epoch } > birth_epoch {
-                unsafe { (*last).birth_epoch = birth_epoch };
+            let birth_epoch = unsafe { (*node_ptr).birth_epoch() };
+            if unsafe { (*last).birth_epoch() } > birth_epoch {
+                unsafe { (*last).set_birth_epoch(birth_epoch) };
             }
             unsafe {
                 (*node_ptr).batch_link.store(last, Ordering::SeqCst);
@@ -633,7 +633,7 @@ impl Handle {
 
         let mut curr = self.batch_first.get();
         let refs = self.batch_last.get();
-        let min_epoch = unsafe { (*refs).birth_epoch };
+        let min_epoch = unsafe { (*refs).birth_epoch() };
 
         // === Scan phase: assign slots to batch nodes ===
         let mut last = curr;

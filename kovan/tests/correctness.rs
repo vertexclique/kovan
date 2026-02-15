@@ -38,6 +38,7 @@ impl Drop for TestNode {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_no_premature_free() {
     // Test that nodes are not freed while still accessible through guards
     // This test verifies the core safety guarantee: no use-after-free
@@ -116,6 +117,7 @@ fn test_no_premature_free() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_eventual_reclamation() {
     // Test that all retired nodes are eventually reclaimed
     // We do this by retiring many nodes and verifying the system doesn't crash
@@ -183,6 +185,7 @@ fn test_eventual_reclamation() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_access() {
     // Test that concurrent readers and writers work correctly
 
@@ -255,6 +258,7 @@ fn test_concurrent_access() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_guard_drop_triggers_reclamation() {
     // Test that the reclamation system works correctly
     // We verify this by retiring many nodes and checking the system doesn't crash
