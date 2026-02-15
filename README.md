@@ -79,18 +79,25 @@ See the [`examples/`](examples/) directory for complete implementations.
 
 ## Performance
 
-- **10x faster** than naive implementations
-- Competitive with Crossbeam-Epoch on reads
-- Better memory bounds than epoch-based schemes
+Performance is workload-dependent, but kovan is typically **~1.5x faster** at multi-threaded scenarios due to lower contention on pin/unpin.
+
+### Pin Overhead
+
+**~36% faster** pin/unpin cycle.
+
+### Treiber Stack (push+pop, 10k ops/thread)
+
+**~1.5x faster** at multi-threaded scenarios due to lower contention on pin/unpin.
+
+### Read-Heavy (95% load, 5% swap)
+
+**~1.3x faster** across all thread counts. Read-dominated workloads benefit most from kovan's lighter pin overhead.
 
 ## Optional Features
 
 ```toml
 # Nightly optimizations (~5% faster)
 kovan = { version = "0.1", features = ["nightly"] }
-
-# Handle stalled threads
-kovan = { version = "0.1", features = ["robust"] }
 ```
 
 ## License

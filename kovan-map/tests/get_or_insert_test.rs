@@ -51,6 +51,7 @@ fn test_get_or_insert_identity() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_get_or_insert() {
     let map = Arc::new(HopscotchMap::new());
 

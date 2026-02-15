@@ -1,4 +1,4 @@
-use kovan::{Atomic, Shared, pin, retire};
+use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -7,7 +7,9 @@ use crate::signal::{AsyncSignal, Notifier, Signal};
 use std::collections::LinkedList;
 use std::sync::Mutex;
 
+#[repr(C)]
 pub(crate) struct Node<T> {
+    retired: RetiredNode,
     data: Option<T>,
     next: Atomic<Node<T>>,
 }
@@ -15,6 +17,7 @@ pub(crate) struct Node<T> {
 impl<T> Node<T> {
     fn new(data: Option<T>) -> *mut Self {
         Box::into_raw(Box::new(Self {
+            retired: RetiredNode::new(),
             data,
             next: Atomic::null(),
         }))

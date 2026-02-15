@@ -28,6 +28,7 @@ fn test_simple_push_pop() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_concurrent_push_pop() {
     let q = Arc::new(ArrayQueue::new(100));
     let mut handles = vec![];

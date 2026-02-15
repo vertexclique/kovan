@@ -19,6 +19,7 @@ impl EventHandler<MyEvent> for MyHandler {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_disruptor_simple() {
     let sum = Arc::new(AtomicU64::new(0));
     let handler = MyHandler { sum: sum.clone() };
@@ -51,6 +52,7 @@ fn test_disruptor_simple() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_disruptor_multiple_handlers() {
     let sum1 = Arc::new(AtomicU64::new(0));
     let sum2 = Arc::new(AtomicU64::new(0));
@@ -88,6 +90,7 @@ fn test_disruptor_multiple_handlers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_disruptor_multi_producer() {
     struct TestEvent {
         data: u64,

@@ -246,6 +246,7 @@ fn atom_rcu_string_transform() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_rcu_concurrent_increments() {
     const THREADS: usize = 4;
     const INCREMENTS: usize = 200;
@@ -515,6 +516,7 @@ fn atom_map_multiple_projections() {
 // ============================================================================
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_concurrent_readers_writers() {
     const NUM_READERS: usize = 4;
     const NUM_WRITERS: usize = 4;
@@ -550,6 +552,7 @@ fn atom_concurrent_readers_writers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_concurrent_rcu_counter() {
     const THREADS: usize = 4;
     const INCREMENTS: usize = 5_000;
@@ -574,6 +577,7 @@ fn atom_concurrent_rcu_counter() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_option_concurrent_operations() {
     const THREADS: usize = 4;
     const ITERATIONS: usize = 5_000;
@@ -608,6 +612,7 @@ fn atom_option_concurrent_operations() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_rapid_create_load_drop() {
     // Create, load, and drop many atoms rapidly to stress the reclamation system
     for i in 0u64..1_000 {
@@ -620,6 +625,7 @@ fn atom_rapid_create_load_drop() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_concurrent_swap_correctness() {
     // All swapped-out values should be unique and valid
     const THREADS: usize = 4;
@@ -669,6 +675,7 @@ fn atom_concurrent_swap_correctness() {
 /// Mimics a production scenario where a config atom is updated frequently
 /// while many readers consume it.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_sustained_heavy_load() {
     const READERS: usize = 4;
     const WRITERS: usize = 2;
@@ -710,6 +717,7 @@ fn atom_sustained_heavy_load() {
 /// RCU under heavy contention: multiple threads doing read-modify-write
 /// on a shared vector — every RCU call clones and pushes (realistic workload).
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_rcu_heavy_contention() {
     const THREADS: usize = 4;
     const PUSHES: usize = 500;
@@ -966,6 +974,7 @@ fn atom_rcu_with_complex_type() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn atom_cas_with_concurrent_modification() {
     let atom = Arc::new(Atom::new(0u64));
 

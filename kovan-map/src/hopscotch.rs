@@ -15,7 +15,7 @@ use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use foldhash::fast::FixedState;
-use kovan::{Atomic, Shared, pin, retire};
+use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 
 /// Neighborhood size (H parameter in hopscotch hashing)
 const NEIGHBORHOOD_SIZE: usize = 32;
@@ -44,15 +44,29 @@ struct Bucket<K, V> {
 }
 
 /// An entry in the hash table
-#[derive(Clone)]
+#[repr(C)]
 struct Entry<K, V> {
+    retired: RetiredNode,
     hash: u64,
     key: K,
     value: V,
 }
 
+impl<K: Clone, V: Clone> Clone for Entry<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            retired: RetiredNode::new(),
+            hash: self.hash,
+            key: self.key.clone(),
+            value: self.value.clone(),
+        }
+    }
+}
+
 /// The hash table structure
+#[repr(C)]
 struct Table<K, V> {
+    retired: RetiredNode,
     buckets: Box<[Bucket<K, V>]>,
     capacity: usize,
     mask: usize,
@@ -73,6 +87,7 @@ impl<K, V> Table<K, V> {
         }
 
         Self {
+            retired: RetiredNode::new(),
             buckets: buckets.into_boxed_slice(),
             capacity,
             mask: capacity - 1,
@@ -273,11 +288,22 @@ where
     }
 
     /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
+    ///
+    /// When multiple threads call this concurrently for the same key, all callers
+    /// are guaranteed to receive the same value (the one visible in the map).
     pub fn get_or_insert(&self, key: K, value: V) -> V {
-        match self.insert_impl(key, value.clone(), true) {
-            Some(existing) => existing,
-            None => value,
+        // Fast path: key already exists — no clone, no insert.
+        if let Some(v) = self.get(&key) {
+            return v;
         }
+        // Slow path: try to insert, then read back for concurrent consistency.
+        // The hop_info update is non-atomic with the slot CAS, so two threads can
+        // both "win" the insert. Reading back ensures all callers agree on one value.
+        //
+        // Note: `expect` has zero overhead vs `unwrap` on the success path — the
+        // static string literal is only materialized in the panic (unreachable) path.
+        let _ = self.insert_impl(key.clone(), value, true);
+        self.get(&key).expect("key was just inserted")
     }
 
     /// Insert a key-value pair only if the key does not exist.
@@ -436,6 +462,7 @@ where
                         // Clone key and value because if CAS fails, we retry, and we are inside a loop.
                         // We cannot move out of `key` or `value` inside a loop.
                         let new_entry = Box::into_raw(Box::new(Entry {
+                            retired: RetiredNode::new(),
                             hash,
                             key: key.clone(),
                             value: value.clone(),
@@ -476,6 +503,7 @@ where
                 // Clone key and value. If CAS fails, we continue the loop, so we need the originals
                 // for the next iteration.
                 let new_entry = Box::into_raw(Box::new(Entry {
+                    retired: RetiredNode::new(),
                     hash,
                     key: key.clone(),
                     value: value.clone(),
@@ -513,7 +541,12 @@ where
 
                 // This is the final attempt in this function. We can move key/value here
                 // because previous usages were clones.
-                let new_entry = Box::into_raw(Box::new(Entry { hash, key, value }));
+                let new_entry = Box::into_raw(Box::new(Entry {
+                    retired: RetiredNode::new(),
+                    hash,
+                    key,
+                    value,
+                }));
 
                 match slot_bucket.slot.compare_exchange(
                     unsafe { Shared::from_raw(core::ptr::null_mut()) },
@@ -676,7 +709,12 @@ where
                 let offset_from_home = probe_idx - bucket_idx;
 
                 if offset_from_home < NEIGHBORHOOD_SIZE {
-                    let new_entry = Box::into_raw(Box::new(Entry { hash, key, value }));
+                    let new_entry = Box::into_raw(Box::new(Entry {
+                        retired: RetiredNode::new(),
+                        hash,
+                        key,
+                        value,
+                    }));
                     probe_bucket
                         .slot
                         .store(unsafe { Shared::from_raw(new_entry) }, Ordering::Release);

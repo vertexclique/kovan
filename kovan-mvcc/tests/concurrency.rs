@@ -3,6 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_write_write_conflict() {
     let db = Arc::new(KovanMVCC::new());
     let barrier_start = Arc::new(Barrier::new(2));

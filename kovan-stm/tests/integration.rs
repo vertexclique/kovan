@@ -1,7 +1,6 @@
 use kovan_stm::Stm;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn test_basic_transaction() {
@@ -69,28 +68,47 @@ fn test_multiple_vars_atomic_swap() {
 
 #[test]
 fn test_isolation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let stm = Arc::new(Stm::new());
     let var = Arc::new(stm.tvar(0));
 
     let stm_clone = stm.clone();
     let var_clone = var.clone();
 
-    // Start a long running transaction
+    // T1 signals it has written (but not committed), main thread signals it has read
+    let t1_wrote = Arc::new(AtomicBool::new(false));
+    let t1_wrote_clone = t1_wrote.clone();
+    let main_read = Arc::new(AtomicBool::new(false));
+    let main_read_clone = main_read.clone();
+
     let t1 = thread::spawn(move || {
         stm_clone.atomically(|tx| {
             tx.store(&var_clone, 100)?;
-            // Sleep to let the other thread read
-            thread::sleep(Duration::from_millis(50));
+
+            // Signal: we've written but haven't committed yet
+            t1_wrote_clone.store(true, Ordering::SeqCst);
+
+            // Wait: don't return (and commit) until main thread has read
+            while !main_read_clone.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+
             Ok(())
         })
     });
 
-    // This transaction should NOT see the 100 until t1 commits
-    // Actually, in snapshot isolation / MVCC, it should see the old value (0) if it started before commit.
-    // Or if it starts after t1 writes but before commit, it should still see 0.
-    thread::sleep(Duration::from_millis(10));
+    // Wait for T1 to have written inside its transaction
+    while !t1_wrote.load(Ordering::SeqCst) {
+        thread::yield_now();
+    }
+
+    // Read while T1 is mid-transaction — should NOT see uncommitted write
     let val = stm.atomically(|tx| tx.load(&var));
     assert_eq!(val, 0);
+
+    // Let T1 commit
+    main_read.store(true, Ordering::SeqCst);
 
     t1.join().unwrap();
 
@@ -190,6 +208,8 @@ fn test_side_effects() {
     use std::sync::atomic::AtomicBool;
     let t1_ready = Arc::new(AtomicBool::new(false));
     let t1_ready_clone = t1_ready.clone();
+    let t2_committed = Arc::new(AtomicBool::new(false));
+    let t2_committed_clone = t2_committed.clone();
 
     let t1 = thread::spawn(move || {
         stm_t1.atomically(|tx| {
@@ -205,11 +225,13 @@ fn test_side_effects() {
                 r.fetch_add(1, Ordering::SeqCst);
             });
 
-            // Signal that we have read and are about to sleep
+            // Signal that we have read
             t1_ready_clone.store(true, Ordering::SeqCst);
 
-            // Sleep to allow T2 to commit first
-            thread::sleep(Duration::from_millis(200));
+            // Wait for T2 to commit before we try to commit (forces conflict)
+            while !t2_committed_clone.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
 
             tx.store(&var_t1, 100)?;
             Ok(())
@@ -219,7 +241,6 @@ fn test_side_effects() {
     // Wait for T1 to be ready (it has read the var)
     while !t1_ready.load(Ordering::SeqCst) {
         thread::yield_now();
-        thread::sleep(Duration::from_millis(1));
     }
 
     // T2 runs and commits quickly
@@ -227,6 +248,9 @@ fn test_side_effects() {
         tx.store(&var_t2, 200)?;
         Ok(())
     });
+
+    // Signal T1 that T2 has committed
+    t2_committed.store(true, Ordering::SeqCst);
 
     t1.join().unwrap();
 

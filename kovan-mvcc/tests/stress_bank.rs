@@ -9,6 +9,7 @@ const TRANSFERS: usize = 2000;
 const THREADS: usize = 10;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_bank_consistency() {
     let db = Arc::new(KovanMVCC::new());
 

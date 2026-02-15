@@ -17,6 +17,7 @@ fn test_simple_send_recv() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_threads() {
     let (s, r) = unbounded();
     let s1 = s.clone();
@@ -50,6 +51,7 @@ fn test_threads() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_recv_blocking() {
     let (s, r) = unbounded();
     let r = Arc::new(r);

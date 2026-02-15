@@ -2,6 +2,7 @@ use kovan_channel::{after, never, tick};
 use std::time::{Duration, Instant};
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_after() {
     let start = Instant::now();
     let r = after(Duration::from_millis(100));
@@ -13,6 +14,7 @@ fn test_after() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_tick() {
     let start = Instant::now();
     let r = tick(Duration::from_millis(50));

@@ -1,320 +1,845 @@
-//! Guard and Handle for critical section management
+//! Guard and Handle for critical section management.
+//!
+//! Implements the ASMR read/reserve_slot/retire protocol:
+//! - Pin (fast path): check epoch, do_update if changed
+//! - Pin (slow path): set up helping state, loop until stable epoch
+//! - Retire: batch construction, try_retire with epoch-based slot scanning
+//! - Helping: help_read/help_thread for wait-free progress
 
-use crate::retired::{NRefNode, Retired, RetiredNode};
-use crate::slot::{calculate_adjustment, global};
+use crate::retired::{INVPTR, REFC_PROTECT, RetiredNode, rnode_mark};
+use crate::slot::{self, ASMRState, EPOCH_FREQ, HR_NUM, RETIRE_FREQ};
 use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 use core::sync::atomic::Ordering;
 
-/// Batch size threshold for flushing
+/// RAII guard representing an active critical section.
 ///
-/// Must be ≥ 2×k where k is number of slots (64)
-/// Paper recommends batch ≥ MAX_THREADS + 1, where MAX_THREADS >> k
-/// Using 256 to reduce flush frequency and amortize overhead
-const BATCH_SIZE: usize = 256;
-
-/// RAII guard representing an active critical section
+/// While a Guard exists, the thread's epoch slot is set, protecting
+/// any `Shared<'g, T>` pointers loaded during this critical section.
+/// Guard::drop is a no-op in ASMR — the slot persists until
+/// the next epoch transition (do_update).
 ///
-/// While a Guard exists, the thread is considered "active" in its slot,
-/// and any `Shared<'g, T>` pointers are guaranteed to remain valid.
+/// This is literally for making users easy to use kovan as drop-in
+/// replacement for epoch-based reclamation. (like crossbeam epoch.)
 pub struct Guard {
-    slot: usize,
-    handle_ptr: usize,
+    _private: (),
 }
 
 impl Drop for Guard {
+    #[inline]
     fn drop(&mut self) {
-        let global = global();
-        let slot = global.slot(self.slot);
-
-        // Phase 1: Decrement reference count
-        let (new_refs, current_list) = slot.head.fetch_sub_ref();
-
-        // Phase 2a: If last thread out and list non-empty, adjust predecessor
-        if new_refs == 0 && current_list != 0 {
-            let addend = calculate_adjustment(global.slot_order());
-            // SAFETY: current_list is valid from slot head
-            unsafe {
-                adjust_refs(current_list, addend);
-            }
-        }
-
-        // Phase 2b: Traverse from entry point and decrement references
-        if self.handle_ptr != 0 {
-            // SAFETY: handle_ptr is valid from slot head at entry time
-            unsafe {
-                traverse_and_decrement(self.handle_ptr, 0, self.slot);
-            }
-        }
+        // No-op in ASMR. The epoch slot persists until next pin().
     }
 }
 
-/// Thread-local handle for batch accumulation
+/// Thread-local handle for ASMR state.
+///
+/// Manages thread ID, batch accumulation, and cached free lists.
 struct Handle {
-    slot: Cell<usize>,
-    batch: RefCell<Vec<Retired>>,
-    batch_nref: Cell<*mut NRefNode>,
-    pin_count: Cell<usize>,
+    global: Cell<Option<&'static ASMRState>>,
+    /// Thread ID (lazily allocated)
+    tid: Cell<Option<usize>>,
+    /// Batch state
+    batch_first: Cell<*mut RetiredNode>,
+    batch_last: Cell<*mut RetiredNode>,
+    batch_count: Cell<usize>,
+    /// Alloc counter for epoch advancement
+    alloc_counter: Cell<usize>,
+    /// Cached free list and count
+    free_list: Cell<*mut RetiredNode>,
+    list_count: Cell<usize>,
 }
 
 impl Handle {
     const fn new() -> Self {
         Self {
-            slot: Cell::new(0),
-            batch: RefCell::new(Vec::new()),
-            batch_nref: Cell::new(core::ptr::null_mut()),
-            pin_count: Cell::new(0),
+            global: Cell::new(None),
+            tid: Cell::new(None),
+            batch_first: Cell::new(core::ptr::null_mut()),
+            batch_last: Cell::new(core::ptr::null_mut()),
+            batch_count: Cell::new(0),
+            alloc_counter: Cell::new(0),
+            free_list: Cell::new(core::ptr::null_mut()),
+            list_count: Cell::new(0),
         }
     }
 
-    /// Select a slot, avoiding stalled ones if robust feature enabled
-    fn select_slot() -> usize {
-        use core::sync::atomic::{AtomicUsize, Ordering};
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    #[inline]
+    fn global(&self) -> &'static ASMRState {
+        match self.global.get() {
+            Some(g) => g,
+            None => {
+                let g = slot::global();
+                self.global.set(Some(g));
+                g
+            }
+        }
+    }
 
-        let global = global();
-        let start_slot = COUNTER.fetch_add(1, Ordering::Relaxed) % global.num_slots();
+    /// Get or allocate thread ID
+    #[inline]
+    fn tid(&self) -> usize {
+        match self.tid.get() {
+            Some(tid) => tid,
+            None => {
+                let tid = self.global().alloc_tid();
+                self.tid.set(Some(tid));
+                tid
+            }
+        }
+    }
 
-        #[cfg(feature = "robust")]
-        {
-            // Try to find non-stalled slot
-            let mut slot = start_slot;
-            for _ in 0..global.num_slots() {
-                let slot_ref = global.slot(slot);
-                let ack = slot_ref.ack_counter.load(Ordering::Relaxed);
-                if ack <= crate::robust::STALL_THRESHOLD {
-                    return slot;
+    /// do_update: transition epoch for a slot.
+    /// Dereferences previous nodes in the slot's list, then stores new epoch.
+    /// Returns the current epoch after update.
+    #[cold]
+    fn do_update(&self, curr_epoch: u64, index: usize, tid: usize) -> u64 {
+        let global = self.global();
+        let slots = global.thread_slots(tid);
+        let mut curr_epoch = curr_epoch;
+
+        // If the slot has a non-null list (including INVPTR), transition it.
+        // This is critical: INVPTR means "inactive". We must exchange to INVPTR,
+        // traverse any real list, then store null (0) to mark slot "active".
+        let list_lo = slots.first[index].load_lo();
+        if list_lo != 0 {
+            let first = slots.first[index].exchange_lo(INVPTR as u64, Ordering::AcqRel);
+            if first != INVPTR as u64 {
+                let mut free_list = self.free_list.get();
+                let mut list_count = self.list_count.get();
+                unsafe {
+                    crate::reclaim::traverse_cache(
+                        &mut free_list,
+                        &mut list_count,
+                        first as *mut RetiredNode,
+                    );
                 }
-                slot = (slot + 1) % global.num_slots();
+                self.free_list.set(free_list);
+                self.list_count.set(list_count);
             }
+            slots.first[index].store_lo(0, Ordering::SeqCst);
+            curr_epoch = global.get_epoch();
         }
 
-        start_slot
+        // Store current epoch
+        slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
+        curr_epoch
     }
 
+    /// Pin: enter a critical section (matches ASMR reserve_slot).
+    /// Fast path: if epoch hasn't changed, return immediately.
+    /// If epoch changed, call do_update to transition.
     fn pin(&self) -> Guard {
-        // Optimization: Cache slot selection for 100 operations
-        let pin_count = self.pin_count.get();
-        if pin_count.is_multiple_of(100) {
-            let slot = Self::select_slot();
-            self.slot.set(slot);
-        }
-        self.pin_count.set(pin_count.wrapping_add(1));
+        let tid = self.tid();
+        let global = self.global();
+        let index = 0; // kovan uses only slot index 0
 
-        let slot = self.slot.get();
-        let global = global();
+        let mut prev_epoch = global.thread_slots(tid).epoch[index].load_lo();
+        let mut attempts = 16usize;
 
-        // Optimization: Lazy era updates - only every 64th pin
-        #[cfg(feature = "robust")]
-        {
-            if pin_count % 64 == 0 {
-                let current_era = crate::robust::current_era();
-                global
-                    .slot(slot)
-                    .access_era
-                    .store(current_era, core::sync::atomic::Ordering::Relaxed);
+        loop {
+            let curr_epoch = global.get_epoch();
+            if curr_epoch == prev_epoch {
+                return Guard { _private: () };
+            }
+            prev_epoch = self.do_update(curr_epoch, index, tid);
+            attempts -= 1;
+            if attempts == 0 {
+                // Fall through to slow path
+                break;
             }
         }
 
-        // Atomic: increment ref count, get list snapshot
-        let (_, handle_ptr) = global.slot(slot).head.fetch_add_ref();
-
-        Guard { slot, handle_ptr }
+        // Slow path: set up helping state and wait for stable epoch
+        self.slow_path(index, tid);
+        Guard { _private: () }
     }
 
+    /// Slow path for pin when epoch keeps changing.
+    /// Sets up helping state so other threads can assist.
+    #[cold]
+    fn slow_path(&self, index: usize, tid: usize) {
+        let global = self.global();
+        let slots = global.thread_slots(tid);
+
+        let mut prev_epoch = slots.epoch[index].load_lo();
+        global.inc_slow();
+
+        // Set up state for helpers: pointer=0 (reserve_slot mode), parent=null
+        slots.state[index].pointer.store(0, Ordering::Release);
+        slots.state[index].parent.store(0, Ordering::Release);
+        slots.state[index].epoch.store(0, Ordering::Release);
+
+        let seqno = slots.epoch[index].load_hi();
+
+        // Signal pending: result = (INVPTR, seqno)
+        slots.state[index]
+            .result
+            .store(INVPTR as u64, seqno, Ordering::Release);
+
+        // Wait for stable epoch (other threads to complete their updates)
+        #[allow(unused_assignments)]
+        let mut first: *mut RetiredNode = core::ptr::null_mut();
+
+        loop {
+            let curr_epoch = global.get_epoch();
+            if curr_epoch == prev_epoch {
+                // Try to self-complete: CAS result from (INVPTR, seqno) to (0, 0)
+                if slots.state[index]
+                    .result
+                    .compare_exchange(INVPTR as u64, seqno, 0, 0)
+                    .is_ok()
+                {
+                    slots.epoch[index].store_hi(seqno + 2, Ordering::Release);
+                    slots.first[index].store_hi(seqno + 2, Ordering::Release);
+                    global.dec_slow();
+                    return;
+                }
+            }
+
+            // Dereference previous nodes
+            let list_lo = slots.first[index].load_lo();
+            if list_lo != 0 && list_lo != INVPTR as u64 {
+                let exchanged = slots.first[index].exchange_lo(0, Ordering::AcqRel);
+                // Check if result was already produced (seqno changed)
+                if slots.first[index].load_hi() != seqno {
+                    first = exchanged as *mut RetiredNode;
+                    break; // goto done
+                }
+                if exchanged != INVPTR as u64 {
+                    let mut free_list = self.free_list.get();
+                    let mut list_count = self.list_count.get();
+                    unsafe {
+                        crate::reclaim::traverse_cache(
+                            &mut free_list,
+                            &mut list_count,
+                            exchanged as *mut RetiredNode,
+                        );
+                    }
+                    self.free_list.set(free_list);
+                    self.list_count.set(list_count);
+                }
+                let _ = global.get_epoch(); // re-read after traverse
+            }
+
+            first = core::ptr::null_mut();
+            // Try to update epoch via DCAS
+            let _ = slots.epoch[index].compare_exchange(prev_epoch, seqno, curr_epoch, seqno);
+            prev_epoch = curr_epoch;
+
+            let result_ptr = slots.state[index].result.load_lo();
+            if result_ptr != INVPTR as u64 {
+                break; // Helper completed
+            }
+        }
+
+        // === done label ===
+
+        // An empty epoch transition
+        let _ = slots.epoch[index].compare_exchange(prev_epoch, seqno, prev_epoch, seqno + 1);
+
+        // Clean up the list
+        {
+            let (mut old_lo, mut old_hi) = slots.first[index].load();
+            while old_hi == seqno {
+                match slots.first[index].compare_exchange_weak(old_lo, old_hi, 0, seqno + 1) {
+                    Ok(_) => {
+                        if old_lo != INVPTR as u64 {
+                            first = old_lo as *mut RetiredNode;
+                        }
+                        break;
+                    }
+                    Err((lo, hi)) => {
+                        old_lo = lo;
+                        old_hi = hi;
+                    }
+                }
+            }
+        }
+
+        let seqno = seqno + 1;
+
+        // Set the epoch from helper's result
+        slots.epoch[index].store_hi(seqno + 1, Ordering::Release);
+        let result_epoch = slots.state[index].result.load_hi();
+        slots.epoch[index].store_lo(result_epoch, Ordering::Release);
+
+        // Set up first for the new seqno
+        slots.first[index].store_hi(seqno + 1, Ordering::Release);
+
+        // Check if the result pointer is already retired (need to protect it)
+        let result_ptr = slots.state[index].result.load_lo() & 0xFFFFFFFFFFFFFFFC;
+        if result_ptr != 0 {
+            let ptr_node = result_ptr as *mut RetiredNode;
+            let batch_link = unsafe { (*ptr_node).batch_link.load(Ordering::Acquire) };
+            if !batch_link.is_null() {
+                let refs = unsafe { crate::reclaim::get_refs_node(ptr_node) };
+                unsafe {
+                    (*refs).refs_or_next.fetch_add(1, Ordering::AcqRel);
+                }
+
+                let mut free_list = self.free_list.get();
+                let mut list_count = self.list_count.get();
+                if first as u64 != INVPTR as u64 && !first.is_null() {
+                    unsafe {
+                        crate::reclaim::traverse_cache(&mut free_list, &mut list_count, first);
+                    }
+                }
+
+                let rnode = rnode_mark(refs);
+                let old_first = slots.first[index].exchange_lo(rnode as u64, Ordering::AcqRel);
+                // If exchange succeeded and old was not INVPTR, traverse it
+                if old_first != INVPTR as u64 && old_first != 0 {
+                    unsafe {
+                        crate::reclaim::traverse_cache(
+                            &mut free_list,
+                            &mut list_count,
+                            old_first as *mut RetiredNode,
+                        );
+                    }
+                }
+                self.free_list.set(free_list);
+                self.list_count.set(list_count);
+
+                global.dec_slow();
+                self.drain_free_list();
+                return;
+            } else {
+                // Empty list transition
+                let _ = slots.first[index].compare_exchange(0, seqno, 0, seqno + 1);
+            }
+        }
+
+        global.dec_slow();
+
+        // Traverse removed list
+        if !first.is_null() && first as u64 != INVPTR as u64 {
+            let mut free_list = self.free_list.get();
+            let mut list_count = self.list_count.get();
+            unsafe {
+                crate::reclaim::traverse_cache(&mut free_list, &mut list_count, first);
+            }
+            self.free_list.set(free_list);
+            self.list_count.set(list_count);
+        }
+
+        self.drain_free_list();
+    }
+
+    /// Help other threads in the slow path (matches help_read).
+    #[cold]
+    fn help_read(&self, mytid: usize) {
+        let global = self.global();
+        if global.slow_counter() == 0 {
+            return;
+        }
+
+        let max_threads = global.max_threads();
+        let hr_num = global.hr_num();
+
+        for i in 0..max_threads {
+            for j in 0..hr_num {
+                let result_ptr = global.thread_slots(i).state[j].result.load_lo();
+                if result_ptr == INVPTR as u64 {
+                    self.help_thread(i, j, mytid);
+                }
+            }
+        }
+    }
+
+    /// Help a specific thread complete its slow-path operation.
+    #[cold]
+    fn help_thread(&self, helpee_tid: usize, index: usize, mytid: usize) {
+        let global = self.global();
+        let hr_num = global.hr_num();
+
+        // Check if still pending
+        let (last_result_lo, last_result_hi) =
+            global.thread_slots(helpee_tid).state[index].result.load();
+        if last_result_lo != INVPTR as u64 {
+            return;
+        }
+
+        let birth_epoch = global.thread_slots(helpee_tid).state[index]
+            .epoch
+            .load(Ordering::Acquire);
+        let parent = global.thread_slots(helpee_tid).state[index]
+            .parent
+            .load(Ordering::Acquire);
+
+        if parent != 0 {
+            global.thread_slots(mytid).first[hr_num].store_lo(0, Ordering::SeqCst);
+            global.thread_slots(mytid).epoch[hr_num].store_lo(birth_epoch, Ordering::SeqCst);
+        }
+        global.thread_slots(mytid).state[hr_num]
+            .parent
+            .store(parent, Ordering::SeqCst);
+
+        let _obj = global.thread_slots(helpee_tid).state[index]
+            .pointer
+            .load(Ordering::Acquire);
+        let seqno = global.thread_slots(helpee_tid).epoch[index].load_hi();
+
+        if last_result_hi == seqno {
+            let mut prev_epoch = global.get_epoch();
+            let mut last_result_lo = last_result_lo;
+            let mut last_result_hi = last_result_hi;
+
+            loop {
+                prev_epoch = self.do_update(prev_epoch, hr_num + 1, mytid);
+                // In reserve_slot mode (pointer=0), ptr is always null
+                let curr_epoch = global.get_epoch();
+
+                if curr_epoch == prev_epoch {
+                    // Try to set result
+                    if global.thread_slots(helpee_tid).state[index]
+                        .result
+                        .compare_exchange(
+                            last_result_lo,
+                            last_result_hi,
+                            0,
+                            curr_epoch, // ptr=0 (null), epoch=curr_epoch
+                        )
+                        .is_ok()
+                    {
+                        // Empty epoch transition
+                        let _ = global.thread_slots(helpee_tid).epoch[index].compare_exchange(
+                            prev_epoch,
+                            seqno,
+                            prev_epoch,
+                            seqno + 1,
+                        );
+
+                        // Clean up list
+                        let (mut old_lo, mut old_hi) =
+                            global.thread_slots(helpee_tid).first[index].load();
+                        while old_hi == seqno {
+                            match global.thread_slots(helpee_tid).first[index]
+                                .compare_exchange_weak(old_lo, old_hi, 0, seqno + 1)
+                            {
+                                Ok(_) => {
+                                    if old_lo != INVPTR as u64 && old_lo != 0 {
+                                        let mut free_list = self.free_list.get();
+                                        let mut list_count = self.list_count.get();
+                                        unsafe {
+                                            crate::reclaim::traverse_cache(
+                                                &mut free_list,
+                                                &mut list_count,
+                                                old_lo as *mut RetiredNode,
+                                            );
+                                        }
+                                        self.free_list.set(free_list);
+                                        self.list_count.set(list_count);
+                                    }
+                                    break;
+                                }
+                                Err((lo, hi)) => {
+                                    old_lo = lo;
+                                    old_hi = hi;
+                                }
+                            }
+                        }
+
+                        let seqno = seqno + 1;
+
+                        // Set real epoch
+                        let (mut old_lo, mut old_hi) =
+                            global.thread_slots(helpee_tid).epoch[index].load();
+                        while old_hi == seqno {
+                            match global.thread_slots(helpee_tid).epoch[index]
+                                .compare_exchange_weak(old_lo, old_hi, curr_epoch, seqno + 1)
+                            {
+                                Ok(_) => break,
+                                Err((lo, hi)) => {
+                                    old_lo = lo;
+                                    old_hi = hi;
+                                }
+                            }
+                        }
+
+                        // Empty list transition (no pointer to protect in reserve_slot mode)
+                        let _ = global.thread_slots(helpee_tid).first[index].compare_exchange(
+                            0,
+                            seqno,
+                            0,
+                            seqno + 1,
+                        );
+                    }
+                    break;
+                }
+                prev_epoch = curr_epoch;
+
+                // Check if result was already set
+                let (lo, hi) = global.thread_slots(helpee_tid).state[index].result.load();
+                last_result_lo = lo;
+                last_result_hi = hi;
+                if last_result_lo != INVPTR as u64 {
+                    break;
+                }
+            }
+
+            // Clean up helper slot hr_num+1
+            let epoch_lo =
+                global.thread_slots(mytid).epoch[hr_num + 1].exchange_lo(0, Ordering::SeqCst);
+            if epoch_lo != 0 {
+                let first = global.thread_slots(mytid).first[hr_num + 1]
+                    .exchange_lo(INVPTR as u64, Ordering::AcqRel);
+                if first != INVPTR as u64 && first != 0 {
+                    let mut free_list = self.free_list.get();
+                    let mut list_count = self.list_count.get();
+                    unsafe {
+                        crate::reclaim::traverse_cache(
+                            &mut free_list,
+                            &mut list_count,
+                            first as *mut RetiredNode,
+                        );
+                    }
+                    self.free_list.set(free_list);
+                    self.list_count.set(list_count);
+                }
+            }
+        }
+
+        // Clean up helper parent slot hr_num
+        let old_parent = global.thread_slots(mytid).state[hr_num]
+            .parent
+            .swap(0, Ordering::SeqCst);
+        if old_parent != parent {
+            // The helpee provided an extra reference
+            let refs = unsafe { crate::reclaim::get_refs_node(parent as *mut RetiredNode) };
+            let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
+            if old == 1 {
+                let mut free_list = self.free_list.get();
+                unsafe {
+                    (*refs).next.store(free_list, Ordering::Relaxed);
+                }
+                free_list = refs;
+                self.free_list.set(free_list);
+            }
+        }
+
+        // Clean up parent reservation slot hr_num
+        let epoch_lo = global.thread_slots(mytid).epoch[hr_num].exchange_lo(0, Ordering::SeqCst);
+        if epoch_lo != 0 {
+            let first = global.thread_slots(mytid).first[hr_num]
+                .exchange_lo(INVPTR as u64, Ordering::AcqRel);
+            if first != INVPTR as u64 && first != 0 {
+                let mut free_list = self.free_list.get();
+                let mut list_count = self.list_count.get();
+                unsafe {
+                    crate::reclaim::traverse_cache(
+                        &mut free_list,
+                        &mut list_count,
+                        first as *mut RetiredNode,
+                    );
+                }
+                self.free_list.set(free_list);
+                self.list_count.set(list_count);
+            }
+        }
+
+        self.drain_free_list();
+    }
+
+    /// Retire a node into the thread-local batch (matches ASMR retire).
     fn retire<T>(&self, ptr: *mut T)
     where
         T: 'static,
     {
-        let retired_ptr = ptr as *mut RetiredNode;
-        let mut batch = self.batch.borrow_mut();
+        let node_ptr = ptr as *mut RetiredNode;
 
-        // Initialize batch NRefNode on first retire
-        if batch.is_empty() {
-            // Create type-erased destructor
-            unsafe fn destructor<T>(ptr: *mut RetiredNode) {
-                let typed_ptr = ptr as *mut T;
-                // SAFETY: Caller guarantees ptr is valid and this is called once
-                unsafe {
-                    drop(Box::from_raw(typed_ptr));
-                }
+        // Set per-node destructor
+        // SAFETY: Use raw pointer writes to avoid creating &mut, which would
+        // conflict (under Stacked Borrows) with concurrent readers still holding
+        // a guard-protected reference to the outer struct.
+        unsafe fn destructor<T>(ptr: *mut RetiredNode) {
+            let typed_ptr = ptr as *mut T;
+            unsafe {
+                drop(Box::from_raw(typed_ptr));
             }
-
-            let nref_node = Box::into_raw(Box::new(NRefNode::new(retired_ptr, destructor::<T>)));
-            self.batch_nref.set(nref_node);
+        }
+        unsafe {
+            (*node_ptr).set_destructor(Some(destructor::<T>));
         }
 
-        batch.push(Retired { ptr: retired_ptr });
+        // birth_epoch is already set at allocation time (RetiredNode::new)
+        unsafe {
+            (*node_ptr)
+                .batch_link
+                .store(core::ptr::null_mut(), Ordering::Relaxed);
+        }
 
-        // Flush when batch reaches threshold
-        if batch.len() >= BATCH_SIZE {
-            drop(batch); // Release borrow
-            self.flush_batch();
+        let first = self.batch_first.get();
+        if first.is_null() {
+            // First node in batch -> becomes batch_last (refs-node)
+            self.batch_last.set(node_ptr);
+            unsafe {
+                (*node_ptr)
+                    .refs_or_next
+                    .store(REFC_PROTECT, Ordering::Relaxed);
+            }
+        } else {
+            // Subsequent nodes: batch_link = batch_last (refs-node)
+            // Track min birth_epoch on refs-node
+            let last = self.batch_last.get();
+            let birth_epoch = unsafe { (*node_ptr).birth_epoch() };
+            if unsafe { (*last).birth_epoch() } > birth_epoch {
+                unsafe { (*last).set_birth_epoch(birth_epoch) };
+            }
+            unsafe {
+                (*node_ptr).batch_link.store(last, Ordering::SeqCst);
+                (*node_ptr).set_batch_next(first);
+            }
+        }
+
+        self.batch_first.set(node_ptr);
+        let count = self.batch_count.get() + 1;
+        self.batch_count.set(count);
+
+        // Advance epoch periodically
+        let alloc_count = self.alloc_counter.get() + 1;
+        self.alloc_counter.set(alloc_count);
+        if alloc_count.is_multiple_of(EPOCH_FREQ) {
+            let tid = self.tid();
+            self.help_read(tid);
+            self.global().advance_epoch();
+        }
+
+        if count.is_multiple_of(RETIRE_FREQ) {
+            // Finalize batch: set refs-node's batch_link to RNODE(batch_first)
+            let last = self.batch_last.get();
+            let first = self.batch_first.get();
+            unsafe {
+                (*last)
+                    .batch_link
+                    .store(rnode_mark(first), Ordering::SeqCst);
+            }
+
+            self.try_retire();
+
+            // Reset batch
+            self.batch_first.set(core::ptr::null_mut());
+            self.batch_last.set(core::ptr::null_mut());
+            self.batch_count.set(0);
         }
     }
 
-    fn flush_batch(&self) {
-        let mut batch = self.batch.borrow_mut();
-        if batch.is_empty() {
-            return;
-        }
+    /// Try to retire the current batch by scanning all thread slots.
+    /// Matches ASMR try_retire.
+    fn try_retire(&self) {
+        let global = self.global();
+        let max_threads = global.max_threads();
+        let hr_num = global.hr_num();
 
-        let mut batch_vec = core::mem::take(&mut *batch);
-        drop(batch); // Release borrow
+        let mut curr = self.batch_first.get();
+        let refs = self.batch_last.get();
+        let min_epoch = unsafe { (*refs).birth_epoch() };
 
-        // Link batch nodes via batch_next
-        for i in 0..batch_vec.len() {
-            unsafe {
-                // Set nref_ptr for all nodes in batch
-                (*batch_vec[i].ptr).nref_ptr = self.batch_nref.get();
-
-                // Link to next node (circular, last points to null)
-                if i + 1 < batch_vec.len() {
-                    (*batch_vec[i].ptr).batch_next = batch_vec[i + 1].ptr;
-                } else {
-                    (*batch_vec[i].ptr).batch_next = core::ptr::null_mut();
+        // === Scan phase: assign slots to batch nodes ===
+        let mut last = curr;
+        for i in 0..max_threads {
+            let mut j = 0;
+            // Regular reservation slots (0..hr_num)
+            while j < hr_num {
+                let first_lo = global.thread_slots(i).first[j].load_lo();
+                if first_lo == INVPTR as u64 {
+                    j += 1;
+                    continue;
                 }
+                // Check seqno odd (in slow-path transition)
+                if global.thread_slots(i).first[j].load_hi() & 1 != 0 {
+                    j += 1;
+                    continue;
+                }
+                let epoch = global.thread_slots(i).epoch[j].load_lo();
+                if epoch < min_epoch {
+                    j += 1;
+                    continue;
+                }
+                // Check epoch seqno odd
+                if global.thread_slots(i).epoch[j].load_hi() & 1 != 0 {
+                    j += 1;
+                    continue;
+                }
+
+                if last == refs {
+                    return; // Not enough batch nodes for all active slots
+                }
+                unsafe {
+                    (*last).set_slot_info(i, j);
+                }
+                last = unsafe { (*last).batch_next() };
+                j += 1;
+            }
+            // Helper slots (hr_num..hr_num+2)
+            while j < hr_num + 2 {
+                let first_lo = global.thread_slots(i).first[j].load_lo();
+                if first_lo == INVPTR as u64 {
+                    j += 1;
+                    continue;
+                }
+                let epoch = global.thread_slots(i).epoch[j].load_lo();
+                if epoch < min_epoch {
+                    j += 1;
+                    continue;
+                }
+
+                if last == refs {
+                    return;
+                }
+                unsafe {
+                    (*last).set_slot_info(i, j);
+                }
+                last = unsafe { (*last).batch_next() };
+                j += 1;
             }
         }
 
-        let global = global();
-        let num_slots = global.num_slots();
+        // === Insert phase: exchange into slots ===
+        let mut adjs: usize = REFC_PROTECT.wrapping_neg(); // -REFC_PROTECT
 
-        // Optimization: Insert to subset of slots to reduce cache coherency traffic
-        // Use sqrt(num_slots) slots per batch to balance coverage and performance
-        let slots_to_use = (num_slots as f64).sqrt().ceil() as usize;
-        let slots_to_use = slots_to_use.max(8).min(num_slots); // At least 8, at most all
+        while curr != last {
+            let (slot_tid, slot_idx) = unsafe { (*curr).get_slot_info() };
+            let slot_first_ref = &global.thread_slots(slot_tid).first[slot_idx];
+            let slot_epoch = &global.thread_slots(slot_tid).epoch[slot_idx];
 
-        let mut curr_idx = 0;
-        let mut empty_slots = 0isize;
+            // Set next to null before insertion
+            unsafe {
+                (*curr).next.store(core::ptr::null_mut(), Ordering::Relaxed);
+            }
 
-        // Initialize NRef with hold value to prevent premature freeing during insertion
-        let hold_value = isize::MAX / 2;
-        let nref_node = unsafe { &*self.batch_nref.get() };
-        nref_node.nref.store(hold_value, Ordering::Release);
-
-        // Insert into subset of slots (sequential - parallel breaks correctness)
-        // Optimization: Use subset to reduce cache coherency traffic
-        // Start from a random offset to distribute load
-        use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-        static SLOT_OFFSET: AtomicUsize = AtomicUsize::new(0);
-        let start_offset = SLOT_OFFSET.fetch_add(1, AtomicOrdering::Relaxed) % num_slots;
-
-        for i in 0..slots_to_use {
-            let slot_idx = (start_offset + i) % num_slots;
-            let slot = global.slot(slot_idx);
-
-            // Quick check: skip if slot is inactive
-            let (refs, _) = slot.head.load();
-            if refs == 0 {
-                empty_slots = empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
+            // Check slot is still active
+            if slot_first_ref.load_lo() == INVPTR as u64 {
+                curr = unsafe { (*curr).batch_next() };
                 continue;
             }
 
-            let node_ptr = batch_vec[curr_idx].ptr;
+            // Re-check epoch
+            let epoch = slot_epoch.load_lo();
+            if epoch < min_epoch {
+                curr = unsafe { (*curr).batch_next() };
+                continue;
+            }
 
-            // Try to insert node into this active slot
-            loop {
-                let (refs, list_ptr) = slot.head.load();
+            // Exchange our node in as the new list head
+            let prev = slot_first_ref.exchange_lo(curr as u64, Ordering::AcqRel);
 
-                // Double-check: slot became inactive
-                if refs == 0 {
-                    empty_slots =
-                        empty_slots.saturating_add(calculate_adjustment(global.slot_order()));
-                    break;
-                }
-
-                // Link node into list
-                unsafe {
-                    (*node_ptr).smr_next = list_ptr as *mut RetiredNode;
-                }
-
-                // CAS: install node as new head
-                match slot
-                    .head
-                    .compare_exchange(refs, list_ptr, refs, node_ptr as usize)
-                {
-                    Ok(_) => {
-                        // Increment ack counter for robustness
-                        #[cfg(feature = "robust")]
-                        {
-                            slot.ack_counter.fetch_add(refs as isize, Ordering::Relaxed);
-                        }
-
-                        // Adjust predecessor if list was non-empty
-                        if list_ptr != 0 {
-                            let adj = calculate_adjustment(global.slot_order())
-                                .saturating_add(refs as isize);
-                            // SAFETY: list_ptr is valid from slot head
-                            unsafe {
-                                adjust_refs(list_ptr, adj);
-                            }
-                        }
-
-                        // Move to next node only after successful insertion
-                        curr_idx = (curr_idx + 1) % batch_vec.len();
-                        break;
+            if prev != 0 {
+                if prev == INVPTR as u64 {
+                    // Slot is transitioning — try to undo
+                    let exp = curr as u64;
+                    let (lo, _) = slot_first_ref.load();
+                    if lo == exp
+                        && slot_first_ref
+                            .compare_exchange(
+                                exp,
+                                slot_first_ref.load_hi(),
+                                INVPTR as u64,
+                                slot_first_ref.load_hi(),
+                            )
+                            .is_ok()
+                    {
+                        curr = unsafe { (*curr).batch_next() };
+                        continue;
                     }
-                    Err(_) => continue, // Retry CAS
+                } else {
+                    // Link prev as next of curr
+                    let prev_ptr = prev as *mut RetiredNode;
+                    if unsafe {
+                        (*curr).next.compare_exchange(
+                            core::ptr::null_mut(),
+                            prev_ptr,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        )
+                    }
+                    .is_err()
+                    {
+                        // Someone already set next (concurrent traverse)
+                        let mut free_list: *mut RetiredNode = core::ptr::null_mut();
+                        unsafe {
+                            crate::reclaim::traverse(&mut free_list, prev_ptr);
+                            crate::reclaim::free_batch_list(free_list);
+                        }
+                    }
                 }
             }
+
+            adjs = adjs.wrapping_add(1);
+            curr = unsafe { (*curr).batch_next() };
         }
 
-        // Account for slots we didn't visit (subset optimization)
-        let unvisited_slots = num_slots.saturating_sub(slots_to_use);
-        if unvisited_slots > 0 {
-            let adjustment_per_slot = calculate_adjustment(global.slot_order());
-            let unvisited_adjustment =
-                (unvisited_slots as isize).saturating_mul(adjustment_per_slot);
-            empty_slots = empty_slots.saturating_add(unvisited_adjustment);
-        }
-
-        // Adjust first node in batch for empty slots and unvisited slots
-        if empty_slots > 0 {
-            let first = batch_vec[0].ptr;
-            // SAFETY: first is valid from our batch
+        // Adjust reference count
+        let old = unsafe { (*refs).refs_or_next.fetch_add(adjs, Ordering::AcqRel) };
+        if old == adjs.wrapping_neg() {
+            // refs reached 0 — free immediately
             unsafe {
-                adjust_refs(first as usize, empty_slots);
+                (*refs).next.store(core::ptr::null_mut(), Ordering::Relaxed);
+                crate::reclaim::free_batch_list(refs);
             }
         }
+    }
 
-        // Release hold value: all insertions complete, set correct initial NRef
-        // The correct value is empty_slots (which already includes adjustments)
-        let adjustment = empty_slots - hold_value;
-        nref_node.nref.fetch_add(adjustment, Ordering::Release);
-
-        // Reset for next batch
-        self.batch_nref.set(core::ptr::null_mut());
+    /// Drain cached free list
+    fn drain_free_list(&self) {
+        let free_list = self.free_list.get();
+        if !free_list.is_null() {
+            unsafe {
+                crate::reclaim::free_batch_list(free_list);
+            }
+            self.free_list.set(core::ptr::null_mut());
+            self.list_count.set(0);
+        }
     }
 }
 
-// Use nightly thread_local for better performance when available
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if let Some(tid) = self.tid.get() {
+            // Clear all reservation slots
+            let global = self.global();
+            for i in 0..HR_NUM {
+                let first =
+                    global.thread_slots(tid).first[i].exchange_lo(INVPTR as u64, Ordering::AcqRel);
+                if first != INVPTR as u64 && first != 0 {
+                    let mut free_list = self.free_list.get();
+                    let mut list_count = self.list_count.get();
+                    unsafe {
+                        crate::reclaim::traverse_cache(
+                            &mut free_list,
+                            &mut list_count,
+                            first as *mut RetiredNode,
+                        );
+                    }
+                    self.free_list.set(free_list);
+                    self.list_count.set(list_count);
+                }
+            }
+
+            // Drain any remaining free list
+            self.drain_free_list();
+
+            // Recycle thread ID
+            global.free_tid(tid);
+        }
+    }
+}
+
+// Thread-local handle
 #[cfg(feature = "nightly")]
 #[thread_local]
 static HANDLE: Handle = Handle::new();
 
-// Fall back to stable thread_local! macro
 #[cfg(not(feature = "nightly"))]
 thread_local! {
     static HANDLE: Handle = const { Handle::new() };
 }
 
-/// Enter a critical section
+/// Enter a critical section.
 ///
 /// Returns a `Guard` that represents the active critical section.
 /// While the guard exists, any `Shared<'g, T>` pointers loaded are
 /// guaranteed to remain valid.
-///
-/// # Examples
-///
-/// ```rust
-/// use kovan::pin;
-///
-/// let guard = pin();
-/// // Access lock-free data structures safely
-/// drop(guard);
-/// ```
 #[inline]
 pub fn pin() -> Guard {
     #[cfg(feature = "nightly")]
@@ -327,10 +852,10 @@ pub fn pin() -> Guard {
     }
 }
 
-/// Retire a node for later reclamation
+/// Retire a node for later reclamation.
 ///
-/// The node will be added to the local batch and eventually inserted
-/// into all active slots for safe reclamation.
+/// The node will be added to the local batch and eventually distributed
+/// across active slots for safe reclamation when epoch conditions are met.
 ///
 /// # Safety
 ///
@@ -347,6 +872,3 @@ pub fn retire<T: 'static>(ptr: *mut T) {
         HANDLE.with(|handle| handle.retire(ptr))
     }
 }
-
-// Import reclamation functions
-use crate::reclaim::{adjust_refs, traverse_and_decrement};

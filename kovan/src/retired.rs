@@ -1,36 +1,156 @@
-//! Retired node structures for batch-based memory reclamation
+//! Retired node structures for ASMR batch-based memory reclamation.
+//!
+//! Node layout for the ASMR algorithm:
+//! - `next`: AtomicPtr — list link in slot (exchanged with INVPTR during traverse)
+//! - `batch_link`: AtomicPtr — points to refs-node; on refs-node: RNODE(batch_first)
+//! - `refs_or_next`: union — atomic refs counter on refs-node, batch_next on others
+//! - `birth_epoch`: epoch at which this node was allocated (on refs-node: min of batch)
+//! - `destructor`: type-erased destructor for deallocation
 
-use core::sync::atomic::AtomicIsize;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicPtr, AtomicUsize};
 
-/// Node structure embedded in user's data structure
+/// Type-erased destructor function
+pub(crate) type DestructorFn = unsafe fn(*mut RetiredNode);
+
+/// Sentinel value meaning "slot inactive / node already traversed"
+pub(crate) const INVPTR: usize = !0x0000_0000_0000_0000_usize;
+
+/// REFC_PROTECT bias for reference counting (1 << 63)
+pub(crate) const REFC_PROTECT: usize = 1_usize << 63;
+
+/// Mark a pointer as an RNODE (XOR with 1)
+#[inline]
+pub(crate) fn rnode_mark(ptr: *mut RetiredNode) -> *mut RetiredNode {
+    (ptr as usize ^ 1) as *mut RetiredNode
+}
+
+/// Check if a pointer is an RNODE marker
+#[inline]
+pub(crate) fn is_rnode(ptr: *const RetiredNode) -> bool {
+    (ptr as usize) & 1 != 0
+}
+
+/// Get the actual pointer from an RNODE-marked pointer
+#[inline]
+pub(crate) fn rnode_unmask(ptr: *mut RetiredNode) -> *mut RetiredNode {
+    (ptr as usize ^ 1) as *mut RetiredNode
+}
+
+/// Node structure embedded in user's data structure.
 ///
 /// Users must embed this at the start of their node type to enable retirement.
+///
+/// Layout for ASMR:
+/// - `next`: atomic next pointer in slot's retirement list; exchanged with INVPTR during traverse
+/// - `batch_link`: points to refs-node for non-refs nodes; on refs-node: RNODE(batch_first)
+/// - `refs_or_next`: union — atomic refs counter on refs-node, batch_next pointer on others
+/// - `birth_epoch`: allocation epoch; on refs-node: minimum birth epoch of entire batch
+/// - `destructor`: type-erased destructor for deallocation
+///
+/// `birth_epoch` and `destructor` use `UnsafeCell` for interior mutability: these fields
+/// are written during `retire()` while other threads may hold guard-protected `&T` references
+/// to the outer struct (whose layout starts with this RetiredNode). Without `UnsafeCell`,
+/// Miri's Stacked Borrows model treats the shared `&T` retag as covering these fields,
+/// conflicting with the non-atomic writes.
 #[repr(C, align(8))]
 pub struct RetiredNode {
-    /// Next node in slot's retirement list
-    pub(crate) smr_next: *mut RetiredNode,
+    /// Next node in slot's retirement list (atomic — exchanged during traverse).
+    /// Also used as slot pointer during try_retire preparation phase,
+    /// and as free-list link after refs reach 0.
+    pub(crate) next: AtomicPtr<RetiredNode>,
 
-    /// Next node in batch (for deallocation)
-    pub(crate) batch_next: *mut RetiredNode,
+    /// Points to the refs-node for non-refs nodes.
+    /// On the refs-node: set to RNODE(batch_first) after batch finalization.
+    /// Atomic because helpers may read it concurrently.
+    pub(crate) batch_link: AtomicPtr<RetiredNode>,
 
-    /// Pointer to batch's reference counter
-    pub(crate) nref_ptr: *mut NRefNode,
+    /// Union: atomic refs counter (on refs-node) | batch_next pointer (others).
+    /// On refs-node: initialized to REFC_PROTECT (1<<63).
+    /// On list nodes: batch_next pointer for walking the batch during free.
+    pub(crate) refs_or_next: AtomicUsize,
 
-    /// Birth era for robustness
-    #[cfg(feature = "robust")]
-    pub(crate) birth_era: u64,
+    /// Birth epoch of this node's allocation.
+    /// On the refs-node: minimum birth epoch across the entire batch.
+    /// UnsafeCell: written during retire() while readers may hold &T to the outer struct.
+    pub(crate) birth_epoch: UnsafeCell<u64>,
+
+    /// Type-erased destructor — set during retire().
+    /// Used by free_list to deallocate each node in a batch.
+    /// UnsafeCell: written during retire() while readers may hold &T to the outer struct.
+    pub(crate) destructor: UnsafeCell<Option<DestructorFn>>,
 }
 
 impl RetiredNode {
-    /// Create a new RetiredNode with null pointers
-    pub const fn new() -> Self {
+    /// Create a new RetiredNode with the current global epoch as birth_epoch.
+    ///
+    /// The birth_epoch must be set at allocation time (not retirement time)
+    /// so that threads pinned before this allocation can be correctly identified
+    /// as not needing protection for this node.
+    pub fn new() -> Self {
         Self {
-            smr_next: core::ptr::null_mut(),
-            batch_next: core::ptr::null_mut(),
-            nref_ptr: core::ptr::null_mut(),
-            #[cfg(feature = "robust")]
-            birth_era: 0,
+            next: AtomicPtr::new(core::ptr::null_mut()),
+            batch_link: AtomicPtr::new(core::ptr::null_mut()),
+            refs_or_next: AtomicUsize::new(0),
+            birth_epoch: UnsafeCell::new(crate::slot::global().get_epoch()),
+            destructor: UnsafeCell::new(None),
         }
+    }
+
+    /// Read birth_epoch
+    #[inline]
+    pub(crate) fn birth_epoch(&self) -> u64 {
+        unsafe { *self.birth_epoch.get() }
+    }
+
+    /// Write birth_epoch
+    #[inline]
+    pub(crate) fn set_birth_epoch(&self, epoch: u64) {
+        unsafe { *self.birth_epoch.get() = epoch }
+    }
+
+    /// Read destructor
+    #[inline]
+    pub(crate) fn destructor(&self) -> Option<DestructorFn> {
+        unsafe { *self.destructor.get() }
+    }
+
+    /// Write destructor
+    #[inline]
+    pub(crate) fn set_destructor(&self, d: Option<DestructorFn>) {
+        unsafe { *self.destructor.get() = d }
+    }
+
+    /// Read the batch_next pointer (non-atomic, for batch construction and freeing)
+    #[inline]
+    pub(crate) fn batch_next(&self) -> *mut RetiredNode {
+        self.refs_or_next
+            .load(core::sync::atomic::Ordering::Relaxed) as *mut RetiredNode
+    }
+
+    /// Set the batch_next pointer (non-atomic, for batch construction)
+    #[inline]
+    pub(crate) fn set_batch_next(&self, next: *mut RetiredNode) {
+        self.refs_or_next
+            .store(next as usize, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Store (tid, slot_index) packed into the `next` field during try_retire scan phase.
+    /// This avoids pointer arithmetic that would violate Stacked Borrows under Miri.
+    #[inline]
+    pub(crate) fn set_slot_info(&self, tid: usize, index: usize) {
+        let packed = (tid << 16) | index;
+        self.next.store(
+            packed as *mut RetiredNode,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Read the (tid, slot_index) packed into `next` during try_retire insert phase.
+    #[inline]
+    pub(crate) fn get_slot_info(&self) -> (usize, usize) {
+        let packed = self.next.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        (packed >> 16, packed & 0xFFFF)
     }
 }
 
@@ -40,58 +160,7 @@ impl Default for RetiredNode {
     }
 }
 
-impl RetiredNode {
-    /// Create a new RetiredNode with birth era
-    #[cfg(feature = "robust")]
-    pub fn new_with_era(era: u64) -> Self {
-        Self {
-            smr_next: core::ptr::null_mut(),
-            batch_next: core::ptr::null_mut(),
-            nref_ptr: core::ptr::null_mut(),
-            birth_era: era,
-        }
-    }
-}
-
-// SAFETY: RetiredNode contains only raw pointers which are Send
+// SAFETY: RetiredNode contains only raw pointers, atomics, and UnsafeCell fields
+// whose access is synchronized by the SMR protocol (retire happens-before reclamation).
 unsafe impl Send for RetiredNode {}
-// SAFETY: RetiredNode synchronization handled by atomic operations
 unsafe impl Sync for RetiredNode {}
-
-/// Type-erased destructor function
-pub(crate) type DestructorFn = unsafe fn(*mut RetiredNode);
-
-/// Reference counter node shared by all nodes in a batch
-#[repr(C, align(8))]
-pub(crate) struct NRefNode {
-    /// Atomic reference counter
-    ///
-    /// Tracks: ADDEND × k + Σ(threads_entered - threads_left)
-    /// When reaches 0, all threads that could see batch have left
-    pub(crate) nref: AtomicIsize,
-
-    /// Pointer to first node in batch (for deallocation)
-    pub(crate) batch_first: *mut RetiredNode,
-
-    /// Type-erased destructor for the batch
-    pub(crate) destructor: DestructorFn,
-}
-
-impl NRefNode {
-    /// Create a new NRefNode with destructor
-    pub(crate) fn new(batch_first: *mut RetiredNode, destructor: DestructorFn) -> Self {
-        Self {
-            nref: AtomicIsize::new(0),
-            batch_first,
-            destructor,
-        }
-    }
-}
-
-/// Internal tracking structure for retired nodes
-pub(crate) struct Retired {
-    pub(crate) ptr: *mut RetiredNode,
-}
-
-// SAFETY: Retired contains only raw pointers which are Send
-unsafe impl Send for Retired {}
