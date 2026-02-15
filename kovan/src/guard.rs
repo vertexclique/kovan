@@ -547,36 +547,49 @@ impl Handle {
         T: 'static,
     {
         let node_ptr = ptr as *mut RetiredNode;
-        let node = unsafe { &mut *node_ptr };
 
         // Set per-node destructor
+        // SAFETY: Use raw pointer writes to avoid creating &mut, which would
+        // conflict (under Stacked Borrows) with concurrent readers still holding
+        // a guard-protected reference to the outer struct.
         unsafe fn destructor<T>(ptr: *mut RetiredNode) {
             let typed_ptr = ptr as *mut T;
             unsafe {
                 drop(Box::from_raw(typed_ptr));
             }
         }
-        node.destructor = Some(destructor::<T>);
+        unsafe {
+            core::ptr::addr_of_mut!((*node_ptr).destructor).write(Some(destructor::<T>));
+        }
 
         // birth_epoch is already set at allocation time (RetiredNode::new)
-        node.batch_link
-            .store(core::ptr::null_mut(), Ordering::Relaxed);
+        unsafe {
+            (*node_ptr)
+                .batch_link
+                .store(core::ptr::null_mut(), Ordering::Relaxed);
+        }
 
         let first = self.batch_first.get();
         if first.is_null() {
             // First node in batch -> becomes batch_last (refs-node)
             self.batch_last.set(node_ptr);
-            node.refs_or_next.store(REFC_PROTECT, Ordering::Relaxed);
+            unsafe {
+                (*node_ptr)
+                    .refs_or_next
+                    .store(REFC_PROTECT, Ordering::Relaxed);
+            }
         } else {
             // Subsequent nodes: batch_link = batch_last (refs-node)
             // Track min birth_epoch on refs-node
             let last = self.batch_last.get();
-            let last_ref = unsafe { &*last };
-            if last_ref.birth_epoch > node.birth_epoch {
-                unsafe { (*last).birth_epoch = node.birth_epoch };
+            let birth_epoch = unsafe { (*node_ptr).birth_epoch };
+            if unsafe { (*last).birth_epoch } > birth_epoch {
+                unsafe { (*last).birth_epoch = birth_epoch };
             }
-            node.batch_link.store(last, Ordering::SeqCst);
-            node.set_batch_next(first);
+            unsafe {
+                (*node_ptr).batch_link.store(last, Ordering::SeqCst);
+                (*node_ptr).set_batch_next(first);
+            }
         }
 
         self.batch_first.set(node_ptr);
