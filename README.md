@@ -9,6 +9,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/kovan.svg)](https://crates.io/crates/kovan)
 [![Documentation](https://docs.rs/kovan/badge.svg)](https://docs.rs/kovan)
+[![Tests](https://github.com/vertexclique/kovan/actions/workflows/test.yml/badge.svg)](https://github.com/vertexclique/kovan/actions/workflows/test.yml)
+[![Miri](https://github.com/vertexclique/kovan/actions/workflows/miri.yml/badge.svg)](https://github.com/vertexclique/kovan/actions/workflows/miri.yml)
 
 </div>
 
