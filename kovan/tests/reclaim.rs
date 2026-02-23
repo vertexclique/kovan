@@ -32,7 +32,7 @@ fn test_retire_eventually_frees() {
                     drop_count: d.clone(),
                 }));
                 let _guard = pin();
-                retire(node);
+                unsafe { retire(node) };
             }
         }));
     }
@@ -57,7 +57,7 @@ fn test_guard_protects_from_reclamation() {
 
     let guard = pin();
     let ptr = atomic.load(Ordering::Acquire, &guard);
-    retire(ptr.as_raw());
+    unsafe { retire(ptr.as_raw()) };
 
     // While guard is held, node should not be freed (within same epoch)
     assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -79,7 +79,7 @@ fn test_concurrent_retire() {
                     drop_count: d.clone(),
                 }));
                 let _guard = pin();
-                retire(node);
+                unsafe { retire(node) };
             }
         }));
     }
@@ -95,7 +95,7 @@ fn test_concurrent_retire() {
             drop_count: drops.clone(),
         }));
         let _guard = pin();
-        retire(node);
+        unsafe { retire(node) };
     }
 
     // At least some should have been freed

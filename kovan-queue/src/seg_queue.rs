@@ -201,7 +201,7 @@ impl<T: 'static> SegQueue<T> {
             {
                 // Retire the old segment
                 // kovan::retire takes *mut T
-                kovan::retire(head.as_raw());
+                unsafe { kovan::retire(head.as_raw()) };
                 continue;
             }
 

@@ -81,19 +81,37 @@ See the [`examples/`](examples/) directory for complete implementations.
 
 ## Performance
 
-Performance is workload-dependent, but kovan is typically **~1.5x faster** at multi-threaded scenarios due to lower contention on pin/unpin.
+Comparison against the major memory reclamation approaches: epoch-based (crossbeam-epoch 0.9.18), hyaline-based (seize 0.5.1), and hazard pointers (haphazard 0.1.8).
+* Stable Rust
+* Intel Xeon W-2295 (18x Sky Lake)
 
 ### Pin Overhead
 
-**~36% faster** pin/unpin cycle.
+| | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+|---|---|---|---|---|
+| pin + drop | **3.5 ns** | 15.0 ns | 9.4 ns | 20.2 ns |
 
-### Treiber Stack (push+pop, 10k ops/thread)
+### Treiber Stack (push+pop, 5k ops/thread)
 
-**~1.5x faster** at multi-threaded scenarios due to lower contention on pin/unpin.
+| Threads | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+|---|---|---|---|---|
+| 1 | **570 us** | 575 us | 567 us | 819 us |
+| 4 | **3.6 ms** | 3.8 ms | 4.4 ms | 6.9 ms |
+| 8 | **8.8 ms** | 10.9 ms | 11.9 ms | 18.4 ms |
 
-### Read-Heavy (95% load, 5% swap)
+### Read-Heavy (95% load, 5% swap, 10k ops/thread)
 
-**~1.3x faster** across all thread counts. Read-dominated workloads benefit most from kovan's lighter pin overhead.
+| Threads | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+|---|---|---|---|---|
+| 2 | **325 us** | 477 us | 471 us | 1.18 ms |
+| 4 | **470 us** | 711 us | 691 us | 4.47 ms |
+| 8 | **721 us** | 1.08 ms | 1.10 ms | 17.96 ms |
+
+Run your own benchmarks, workloads differ:
+
+```bash
+cargo bench --bench comparison
+```
 
 ## Optional Features
 

@@ -1,41 +1,44 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan-square.svg"
 )]
-//! Kovan: High-performance wait-free memory reclamation for lock-free data structures.
+//! Kovan: High-performance **wait-free** memory reclamation for lock-free data structures.
 //! Bounded memory usage, predictable latency.
 //!
-//! Kovan implements the asynchronous safe memory reclamation algorithm,
-//! providing wait-free memory reclamation with bounded memory usage.
+//! Kovan implements a wait-free safe memory reclamation (SMR) algorithm based on
+//! the Crystalline / ASMR design. Unlike epoch-based reclamation (EBR) or
+//! hazard pointers, kovan guarantees **bounded worst-case latency** for every
+//! operation — no thread can be starved, even under contention.
 //!
-//! # Key Features
+//! # Key Properties
 //!
-//! - **Zero Read Overhead**: Object loads require only a single atomic read
-//! - **Wait-Free Progress**: Bounded steps even under contention
-//! - **Epoch-Based Architecture**: Per-thread slots with epoch tracking
-//! - **Batch Retirement**: Efficient amortized reclamation cost
+//! - **Wait-Free Progress**: Every operation completes in a bounded number of
+//!   steps, regardless of what other threads are doing. Stalled threads are
+//!   helped to completion by concurrent threads.
+//! - **Zero Read Overhead**: Object loads require only a single atomic read —
+//!   the same cost as a raw `AtomicPtr::load`.
+//! - **Bounded Memory**: Retired nodes are reclaimed in bounded batches.
+//!   The reclamation system cannot accumulate unbounded garbage, even with
+//!   stalled threads.
+//! - **`no_std` Compatible**: Uses only `alloc`. No standard library required.
+//!
+//! # Architecture
+//!
+//! - **Per-thread epoch slots**: Each thread maintains a slot recording its
+//!   current epoch. Slots are protected by 128-bit DCAS (double compare-and-swap).
+//! - **Batch retirement**: Retired nodes are accumulated in thread-local batches
+//!   of 64 and distributed across active slots via `try_retire`.
+//! - **Wait-free helping**: Threads in the slow path publish their state so
+//!   other threads can help them complete, ensuring system-wide progress.
 //!
 //! # Example
 //!
 //! ```rust
-//! use std::sync::atomic::Ordering;
-//! use kovan::{pin, retire, Atomic};
+//! use kovan::Atom;
 //!
-//! let atomic = Atomic::new(Box::into_raw(Box::new(42)));
-//!
-//! // Enter critical section
-//! let guard = pin();
-//!
-//! // Load with zero overhead (single atomic read)
-//! let ptr = atomic.load(Ordering::Acquire, &guard);
-//!
-//! // Access safely within guard lifetime
-//! unsafe {
-//!     if let Some(value) = ptr.as_ref() {
-//!         println!("Value: {}", value);
-//!     }
-//! }
-//!
-//! drop(guard);
+//! // High-level API: safe, zero-overhead reads
+//! let config = Atom::new(vec![1, 2, 3]);
+//! let guard = config.load();
+//! assert_eq!(guard.len(), 3);
 //! ```
 
 #![warn(missing_docs)]
@@ -52,7 +55,7 @@ mod robust;
 mod slot;
 mod ttas;
 
-pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption};
+pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};
 pub use guard::{Guard, pin};
 pub use reclaim::Reclaimable;

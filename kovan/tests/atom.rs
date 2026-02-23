@@ -81,7 +81,7 @@ fn atom_store_multiple_times() {
 fn atom_swap_returns_old_value() {
     let atom = Atom::new(String::from("hello"));
     let old = atom.swap(String::from("world"));
-    assert_eq!(old, "hello");
+    assert_eq!(*old, "hello");
     assert_eq!(&*atom.load(), "world");
 }
 
@@ -90,7 +90,7 @@ fn atom_swap_chain() {
     let atom = Atom::new(0u64);
     for i in 1..=50 {
         let old = atom.swap(i);
-        assert_eq!(old, i - 1);
+        assert_eq!(*old, i - 1);
     }
     assert_eq!(*atom.load(), 50);
 }
@@ -379,7 +379,7 @@ fn atom_option_store_none() {
 fn atom_option_take_some() {
     let opt = AtomOption::some(String::from("taken"));
     let taken = opt.take();
-    assert_eq!(taken, Some(String::from("taken")));
+    assert_eq!(*taken.unwrap(), "taken");
     assert!(opt.is_none());
 }
 
@@ -421,7 +421,7 @@ fn atom_option_roundtrip() {
     assert_eq!(opt.load().unwrap().len(), 3);
 
     let taken = opt.take().unwrap();
-    assert_eq!(taken, vec![1, 2, 3]);
+    assert_eq!(*taken, vec![1, 2, 3]);
     assert!(opt.is_none());
 
     // Re-fill
@@ -642,7 +642,7 @@ fn atom_concurrent_swap_correctness() {
                 // Use unique values per thread
                 let val = (tid * SWAPS + i + 1) as u64;
                 let old = atom.swap(val);
-                collected.push(old);
+                collected.push(*old);
             }
             collected
         }));
@@ -786,8 +786,12 @@ fn atom_option_take_no_double_drop() {
     let taken = opt.take();
     assert!(taken.is_some());
 
-    // Drop the taken value explicitly
-    drop(taken);
+    // XXX: Extract via into_inner_unchecked for immediate drop —
+    // safe in this single-threaded test with no concurrent readers.
+    // Removed<T>::drop would defer through reclamation, making the
+    // count non-deterministic. We want to verify no double-drop.
+    let taken_val = unsafe { taken.unwrap().into_inner_unchecked() };
+    drop(taken_val);
 
     // Trigger reclamation
     for _ in 0..500 {
@@ -817,9 +821,12 @@ fn atom_swap_no_double_drop() {
 
     let atom = Atom::new(DropCounter::new(1, drop_count.clone()));
 
-    // Swap returns the old value — it should be dropped exactly once
+    // Swap returns the old value wrapped in Removed<T>
     let old = atom.swap(DropCounter::new(2, drop_count.clone()));
-    drop(old);
+    // XXX: Extract via into_inner_unchecked for immediate drop —
+    // safe in this single-threaded test with no concurrent readers.
+    let old_val = unsafe { old.into_inner_unchecked() };
+    drop(old_val);
 
     // Trigger reclamation
     for _ in 0..500 {
@@ -834,7 +841,7 @@ fn atom_swap_no_double_drop() {
     }
 
     let count = drop_count.load(Ordering::SeqCst);
-    // Value #1: dropped once (from `drop(old)`)
+    // Value #1: dropped once (from `drop(old_val)`)
     // Value #2: dropped once (from `drop(atom)`)
     assert_eq!(
         count, 2,
@@ -894,7 +901,7 @@ fn atom_option_repeated_transitions() {
         assert!(opt.is_some());
         assert_eq!(*opt.load().unwrap(), i);
         let taken = opt.take();
-        assert_eq!(taken, Some(i));
+        assert_eq!(*taken.unwrap(), i);
     }
 }
 

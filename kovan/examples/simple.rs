@@ -8,7 +8,6 @@ fn main() {
     let atomic = Atomic::new(Box::into_raw(Box::new(42)));
 
     // Enter a critical section
-    // NOTE: Guard is NOT needed in ASMR, for the curious see `guard.rs`.
     let guard = pin();
 
     // Load the pointer (zero overhead - single atomic read)
@@ -45,8 +44,6 @@ fn main() {
     }
 
     // Guard is dropped here, allowing memory reclamation
-    // AGAIN, NOTE: NOT needed in ASMR, for the curious see `guard.rs`.
-    // Ficus bombasticus.
     drop(guard);
 
     println!("Example completed successfully!");

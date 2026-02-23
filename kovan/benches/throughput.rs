@@ -46,7 +46,7 @@ fn bench_retire(c: &mut Criterion) {
                 b.iter(|| {
                     for i in 0..size {
                         let node = Node::new(i);
-                        retire(node);
+                        unsafe { retire(node) };
                     }
                 });
             },
@@ -104,7 +104,7 @@ fn bench_atomic_load(c: &mut Criterion) {
         &guard,
     );
     if !old.is_null() {
-        retire(old.as_raw());
+        unsafe { retire(old.as_raw()) };
     }
 
     group.finish();
@@ -134,7 +134,7 @@ fn bench_atomic_swap(c: &mut Criterion) {
                                         &guard,
                                     );
                                     if !old.is_null() {
-                                        retire(old.as_raw());
+                                        unsafe { retire(old.as_raw()) };
                                     }
                                 }
                             })
@@ -153,7 +153,7 @@ fn bench_atomic_swap(c: &mut Criterion) {
                         &guard,
                     );
                     if !old.is_null() {
-                        retire(old.as_raw());
+                        unsafe { retire(old.as_raw()) };
                     }
                 });
             },
@@ -188,7 +188,7 @@ fn bench_contention(c: &mut Criterion) {
                                         &guard,
                                     );
                                     if !old.is_null() {
-                                        retire(old.as_raw());
+                                        unsafe { retire(old.as_raw()) };
                                     }
                                 }
                             })
@@ -207,7 +207,7 @@ fn bench_contention(c: &mut Criterion) {
                         &guard,
                     );
                     if !old.is_null() {
-                        retire(old.as_raw());
+                        unsafe { retire(old.as_raw()) };
                     }
                 });
             },

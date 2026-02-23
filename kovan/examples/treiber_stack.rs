@@ -101,7 +101,7 @@ impl<T: 'static> TreiberStack<T> {
                     let value = unsafe { core::ptr::read(&(*head.as_raw()).value) };
 
                     // Retire the node (will be reclaimed when safe)
-                    retire(head.as_raw());
+                    unsafe { retire(head.as_raw()) };
 
                     return Some(value);
                 }
