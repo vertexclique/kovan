@@ -290,12 +290,24 @@ impl ASMRState {
                 return tid;
             }
         }
-        let tid = self.next_tid.fetch_add(1, Ordering::Relaxed);
-        assert!(
-            tid < MAX_THREADS,
-            "kovan: exceeded maximum thread count ({MAX_THREADS})"
-        );
-        tid
+        // CAS loop: only increment on success so the counter stays valid
+        // if the assert panics and is caught by catch_unwind.
+        loop {
+            let current = self.next_tid.load(Ordering::Relaxed);
+            assert!(
+                current < MAX_THREADS,
+                "kovan: exceeded maximum thread count ({MAX_THREADS})"
+            );
+            match self.next_tid.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return current,
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Release a thread ID for recycling

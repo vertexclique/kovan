@@ -361,7 +361,7 @@ where
                                     let mask = !(1u32 << offset);
                                     bucket.hop_info.fetch_and(mask, Ordering::Release);
 
-                                    retire(entry_ptr.as_raw());
+                                    unsafe { retire(entry_ptr.as_raw()) };
 
                                     let new_count = self.count.fetch_sub(1, Ordering::Relaxed) - 1;
                                     let current_capacity = table.capacity;
@@ -418,7 +418,7 @@ where
                     )
                     .is_ok()
             {
-                retire(entry_ptr.as_raw());
+                unsafe { retire(entry_ptr.as_raw()) };
             }
 
             if i < table.capacity {
@@ -476,7 +476,7 @@ where
                             guard,
                         ) {
                             Ok(_) => {
-                                retire(entry_ptr.as_raw());
+                                unsafe { retire(entry_ptr.as_raw()) };
                                 return InsertResult::Success(Some(old_value));
                             }
                             Err(_) => {
@@ -647,7 +647,7 @@ where
                                             .hop_info
                                             .fetch_or(1u32 << new_offset, Ordering::Release);
 
-                                        retire(entry_ptr.as_raw());
+                                        unsafe { retire(entry_ptr.as_raw()) };
                                         current_empty = candidate_idx;
                                         moved = true;
                                         break;
@@ -784,7 +784,7 @@ where
                 &guard,
             ) {
                 Ok(_) => {
-                    retire(old_table_ptr.as_raw());
+                    unsafe { retire(old_table_ptr.as_raw()) };
                 }
                 Err(_) => {
                     success = false;

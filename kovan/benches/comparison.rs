@@ -1,4 +1,4 @@
-//! Comparison benchmarks: Kovan vs Crossbeam-Epoch
+//! Comparison benchmarks: Kovan vs Crossbeam-Epoch vs Seize vs Haphazard
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
@@ -77,7 +77,7 @@ mod kovan_bench {
                                 &guard,
                             ) {
                                 Ok(_) => {
-                                    retire(head.as_raw());
+                                    unsafe { retire(head.as_raw()) };
                                     break;
                                 }
                                 Err(_) => continue,
@@ -107,7 +107,7 @@ mod kovan_bench {
                 Ordering::Acquire,
                 &guard,
             ) {
-                Ok(old) => retire(old.as_raw()),
+                Ok(old) => unsafe { retire(old.as_raw()) },
                 Err(_) => continue,
             }
         }
@@ -222,6 +222,304 @@ mod crossbeam_bench {
     }
 }
 
+// Seize implementation (Hyaline-based reclamation)
+mod seize_bench {
+    use super::*;
+    use seize::{Collector, Guard, reclaim};
+
+    #[allow(dead_code)]
+    pub struct Node {
+        pub value: usize,
+        pub next: AtomicPtr<Node>,
+    }
+
+    impl Node {
+        pub fn new(value: usize) -> *mut Self {
+            Box::into_raw(Box::new(Self {
+                value,
+                next: AtomicPtr::new(std::ptr::null_mut()),
+            }))
+        }
+    }
+
+    pub struct Stack {
+        pub collector: Collector,
+        pub head: AtomicPtr<Node>,
+    }
+
+    pub fn bench_treiber_stack(num_threads: usize, ops_per_thread: usize) {
+        let stack = Arc::new(Stack {
+            collector: Collector::new(),
+            head: AtomicPtr::new(std::ptr::null_mut()),
+        });
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|tid| {
+                let stack = stack.clone();
+                thread::spawn(move || {
+                    for i in 0..ops_per_thread {
+                        // Push
+                        let node = Node::new(tid * ops_per_thread + i);
+                        loop {
+                            let guard = stack.collector.enter();
+                            let head = guard.protect(&stack.head, Ordering::Acquire);
+                            unsafe {
+                                (*node).next.store(head, Ordering::Relaxed);
+                            }
+                            match guard.compare_exchange(
+                                &stack.head,
+                                head,
+                                node,
+                                Ordering::Release,
+                                Ordering::Acquire,
+                            ) {
+                                Ok(_) => break,
+                                Err(_) => continue,
+                            }
+                        }
+
+                        // Pop
+                        loop {
+                            let guard = stack.collector.enter();
+                            let head = guard.protect(&stack.head, Ordering::Acquire);
+                            if head.is_null() {
+                                break;
+                            }
+                            let next = unsafe { (*head).next.load(Ordering::Relaxed) };
+                            match guard.compare_exchange(
+                                &stack.head,
+                                head,
+                                next,
+                                Ordering::Release,
+                                Ordering::Acquire,
+                            ) {
+                                Ok(old) => {
+                                    unsafe {
+                                        stack.collector.retire(old, reclaim::boxed::<Node>);
+                                    }
+                                    break;
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Cleanup
+        let guard = stack.collector.enter();
+        loop {
+            let head = guard.protect(&stack.head, Ordering::Acquire);
+            if head.is_null() {
+                break;
+            }
+            let next = unsafe { (*head).next.load(Ordering::Relaxed) };
+            match guard.compare_exchange(
+                &stack.head,
+                head,
+                next,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(old) => unsafe {
+                    stack.collector.retire(old, reclaim::boxed::<Node>);
+                },
+                Err(_) => continue,
+            }
+        }
+    }
+
+    pub fn bench_read_heavy(num_threads: usize, ops_per_thread: usize) {
+        let stack = Arc::new(Stack {
+            collector: Collector::new(),
+            head: AtomicPtr::new(Node::new(42)),
+        });
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|tid| {
+                let stack = stack.clone();
+                thread::spawn(move || {
+                    for i in 0..ops_per_thread {
+                        if i % 20 == 0 {
+                            // 5% writes
+                            let new_node = Node::new(tid * ops_per_thread + i);
+                            let guard = stack.collector.enter();
+                            let old = guard.swap(&stack.head, new_node, Ordering::Release);
+                            if !old.is_null() {
+                                unsafe {
+                                    stack.collector.retire(old, reclaim::boxed::<Node>);
+                                }
+                            }
+                        } else {
+                            // 95% reads
+                            let guard = stack.collector.enter();
+                            let ptr = guard.protect(&stack.head, Ordering::Acquire);
+                            black_box(ptr);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Cleanup
+        let guard = stack.collector.enter();
+        let old = guard.swap(&stack.head, std::ptr::null_mut(), Ordering::Release);
+        if !old.is_null() {
+            unsafe {
+                stack.collector.retire(old, reclaim::boxed::<Node>);
+            }
+        }
+    }
+}
+
+// Haphazard implementation (hazard pointers)
+mod haphazard_bench {
+    use super::*;
+    use haphazard::HazardPointer;
+
+    #[allow(dead_code)]
+    pub struct Node {
+        pub value: usize,
+        pub next: AtomicPtr<Node>,
+    }
+
+    impl Node {
+        pub fn new(value: usize) -> Box<Self> {
+            Box::new(Self {
+                value,
+                next: AtomicPtr::new(std::ptr::null_mut()),
+            })
+        }
+    }
+
+    pub fn bench_treiber_stack(num_threads: usize, ops_per_thread: usize) {
+        let head: Arc<haphazard::AtomicPtr<Node>> =
+            Arc::new(unsafe { haphazard::AtomicPtr::new(std::ptr::null_mut()) });
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|tid| {
+                let head = head.clone();
+                thread::spawn(move || {
+                    for i in 0..ops_per_thread {
+                        // Push
+                        let mut node = Node::new(tid * ops_per_thread + i);
+                        loop {
+                            let current = head.load_ptr();
+                            node.next.store(current, Ordering::Relaxed);
+                            match head.compare_exchange(current, node) {
+                                Ok(_) => break,
+                                Err(returned) => {
+                                    node = returned;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Pop
+                        loop {
+                            let mut hp = HazardPointer::new();
+                            match head.safe_load(&mut hp) {
+                                None => break,
+                                Some(h) => {
+                                    let next = h.next.load(Ordering::Relaxed);
+                                    let current = h as *const Node as *mut Node;
+                                    match unsafe { head.compare_exchange_ptr(current, next) } {
+                                        Ok(replaced) => {
+                                            if let Some(r) = replaced {
+                                                unsafe {
+                                                    r.retire();
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        Err(_) => continue,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Cleanup
+        loop {
+            let mut hp = HazardPointer::new();
+            match head.safe_load(&mut hp) {
+                None => break,
+                Some(h) => {
+                    let next = h.next.load(Ordering::Relaxed);
+                    let current = h as *const Node as *mut Node;
+                    match unsafe { head.compare_exchange_ptr(current, next) } {
+                        Ok(replaced) => {
+                            if let Some(r) = replaced {
+                                unsafe {
+                                    r.retire();
+                                }
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn bench_read_heavy(num_threads: usize, ops_per_thread: usize) {
+        let atomic: Arc<haphazard::AtomicPtr<Node>> =
+            Arc::new(haphazard::AtomicPtr::from(Node::new(42)));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|tid| {
+                let atomic = atomic.clone();
+                thread::spawn(move || {
+                    for i in 0..ops_per_thread {
+                        if i % 20 == 0 {
+                            // 5% writes
+                            let new_node = Node::new(tid * ops_per_thread + i);
+                            let old = atomic.swap(new_node);
+                            if let Some(r) = old {
+                                unsafe {
+                                    r.retire();
+                                }
+                            }
+                        } else {
+                            // 95% reads
+                            let mut hp = HazardPointer::new();
+                            let val = atomic.safe_load(&mut hp);
+                            black_box(val);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Cleanup
+        unsafe {
+            if let Some(r) = atomic.swap_ptr(std::ptr::null_mut()) {
+                r.retire();
+            }
+        }
+    }
+}
+
 fn bench_treiber_stack_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("treiber_stack");
     group.sample_size(20);
@@ -249,6 +547,26 @@ fn bench_treiber_stack_comparison(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(
+            BenchmarkId::new("seize", threads),
+            threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    seize_bench::bench_treiber_stack(num_threads, ops_per_thread);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("haphazard", threads),
+            threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    haphazard_bench::bench_treiber_stack(num_threads, ops_per_thread);
+                });
+            },
+        );
     }
 
     group.finish();
@@ -268,6 +586,21 @@ fn bench_pin_overhead(c: &mut Criterion) {
         b.iter(|| {
             let _guard = crossbeam_epoch::pin();
             black_box(&_guard);
+        });
+    });
+
+    group.bench_function("seize", |b| {
+        let collector = seize::Collector::new();
+        b.iter(|| {
+            let _guard = collector.enter();
+            black_box(&_guard);
+        });
+    });
+
+    group.bench_function("haphazard", |b| {
+        b.iter(|| {
+            let _hp = haphazard::HazardPointer::new();
+            black_box(&_hp);
         });
     });
 
@@ -308,7 +641,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                                             &write_guard,
                                         );
                                         if !old.is_null() {
-                                            kovan::retire(old.as_raw());
+                                            unsafe { kovan::retire(old.as_raw()) };
                                         }
                                         drop(write_guard);
                                         // Recreate guard for continued reads
@@ -335,7 +668,7 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                         &guard,
                     );
                     if !old.is_null() {
-                        kovan::retire(old.as_raw());
+                        unsafe { kovan::retire(old.as_raw()) };
                     }
                 });
             },
@@ -378,6 +711,28 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
                     for handle in handles {
                         handle.join().unwrap();
                     }
+                });
+            },
+        );
+
+        // Seize
+        group.bench_with_input(
+            BenchmarkId::new("seize", threads),
+            threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    seize_bench::bench_read_heavy(num_threads, ops_per_thread);
+                });
+            },
+        );
+
+        // Haphazard
+        group.bench_with_input(
+            BenchmarkId::new("haphazard", threads),
+            threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    haphazard_bench::bench_read_heavy(num_threads, ops_per_thread);
                 });
             },
         );

@@ -192,6 +192,8 @@ where
                             &guard,
                         ) {
                             Ok(_) => {
+                                // SAFETY: current was allocated via Box::into_raw,
+                                // Node is #[repr(C)] with RetiredNode at offset 0.
                                 retire(current.as_raw());
                                 return Some(old_value);
                             }
@@ -369,6 +371,8 @@ where
                             &guard,
                         ) {
                             Ok(_) => {
+                                // SAFETY: current was allocated via Box::into_raw,
+                                // Node is #[repr(C)] with RetiredNode at offset 0.
                                 retire(current.as_raw());
                                 return Some(old_value);
                             }
@@ -416,6 +420,8 @@ where
                             while !current.is_null() {
                                 let node = current.deref();
                                 let next = node.next.load(Ordering::Relaxed, &guard);
+                                // SAFETY: current was allocated via Box::into_raw,
+                                // Node is #[repr(C)] with RetiredNode at offset 0.
                                 retire(current.as_raw());
                                 current = next;
                             }

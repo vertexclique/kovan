@@ -56,6 +56,15 @@ impl<T> Atomic<T> {
         Self::new(ptr::null_mut())
     }
 
+    /// Load the raw pointer value without requiring a guard.
+    ///
+    /// This is only safe when the caller has exclusive access (e.g. `&mut self`
+    /// in a `Drop` impl). The returned pointer has no lifetime protection.
+    #[inline]
+    pub(crate) fn load_raw(&self) -> *mut T {
+        self.data.load(Ordering::Relaxed) as *mut T
+    }
+
     /// Loads a pointer from the atomic.
     ///
     /// This operation has zero overhead - it's just a single atomic load.
@@ -80,6 +89,11 @@ impl<T> Atomic<T> {
     }
 
     /// Stores a pointer into the atomic.
+    ///
+    /// Unlike [`load`](Atomic::load), this does not require a `Guard`
+    /// because no pointer is returned that needs lifetime protection.
+    /// The caller is responsible for ensuring the stored pointer is valid
+    /// and that any previously-stored pointer is properly retired.
     ///
     /// # Examples
     ///
@@ -209,8 +223,10 @@ impl<'g, T> Shared<'g, T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the pointer is valid and will remain valid
-    /// for the lifetime of the guard.
+    /// - `ptr` must be null or point to a valid, aligned `T` allocation.
+    /// - The allocation must remain valid for the lifetime `'g` of the
+    ///   returned `Shared<'g, T>`. In practice this means it must not be
+    ///   freed until all guards in scope have been dropped.
     #[inline]
     pub unsafe fn from_raw(ptr: *mut T) -> Self {
         Self {

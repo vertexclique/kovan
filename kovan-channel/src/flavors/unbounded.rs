@@ -50,7 +50,7 @@ impl<T: 'static> Drop for Channel<T> {
             let next = unsafe { curr.deref().next.load(Ordering::Relaxed, &guard) };
             // We can't just drop `curr` because of kovan.
             // We should `retire` it.
-            retire(curr.as_raw());
+            unsafe { retire(curr.as_raw()) };
             curr = next;
         }
     }
@@ -198,7 +198,7 @@ impl<T: 'static> Receiver<T> {
                     Ok(_) => {
                         // We won. We can take the data.
                         // The old head is retired.
-                        retire(head.as_raw());
+                        unsafe { retire(head.as_raw()) };
 
                         // We take the data from `next`.
                         // `next` is now the sentinel.

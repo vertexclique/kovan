@@ -16,11 +16,13 @@ use core::sync::atomic::Ordering;
 ///
 /// While a Guard exists, the thread's epoch slot is set, protecting
 /// any `Shared<'g, T>` pointers loaded during this critical section.
-/// Guard::drop is a no-op in ASMR — the slot persists until
-/// the next epoch transition (do_update).
+/// When the last Guard on a thread is dropped, the epoch slot becomes
+/// eligible for transition on the next `pin()` call.
 ///
-/// This is literally for making users easy to use kovan as drop-in
-/// replacement for epoch-based reclamation. (like crossbeam epoch.)
+/// Nested `pin()` calls are safe: only the outermost pin does real
+/// epoch work. Inner guards simply share the outer guard's epoch
+/// protection. This prevents re-entrant `pin()` from freeing nodes
+/// that an outer guard still references.
 pub struct Guard {
     _private: (),
 }
@@ -28,7 +30,22 @@ pub struct Guard {
 impl Drop for Guard {
     #[inline]
     fn drop(&mut self) {
-        // No-op in ASMR. The epoch slot persists until next pin().
+        // Decrement pin count. The epoch slot persists but will not be
+        // transitioned by a subsequent pin() until all guards are dropped.
+        #[cfg(feature = "nightly")]
+        {
+            let count = HANDLE.pin_count.get();
+            debug_assert!(count > 0, "Guard dropped with pin_count == 0");
+            HANDLE.pin_count.set(count - 1);
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            HANDLE.with(|handle| {
+                let count = handle.pin_count.get();
+                debug_assert!(count > 0, "Guard dropped with pin_count == 0");
+                handle.pin_count.set(count - 1);
+            });
+        }
     }
 }
 
@@ -39,6 +56,11 @@ struct Handle {
     global: Cell<Option<&'static ASMRState>>,
     /// Thread ID (lazily allocated)
     tid: Cell<Option<usize>>,
+    /// Number of live Guard instances on this thread.
+    /// Only the outermost pin() checks/transitions the epoch slot.
+    /// Guard::drop decrements this. When it reaches 0, the critical
+    /// section ends and the next pin() call may transition the epoch.
+    pin_count: Cell<usize>,
     /// Batch state
     batch_first: Cell<*mut RetiredNode>,
     batch_last: Cell<*mut RetiredNode>,
@@ -55,6 +77,7 @@ impl Handle {
         Self {
             global: Cell::new(None),
             tid: Cell::new(None),
+            pin_count: Cell::new(0),
             batch_first: Cell::new(core::ptr::null_mut()),
             batch_last: Cell::new(core::ptr::null_mut()),
             batch_count: Cell::new(0),
@@ -127,9 +150,22 @@ impl Handle {
     }
 
     /// Pin: enter a critical section (matches ASMR reserve_slot).
-    /// Fast path: if epoch hasn't changed, return immediately.
-    /// If epoch changed, call do_update to transition.
+    ///
+    /// Nested pin() calls are safe: only the outermost pin() does real work
+    /// (epoch check + do_update). Inner calls just increment the pin count
+    /// and return a Guard. Guard::drop decrements the count, so the epoch
+    /// slot is only eligible for transition once all Guards are dropped.
     fn pin(&self) -> Guard {
+        let count = self.pin_count.get();
+        self.pin_count.set(count + 1);
+
+        if count > 0 {
+            // Nested pin — skip epoch check entirely.
+            // The outermost guard's epoch is still protecting us.
+            return Guard { _private: () };
+        }
+
+        // Outermost pin — original logic unchanged
         let tid = self.tid();
         let global = self.global();
         let index = 0; // kovan uses only slot index 0
@@ -542,7 +578,16 @@ impl Handle {
     }
 
     /// Retire a node into the thread-local batch (matches ASMR retire).
-    fn retire<T>(&self, ptr: *mut T)
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must point to a valid, heap-allocated object (e.g. from `Box::into_raw`).
+    /// - `ptr` must have a `RetiredNode` at offset 0 (i.e. `#[repr(C)]` with
+    ///   `RetiredNode` as the first field).
+    /// - `ptr` must not be retired more than once.
+    /// - The caller must not access `*ptr` after this call (except through
+    ///   the reclamation system).
+    unsafe fn retire<T>(&self, ptr: *mut T)
     where
         T: 'static,
     {
@@ -726,22 +771,16 @@ impl Handle {
 
             if prev != 0 {
                 if prev == INVPTR as u64 {
-                    // Slot is transitioning — try to undo
+                    // Slot is transitioning — try to undo.
+                    // Load (lo, hi) once to avoid TOCTOU from multiple loads.
                     let exp = curr as u64;
-                    let (lo, _) = slot_first_ref.load();
-                    if lo == exp
-                        && slot_first_ref
-                            .compare_exchange(
-                                exp,
-                                slot_first_ref.load_hi(),
-                                INVPTR as u64,
-                                slot_first_ref.load_hi(),
-                            )
-                            .is_ok()
-                    {
-                        curr = unsafe { (*curr).batch_next() };
-                        continue;
+                    let (lo, hi) = slot_first_ref.load();
+                    if lo == exp {
+                        let _ = slot_first_ref.compare_exchange(exp, hi, INVPTR as u64, hi);
                     }
+                    // Whether CAS succeeded or failed, skip this node.
+                    curr = unsafe { (*curr).batch_next() };
+                    continue;
                 } else {
                     // Link prev as next of curr
                     let prev_ptr = prev as *mut RetiredNode;
@@ -816,6 +855,31 @@ impl Drop for Handle {
                 }
             }
 
+            // Drain partial batch: if the thread exits with fewer than
+            // RETIRE_FREQ nodes in its batch, those nodes were never
+            // published via try_retire. They are thread-local, so we
+            // can safely call their destructors directly.
+            let batch_last = self.batch_last.get();
+            let mut curr = self.batch_first.get();
+            while !curr.is_null() {
+                let node = unsafe { &*curr };
+                let next_ptr = node.batch_next();
+                let destructor = node.destructor();
+                if let Some(d) = destructor {
+                    unsafe { d(curr) };
+                }
+                // The refs-node (batch_last) is the terminal node with batch_next == null.
+                // For the first node in the batch (which is the refs-node when count == 1),
+                // batch_next is 0/null. Stop after processing it.
+                if curr == batch_last {
+                    break;
+                }
+                curr = next_ptr;
+            }
+            self.batch_first.set(core::ptr::null_mut());
+            self.batch_last.set(core::ptr::null_mut());
+            self.batch_count.set(0);
+
             // Drain any remaining free list
             self.drain_free_list();
 
@@ -859,16 +923,22 @@ pub fn pin() -> Guard {
 ///
 /// # Safety
 ///
-/// The pointer must point to a valid allocation that will not be
-/// accessed after this call (except through the reclamation system).
+/// - `ptr` must point to a valid, heap-allocated object (e.g. from `Box::into_raw`).
+/// - `ptr` must have a `RetiredNode` at offset 0 (i.e. `#[repr(C)]` with
+///   `RetiredNode` as the first field).
+/// - `ptr` must not be retired more than once.
+/// - The caller must not access `*ptr` after this call (except through
+///   the reclamation system).
 #[inline]
-pub fn retire<T: 'static>(ptr: *mut T) {
+pub unsafe fn retire<T: 'static>(ptr: *mut T) {
     #[cfg(feature = "nightly")]
     {
-        HANDLE.retire(ptr)
+        // SAFETY: Caller upholds the safety contract.
+        unsafe { HANDLE.retire(ptr) }
     }
     #[cfg(not(feature = "nightly"))]
     {
-        HANDLE.with(|handle| handle.retire(ptr))
+        // SAFETY: Caller upholds the safety contract.
+        HANDLE.with(|handle| unsafe { handle.retire(ptr) })
     }
 }

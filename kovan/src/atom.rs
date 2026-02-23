@@ -36,6 +36,7 @@ use crate::retired::RetiredNode;
 use alloc::boxed::Box;
 use core::fmt;
 use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
 use core::ops::Deref;
 use core::sync::atomic::Ordering;
 
@@ -126,6 +127,101 @@ impl<T: fmt::Display> fmt::Display for AtomGuard<'_, T> {
 // is derived from a Send + Sync allocation and protected by a Guard.
 unsafe impl<T: Send + Sync> Send for AtomGuard<'_, T> {}
 unsafe impl<T: Send + Sync> Sync for AtomGuard<'_, T> {}
+
+// ---------------------------------------------------------------------------
+// Removed<T> — deferred-drop wrapper from swap/take
+// ---------------------------------------------------------------------------
+
+/// A value removed from an [`Atom`] or [`AtomOption`].
+///
+/// The value can be read via [`Deref`]. When this wrapper is dropped,
+/// `T`'s destructor is **deferred** through the reclamation system —
+/// it will only run once all concurrent readers have moved on.
+///
+/// This prevents use-after-free when concurrent readers hold an
+/// [`AtomGuard`] that references the same value's internal heap
+/// allocations (e.g. a `String`'s buffer or `Vec`'s backing array).
+///
+/// To take ownership without deferral (e.g. when you know no readers
+/// exist), use [`into_inner_unchecked`](Removed::into_inner_unchecked).
+pub struct Removed<T: Send + Sync + 'static> {
+    value: ManuallyDrop<T>,
+}
+
+impl<T: Send + Sync + 'static> Deref for Removed<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T: Send + Sync + 'static> Removed<T> {
+    /// Take ownership of the inner value **without** deferring its
+    /// destructor.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee no concurrent reader can still access
+    /// the in-memory copy of this value (e.g. through an [`AtomGuard`]
+    /// obtained before the swap/take).
+    pub unsafe fn into_inner_unchecked(mut self) -> T {
+        let val = unsafe { ManuallyDrop::take(&mut self.value) };
+        core::mem::forget(self); // skip Removed::drop
+        val
+    }
+}
+
+impl<T: Send + Sync + 'static> Drop for Removed<T> {
+    fn drop(&mut self) {
+        // Move T into a heap-allocated wrapper with RetiredNode at offset 0,
+        // then retire it. T's destructor will run when the reclamation
+        // system confirms no readers exist.
+        #[repr(C)]
+        struct DeferDrop<U> {
+            _retired: RetiredNode,
+            value: U,
+        }
+
+        let val = unsafe { ManuallyDrop::take(&mut self.value) };
+        let wrapper = Box::into_raw(Box::new(DeferDrop {
+            _retired: RetiredNode::new(),
+            value: val,
+        }));
+        // SAFETY: DeferDrop<U> is #[repr(C)] with RetiredNode at offset 0.
+        // Allocated via Box::into_raw above.
+        unsafe { guard::retire(wrapper) };
+    }
+}
+
+impl<T: Send + Sync + 'static + PartialEq> PartialEq for Removed<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T: Send + Sync + 'static + PartialEq> PartialEq<T> for Removed<T> {
+    fn eq(&self, other: &T) -> bool {
+        **self == *other
+    }
+}
+
+impl<T: Send + Sync + 'static + fmt::Debug> fmt::Debug for Removed<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T: Send + Sync + 'static + fmt::Display> fmt::Display for Removed<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
+    }
+}
+
+// SAFETY: Removed<T> is Send + Sync if T is, because the inner value
+// is exclusively owned and only accessed through deref.
+unsafe impl<T: Send + Sync + 'static> Send for Removed<T> {}
+unsafe impl<T: Send + Sync + 'static> Sync for Removed<T> {}
 
 // ---------------------------------------------------------------------------
 // Atom<T> — the main container
@@ -308,16 +404,22 @@ impl<T: Send + Sync + 'static> Atom<T> {
         let old_ptr = old.as_raw();
         if !old_ptr.is_null() {
             // SAFETY: old_ptr was allocated via AtomNode::boxed and has
-            // RetiredNode at offset 0. Safe to retire directly.
-            guard::retire(old_ptr);
+            // RetiredNode at offset 0. Not retired elsewhere.
+            unsafe { guard::retire(old_ptr) };
         }
     }
 
-    /// Atomically replaces the current value and returns the previous one.
+    /// Atomically replaces the current value and returns the previous one
+    /// wrapped in [`Removed<T>`].
     ///
-    /// Unlike [`store()`](Atom::store), the old value is **not** retired —
-    /// ownership is transferred to the caller. The memory backing the old
-    /// node is retired for deallocation only (the value is moved out).
+    /// The returned [`Removed<T>`] defers `T`'s destructor through the
+    /// reclamation system, preventing use-after-free when concurrent
+    /// readers still reference the old value's heap internals. The value
+    /// can be read via `Deref`.
+    ///
+    /// Unlike [`store()`](Atom::store), the old value is **not** retired
+    /// immediately — ownership is transferred to the caller via `Removed<T>`.
+    /// The memory backing the old node is retired for deallocation only.
     ///
     /// # Examples
     ///
@@ -326,11 +428,11 @@ impl<T: Send + Sync + 'static> Atom<T> {
     ///
     /// let atom = Atom::new(String::from("hello"));
     /// let old = atom.swap(String::from("world"));
-    /// assert_eq!(old, "hello");
+    /// assert_eq!(*old, "hello");
     /// assert_eq!(*atom.load(), "world");
     /// ```
     #[inline]
-    pub fn swap(&self, val: T) -> T {
+    pub fn swap(&self, val: T) -> Removed<T> {
         let new_ptr = AtomNode::boxed(val);
         let guard = guard::pin();
         // SAFETY: new_ptr is a valid heap allocation.
@@ -341,10 +443,11 @@ impl<T: Send + Sync + 'static> Atom<T> {
         // We read the value out via ptr::read, then schedule the
         // AtomNode shell for deallocation only (no Drop on T).
         let old_val = unsafe { core::ptr::read(AtomNode::val_ptr(old_ptr)) };
-        unsafe {
-            retire_node_dealloc_only::<T>(old_ptr);
+        // SAFETY: old_ptr was allocated via AtomNode::boxed, val moved out via ptr::read.
+        unsafe { retire_node_dealloc_only::<T>(old_ptr) };
+        Removed {
+            value: ManuallyDrop::new(old_val),
         }
-        old_val
     }
 
     /// Compare-and-swap: atomically replace the value if it hasn't changed.
@@ -397,8 +500,8 @@ impl<T: Send + Sync + 'static> Atom<T> {
             Ok(old) => {
                 let old_ptr = old.as_raw();
                 if !old_ptr.is_null() {
-                    // SAFETY: AtomNode has RetiredNode at offset 0.
-                    guard::retire(old_ptr);
+                    // SAFETY: AtomNode has RetiredNode at offset 0. Not retired elsewhere.
+                    unsafe { guard::retire(old_ptr) };
                 }
                 Ok(AtomGuard {
                     ptr: unsafe { AtomNode::val_ptr(new_ptr) },
@@ -458,8 +561,8 @@ impl<T: Send + Sync + 'static> Atom<T> {
                 Ok(old) => {
                     let old_ptr = old.as_raw();
                     if !old_ptr.is_null() {
-                        // SAFETY: AtomNode has RetiredNode at offset 0.
-                        guard::retire(old_ptr);
+                        // SAFETY: AtomNode has RetiredNode at offset 0. Not retired elsewhere.
+                        unsafe { guard::retire(old_ptr) };
                     }
                     return;
                 }
@@ -509,9 +612,9 @@ impl<T: Send + Sync + 'static> Atom<T> {
 
 impl<T: Send + Sync + 'static> Drop for Atom<T> {
     fn drop(&mut self) {
-        let guard = guard::pin();
-        let shared = self.inner.load(Ordering::Acquire, &guard);
-        let ptr = shared.as_raw();
+        // &mut self guarantees exclusive access — no concurrent readers.
+        // No pin() needed; load directly from the underlying atomic.
+        let ptr = self.inner.load_raw();
         if !ptr.is_null() {
             // SAFETY: We have exclusive access (dropping), and the pointer
             // was allocated via AtomNode::boxed.
@@ -571,7 +674,7 @@ unsafe impl<T: Send + Sync + 'static> Sync for Atom<T> {}
 /// assert_eq!(&*opt.load().unwrap(), "hello");
 ///
 /// let taken = opt.take();
-/// assert_eq!(taken.unwrap(), "hello");
+/// assert_eq!(*taken.unwrap(), "hello");
 /// assert!(opt.load().is_none());
 /// ```
 pub struct AtomOption<T: Send + Sync + 'static> {
@@ -637,8 +740,8 @@ impl<T: Send + Sync + 'static> AtomOption<T> {
         let old = self.inner.swap(new_shared, Ordering::AcqRel, &guard);
         let old_ptr = old.as_raw();
         if !old_ptr.is_null() {
-            // SAFETY: AtomNode has RetiredNode at offset 0.
-            guard::retire(old_ptr);
+            // SAFETY: AtomNode has RetiredNode at offset 0. Not retired elsewhere.
+            unsafe { guard::retire(old_ptr) };
         }
     }
 
@@ -650,15 +753,17 @@ impl<T: Send + Sync + 'static> AtomOption<T> {
         let old = self.inner.swap(null_shared, Ordering::AcqRel, &guard);
         let old_ptr = old.as_raw();
         if !old_ptr.is_null() {
-            // SAFETY: AtomNode has RetiredNode at offset 0.
-            guard::retire(old_ptr);
+            // SAFETY: AtomNode has RetiredNode at offset 0. Not retired elsewhere.
+            unsafe { guard::retire(old_ptr) };
         }
     }
 
     /// Takes the value out, leaving the atom empty.
     ///
-    /// Returns `Some(val)` if there was a value, `None` otherwise.
-    pub fn take(&self) -> Option<T> {
+    /// Returns `Some(Removed<T>)` if there was a value, `None` otherwise.
+    /// The returned [`Removed<T>`] defers `T`'s destructor through the
+    /// reclamation system. See [`Atom::swap`] for details.
+    pub fn take(&self) -> Option<Removed<T>> {
         let guard = guard::pin();
         let null_shared = unsafe { crate::atomic::Shared::from_raw(core::ptr::null_mut()) };
         let old = self.inner.swap(null_shared, Ordering::AcqRel, &guard);
@@ -669,19 +774,20 @@ impl<T: Send + Sync + 'static> AtomOption<T> {
             // SAFETY: old_ptr was allocated via AtomNode::boxed.
             // We read the value out and schedule the node shell for dealloc only.
             let val = unsafe { core::ptr::read(AtomNode::val_ptr(old_ptr)) };
-            unsafe {
-                retire_node_dealloc_only::<T>(old_ptr);
-            }
-            Some(val)
+            // SAFETY: old_ptr was allocated via AtomNode::boxed, val moved out via ptr::read.
+            unsafe { retire_node_dealloc_only::<T>(old_ptr) };
+            Some(Removed {
+                value: ManuallyDrop::new(val),
+            })
         }
     }
 }
 
 impl<T: Send + Sync + 'static> Drop for AtomOption<T> {
     fn drop(&mut self) {
-        let guard = guard::pin();
-        let shared = self.inner.load(Ordering::Acquire, &guard);
-        let ptr = shared.as_raw();
+        // &mut self guarantees exclusive access — no concurrent readers.
+        // No pin() needed; load directly from the underlying atomic.
+        let ptr = self.inner.load_raw();
         if !ptr.is_null() {
             unsafe {
                 drop(Box::from_raw(ptr));
@@ -800,5 +906,7 @@ unsafe fn retire_node_dealloc_only<T: 'static>(ptr: *mut AtomNode<T>) {
         _retired: RetiredNode::new(),
         ptr,
     }));
-    guard::retire(wrapper);
+    // SAFETY: DeallocNode is #[repr(C)] with RetiredNode at offset 0.
+    // Allocated via Box::into_raw above.
+    unsafe { guard::retire(wrapper) };
 }

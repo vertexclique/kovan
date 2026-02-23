@@ -21,7 +21,8 @@ name = "kovan"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["std"]
+std = [] # Enable std-dependent features (e.g. catch_unwind for destructor panic safety).
 nightly = [
 ] # Enable nightly-only optimizations (e.g. faster thread-local access).
 
@@ -33,8 +34,10 @@ portable-atomic = { version = "1.11.1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-crossbeam-epoch = "0.9"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+crossbeam-epoch = "0.9.18"
+seize = "0.5.1"
+haphazard = "0.1.8"
 
 [[bench]]
 name = "comparison"

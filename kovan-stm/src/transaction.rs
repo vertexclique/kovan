@@ -186,6 +186,8 @@ impl<'a> Transaction<'a> {
                     .swap(Shared::from_raw(new_ptr), Ordering::AcqRel, &guard);
 
                 if !old.is_null() {
+                    // SAFETY: old was allocated via Box::into_raw,
+                    // StmNode is #[repr(C)] with RetiredNode at offset 0.
                     retire(old.as_raw());
                 }
             }

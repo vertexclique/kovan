@@ -10,12 +10,16 @@ use core::sync::atomic::Ordering;
 /// Maximum cached free-list entries before draining
 const MAX_CACHE: usize = 12;
 
-/// Trait for types that can be reclaimed
+/// Trait for types that can be reclaimed by the wait-free memory
+/// reclamation system.
 ///
-/// Types implementing this trait can be safely retired and reclaimed
-/// by the memory reclamation system.
 /// # Safety
-/// Implementors must ensure that `reclaim` is safe to call when the object is no longer reachable.
+///
+/// Implementors must guarantee:
+/// - [`RetiredNode`] is the **first field** at offset 0.
+/// - The type is `#[repr(C)]` to ensure deterministic field layout.
+/// - `dealloc` is safe to call when the object is no longer reachable
+///   by any thread (i.e. all guards that could reference it have been dropped).
 pub unsafe trait Reclaimable: Sized {
     /// Get a reference to the embedded RetiredNode
     fn retired_node(&self) -> &RetiredNode;
@@ -80,7 +84,11 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
                 .next
                 .swap(INVPTR as *mut RetiredNode, Ordering::AcqRel)
         };
-        // Follow batch_link to refs-node and decrement
+        // Follow batch_link to refs-node and decrement.
+        // Ordering: Relaxed is sufficient because the happens-before chain is
+        // established through the slot exchange (AcqRel) that delivered current slot
+        // to this thread. The batch_link was written (SeqCst) before the slot
+        // insertion, which happens-before current thread's slot extraction. shrug.
         let refs = unsafe { (*curr).batch_link.load(Ordering::Relaxed) };
         let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
         if old == 1 {
@@ -138,7 +146,19 @@ pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
             let next = node.batch_next();
             let destructor = node.destructor();
             if let Some(d) = destructor {
-                unsafe { d(curr) };
+                // If the destructor panics, continue freeing remaining nodes
+                // to prevent memory leaks. The panic payload is discarded.
+                // On no_std, panicking destructors will leak remaining nodes.
+                #[cfg(feature = "std")]
+                {
+                    let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        unsafe { d(curr) };
+                    }));
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    unsafe { d(curr) };
+                }
             }
             curr = next;
         }
