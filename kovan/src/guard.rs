@@ -10,7 +10,8 @@ use crate::retired::{INVPTR, REFC_PROTECT, RetiredNode, rnode_mark};
 use crate::slot::{self, ASMRState, EPOCH_FREQ, HR_NUM, RETIRE_FREQ};
 use alloc::boxed::Box;
 use core::cell::Cell;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::fence;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// RAII guard representing an active critical section.
 ///
@@ -70,6 +71,10 @@ struct Handle {
     /// Cached free list and count
     free_list: Cell<*mut RetiredNode>,
     list_count: Cell<usize>,
+    /// Cached epoch — mirrors slots.epoch[0] to avoid atomic read of
+    /// 128-bit WordPair on every load. Updated on the rare (slow) path only
+    /// (when global epoch has advanced since last check).
+    cached_epoch: Cell<u64>,
 }
 
 impl Handle {
@@ -84,6 +89,7 @@ impl Handle {
             alloc_counter: Cell::new(0),
             free_list: Cell::new(core::ptr::null_mut()),
             list_count: Cell::new(0),
+            cached_epoch: Cell::new(0),
         }
     }
 
@@ -110,6 +116,45 @@ impl Handle {
                 tid
             }
         }
+    }
+
+    /// Protect: era tracking on load.
+    ///
+    /// Ensures the thread's era slot is ≥ global_era so that try_retire()
+    /// does not incorrectly skip this thread when scanning for active references.
+    ///
+    /// The read order is critical: data.load() MUST come before global_era.load().
+    /// This guarantees (via Release-Acquire chain through the shared atomic) that
+    /// global_era ≥ birth_epoch of any pointer the thread loaded.
+    ///
+    /// Fast path cost: 1 Acquire load of global_era (L1 cache hit) + 1 Cell read
+    /// + 1 predictable branch. No loop, no traverse — O(1) and wait-free.
+    #[inline]
+    fn protect_load(&self, data: &AtomicUsize, order: Ordering) -> usize {
+        // Step 1: load the pointer
+        // XXX: This must be done first since ordering depends on it.
+        let ptr = data.load(order);
+
+        // Step 2: read global era
+        let global = self.global();
+        let curr_epoch = global.get_epoch();
+
+        // Step 3: compare with thread-local cached era.
+        // Normally this is just a fast path to avoid the atomic load.
+        // We are just comparing here for the edge case where the thread
+        // has not done any loads since the last epoch update.
+        let prev_epoch = self.cached_epoch.get();
+
+        if curr_epoch != prev_epoch {
+            // Rare path: era advanced since last check.
+            // Store new era into the slot so try_retire sees it.
+            let tid = self.tid();
+            let slots = global.thread_slots(tid);
+            slots.epoch[0].store_lo(curr_epoch, Ordering::SeqCst);
+            self.cached_epoch.set(curr_epoch);
+        }
+
+        ptr
     }
 
     /// do_update: transition epoch for a slot.
@@ -146,6 +191,7 @@ impl Handle {
 
         // Store current epoch
         slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
+        self.cached_epoch.set(curr_epoch);
         curr_epoch
     }
 
@@ -681,6 +727,9 @@ impl Handle {
         let min_epoch = unsafe { (*refs).birth_epoch() };
 
         // === Scan phase: assign slots to batch nodes ===
+        // SeqCst fence ensures we see the most recent epoch stores from all threads.
+        // Pairs with the SeqCst store in protect_load() / do_update().
+        fence(Ordering::SeqCst);
         let mut last = curr;
         for i in 0..max_threads {
             let mut j = 0;
@@ -897,6 +946,21 @@ static HANDLE: Handle = Handle::new();
 #[cfg(not(feature = "nightly"))]
 thread_local! {
     static HANDLE: Handle = const { Handle::new() };
+}
+
+/// Protect: era tracking for `Atomic::load()`.
+///
+/// Called internally by `Atomic::load()`. Must NOT be called without a live Guard.
+#[inline]
+pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.protect_load(data, order)
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.with(|handle| handle.protect_load(data, order))
+    }
 }
 
 /// Enter a critical section.

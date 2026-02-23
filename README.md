@@ -3,7 +3,7 @@
 </h1>
 <div align="center">
  <strong>
-   High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency.
+   High-performance wait-free memory reclamation for wait-free data structures. Bounded memory usage, predictable latency.
  </strong>
 <hr>
 
@@ -18,13 +18,13 @@
 
 Kovan solves the hardest problem in lock-free programming: **when is it safe to free memory?**
 
-When multiple threads access shared data without locks, you can't just `drop()` or `free()` - another thread might still be using it. Kovan tracks this automatically with **zero overhead on reads**.
+When multiple threads access shared data without locks, you can't just `drop()` or `free()` - another thread might still be using it. Kovan tracks this automatically with near-zero overhead on reads.
 
 ## Why Kovan?
 
-- **Zero read overhead**: Just one atomic load, nothing else
+- **Near-zero read overhead**: One atomic load & one comparison
 - **Bounded memory**: Never grows unbounded like epoch-based schemes
-- **Simple API**: Three functions: `pin()`, `load()`, `retire()`
+- **Simple API**: `Atom<T>` for safe usage, `pin()`/`load()`/`retire()` for low-level control
 
 ## Quick Start
 
@@ -35,33 +35,57 @@ kovan = "0.1"
 
 ## Basic Usage
 
-```rust
-use kovan::{Atomic, pin, retire};
-use std::sync::atomic::Ordering;
+The easiest way to use Kovan is through `Atom<T>`, which handles memory reclamation automatically:
 
-// Create shared atomic pointer
-let shared = Atomic::new(Box::into_raw(Box::new(42)));
+```rust
+use kovan::Atom;
+
+// Create a shared atomic value
+let shared = Atom::new(42_u64);
 
 // Read safely
-let guard = pin();  // Enter critical section
-let ptr = shared.load(Ordering::Acquire, &guard);
-unsafe {
-    if let Some(value) = ptr.as_ref() {
-        println!("Value: {}", value);
-    }
-}
-drop(guard);  // Exit critical section
+let guard = shared.load();
+println!("Value: {}", *guard);
+drop(guard);
 
-// Update safely
+// Update safely (old value is reclaimed automatically)
+let old = shared.swap(100_u64);
+```
+
+For low-level control, use the `pin()`/`load()`/`retire()` API with types that
+embed `RetiredNode` at the beginning:
+
+```rust
+use kovan::{Atomic, RetiredNode, pin, retire};
+use std::sync::atomic::Ordering;
+
+#[repr(C)]
+struct MyNode {
+    retired: RetiredNode,  // must be first field
+    value: u64,
+}
+
+let node = Box::into_raw(Box::new(MyNode {
+    retired: RetiredNode::new(),
+    value: 42,
+}));
+let shared = Atomic::new(node);
+
+// Read
 let guard = pin();
-let new_value = Box::into_raw(Box::new(100));
+let ptr = shared.load(Ordering::Acquire, &guard);
+// ptr is valid for the lifetime of guard
+
+// Swap and retire old value
+let new_node = Box::into_raw(Box::new(MyNode {
+    retired: RetiredNode::new(),
+    value: 100,
+}));
 let old = shared.swap(
-    unsafe { kovan::Shared::from_raw(new_value) },
+    unsafe { kovan::Shared::from_raw(new_node) },
     Ordering::Release,
     &guard
 );
-
-// Schedule old value for reclamation
 if !old.is_null() {
     unsafe { retire(old.as_raw()); }
 }
@@ -70,7 +94,7 @@ if !old.is_null() {
 ## How It Works
 
 1. **`pin()`** - Enter critical section, get a guard
-2. **`load()`** - Read pointer (zero overhead!)
+2. **`load()`** - Read pointer with epoch tracking
 3. **`retire()`** - Schedule memory for safe reclamation
 
 The guard ensures any pointers you load stay valid. When all guards are dropped, retired memory is freed automatically.

@@ -67,7 +67,12 @@ impl<T> Atomic<T> {
 
     /// Loads a pointer from the atomic.
     ///
-    /// This operation has zero overhead - it's just a single atomic load.
+    /// Performs era tracking: reads the pointer, then checks
+    /// the global epoch. If the epoch has advanced since the last check,
+    /// the thread's slot era is updated so `try_retire()` counts this thread
+    /// as protecting the loaded pointer's batch.
+    ///
+    /// Fast path cost: 3 words (1 atomic load, 2 word compares)
     ///
     /// # Examples
     ///
@@ -81,7 +86,7 @@ impl<T> Atomic<T> {
     /// ```
     #[inline]
     pub fn load<'g>(&self, order: Ordering, _guard: &'g Guard) -> Shared<'g, T> {
-        let raw = self.data.load(order);
+        let raw = crate::guard::protect_load(&self.data, order);
         Shared {
             data: raw as *mut T,
             _marker: PhantomData,
