@@ -171,7 +171,38 @@ fn test_era_updates_across_many_loads() {
     let stop = Arc::new(AtomicBool::new(false));
     let stop1 = stop.clone();
 
+    // Barrier: writer waits until all readers are running
+    let readers_ready = Arc::new(AtomicUsize::new(0));
+    let readers_ready1 = readers_ready.clone();
+
+    // Start readers FIRST so they're running before writer begins
+    let mut readers = vec![];
+    for _ in 0..4 {
+        let shared2 = shared.clone();
+        let stop2 = stop.clone();
+        let ready = readers_ready.clone();
+        readers.push(thread::spawn(move || {
+            let mut loads = 0u64;
+            // Signal that this reader is running
+            ready.fetch_add(1, Ordering::Release);
+            while !stop2.load(Ordering::Relaxed) {
+                let guard = pin();
+                let ptr = shared2.load(Ordering::Acquire, &guard);
+                if let Some(node) = unsafe { ptr.as_ref() } {
+                    let _ = std::hint::black_box(node.value);
+                }
+                drop(guard);
+                loads += 1;
+            }
+            loads
+        }));
+    }
+
+    // Writer: wait for all readers to start, then begin swaps
     let writer = thread::spawn(move || {
+        while readers_ready1.load(Ordering::Acquire) < 4 {
+            core::hint::spin_loop();
+        }
         for i in 0..2000 {
             let node = Box::into_raw(Box::new(CountedNode {
                 retired: RetiredNode::new(),
@@ -191,35 +222,12 @@ fn test_era_updates_across_many_loads() {
         stop1.store(true, Ordering::Release);
     });
 
-    // Reader threads: continuously load and verify
-    let mut readers = vec![];
-    for _ in 0..4 {
-        let shared2 = shared.clone();
-        let stop2 = stop.clone();
-        readers.push(thread::spawn(move || {
-            let mut loads = 0u64;
-            while !stop2.load(Ordering::Relaxed) {
-                let guard = pin();
-                let ptr = shared2.load(Ordering::Acquire, &guard);
-                if let Some(node) = unsafe { ptr.as_ref() } {
-                    // Just read the value — if it's been freed, ASAN/miri
-                    // would catch the UAF. Under normal execution the value
-                    // is valid as long as guard is held.
-                    let _ = std::hint::black_box(node.value);
-                }
-                drop(guard);
-                loads += 1;
-            }
-            loads
-        }));
-    }
-
     writer.join().unwrap();
     let total_loads: u64 = readers.into_iter().map(|h| h.join().unwrap()).sum();
     assert!(total_loads > 0, "readers should have done some loads");
     assert!(
         drops.load(Ordering::SeqCst) > 0,
-        "some nodes should be freed"
+        "some nodes should be freed",
     );
 }
 

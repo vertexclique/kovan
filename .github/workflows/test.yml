@@ -12,7 +12,7 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Test stable (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,6 +28,24 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --release
+
+  test-nightly:
+    name: Test nightly (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (nightly)
+        run: cargo build --workspace --features nightly
+
+      - name: Run tests (nightly)
+        run: cargo test --workspace --release --features nightly
 
   clippy:
     name: Clippy
