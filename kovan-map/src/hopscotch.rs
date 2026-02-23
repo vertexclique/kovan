@@ -653,14 +653,31 @@ where
                                         break;
                                     }
                                     Err(_) => {
-                                        let _ = empty_bucket.slot.compare_exchange(
+                                        // Attempt to revert the insertion of new_entry.
+                                        match empty_bucket.slot.compare_exchange(
                                             unsafe { Shared::from_raw(new_entry) },
                                             unsafe { Shared::from_raw(core::ptr::null_mut()) },
                                             Ordering::Release,
                                             Ordering::Relaxed,
                                             guard,
-                                        );
-                                        unsafe { drop(Box::from_raw(new_entry)) };
+                                        ) {
+                                            Ok(_) => {
+                                                // Revert succeeded: no other thread touched it.
+                                                // Safe to drop immediately.
+                                                unsafe { drop(Box::from_raw(new_entry)) };
+                                            }
+                                            Err(_) => {
+                                                // Displacement already happened here...
+                                                // Too late, so we just drop it. Another thread found new_entry,
+                                                // displaced it, and replaced it with something else.
+                                                // This means new_entry is now part of the blocks
+                                                // and was already "retired" by the other thread,
+                                                // OR it was just moved. In either case, we must
+                                                // let the reclamation system handle it to avoid a
+                                                // double free.
+                                                unsafe { retire(new_entry) };
+                                            }
+                                        }
                                         continue;
                                     }
                                 }
@@ -720,9 +737,9 @@ where
                         .store(unsafe { Shared::from_raw(new_entry) }, Ordering::Release);
 
                     let bucket = table.get_bucket(bucket_idx);
-                    let mut hop = bucket.hop_info.load(Ordering::Relaxed);
-                    hop |= 1u32 << offset_from_home;
-                    bucket.hop_info.store(hop, Ordering::Relaxed);
+                    bucket
+                        .hop_info
+                        .fetch_or(1u32 << offset_from_home, Ordering::Relaxed);
                     return true;
                 } else {
                     return false;
@@ -914,7 +931,9 @@ where
 }
 
 unsafe impl<K: Send, V: Send, S: Send> Send for HopscotchMap<K, V, S> {}
-unsafe impl<K: Sync, V: Sync, S: Sync> Sync for HopscotchMap<K, V, S> {}
+// SAFETY: Shared references allow moving K and V across threads (via insert/remove),
+// so K and V must be Send in addition to Sync.
+unsafe impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> Sync for HopscotchMap<K, V, S> {}
 
 impl<K, V, S> Drop for HopscotchMap<K, V, S> {
     fn drop(&mut self) {
@@ -992,6 +1011,69 @@ mod tests {
             for i in 0..1000 {
                 let key = thread_id * 1000 + i;
                 assert_eq!(map.get(&key), Some(key * 2));
+            }
+        }
+    }
+
+    #[test]
+    fn test_concurrent_insert_and_remove() {
+        use alloc::sync::Arc;
+        extern crate std;
+        use std::thread;
+
+        let map = Arc::new(HopscotchMap::with_capacity(64));
+
+        // Phase 1: Pre-populate so removers have something to work with
+        for thread_id in 0..4u64 {
+            for i in 0..500u64 {
+                let key = thread_id * 1000 + i;
+                map.insert(key, key * 3);
+            }
+        }
+
+        let mut insert_handles = alloc::vec::Vec::new();
+        let mut remove_handles = alloc::vec::Vec::new();
+
+        // Spawn inserter threads: each inserts keys in its own range
+        for thread_id in 0..4u64 {
+            let map_clone = Arc::clone(&map);
+            insert_handles.push(thread::spawn(move || {
+                for i in 0..500u64 {
+                    let key = thread_id * 1000 + i;
+                    map_clone.insert(key, key * 3);
+                }
+            }));
+        }
+
+        // Spawn remover threads: each removes keys from the same ranges,
+        // racing with inserters
+        for thread_id in 0..4u64 {
+            let map_clone = Arc::clone(&map);
+            remove_handles.push(thread::spawn(move || {
+                for i in 0..500u64 {
+                    let key = thread_id * 1000 + i;
+                    if let Some(val) = map_clone.remove(&key) {
+                        // Value must be correct if present
+                        assert_eq!(val, key * 3);
+                    }
+                }
+            }));
+        }
+
+        for handle in insert_handles {
+            handle.join().unwrap();
+        }
+        for handle in remove_handles {
+            handle.join().unwrap();
+        }
+
+        // Verify: every remaining key has the correct value
+        for thread_id in 0..4u64 {
+            for i in 0..500u64 {
+                let key = thread_id * 1000 + i;
+                if let Some(val) = map.get(&key) {
+                    assert_eq!(val, key * 3);
+                }
             }
         }
     }

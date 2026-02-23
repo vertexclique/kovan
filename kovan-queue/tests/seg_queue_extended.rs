@@ -108,3 +108,55 @@ fn test_string_values() {
     assert_eq!(q.pop(), Some("hello".to_string()));
     assert_eq!(q.pop(), Some("world".to_string()));
 }
+
+/// Verify that SegQueue initializes slots explicitly (not via zeroed MaybeUninit)
+/// by exercising push/pop with types that have non-trivial constructors.
+#[test]
+fn test_explicit_slot_init() {
+    let q: SegQueue<String> = SegQueue::new();
+    // If initialization is wrong, String values would be corrupted on push/pop
+    for i in 0..100 {
+        q.push(format!("item-{}", i));
+    }
+    for i in 0..100 {
+        assert_eq!(q.pop(), Some(format!("item-{}", i)));
+    }
+    assert_eq!(q.pop(), None);
+}
+
+/// Verify SegQueue Drop doesn't double-free by pushing items,
+/// popping some (triggering retire), and then dropping the queue.
+#[test]
+fn test_drop_after_partial_pop() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let drop_count = Arc::new(AtomicUsize::new(0));
+
+    struct Counted(Arc<AtomicUsize>);
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let n = 100;
+    {
+        let q: SegQueue<Counted> = SegQueue::new();
+        for _ in 0..n {
+            q.push(Counted(Arc::clone(&drop_count)));
+        }
+        // Pop half — these trigger retire() on consumed segments
+        for _ in 0..n / 2 {
+            q.pop();
+        }
+        // q dropped here — remaining n/2 values must also be dropped
+        // Not exactly a test that tests this correctly.
+    }
+
+    assert_eq!(
+        drop_count.load(Ordering::Relaxed),
+        n,
+        "all values must be dropped exactly once"
+    );
+}

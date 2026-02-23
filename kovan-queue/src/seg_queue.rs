@@ -32,10 +32,11 @@ struct Segment<T> {
 
 impl<T> Segment<T> {
     fn new(id: usize) -> Segment<T> {
-        let mut slots: [Slot<T>; SEGMENT_SIZE] = unsafe { MaybeUninit::zeroed().assume_init() };
-        for slot in &mut slots {
-            slot.state = AtomicUsize::new(SLOT_EMPTY);
-        }
+        // Use `core::array::from_fn` to construct each slot explicitly with known-good values.
+        let slots = core::array::from_fn(|_| Slot {
+            state: AtomicUsize::new(SLOT_EMPTY),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+        });
         Segment {
             retired: RetiredNode::new(),
             slots,
@@ -166,6 +167,8 @@ impl<T: 'static> SegQueue<T> {
             let head = self.head.load(Ordering::Acquire, &guard);
             let h = unsafe { head.as_ref().unwrap() };
 
+            let mut all_consumed = true;
+
             for i in 0..SEGMENT_SIZE {
                 let slot = &h.slots[i];
                 let state = slot.state.load(Ordering::Acquire);
@@ -190,10 +193,15 @@ impl<T: 'static> SegQueue<T> {
                         return None;
                     }
                 }
+
+                if slot.state.load(Ordering::Acquire) != SLOT_CONSUMED {
+                    all_consumed = false;
+                }
             }
 
             let next = h.next.load(Ordering::Acquire, &guard);
-            if !next.is_null()
+            if all_consumed
+                && !next.is_null()
                 && self
                     .head
                     .compare_exchange(head, next, Ordering::SeqCst, Ordering::Relaxed, &guard)
@@ -221,6 +229,17 @@ impl<T: 'static> SegQueue<T> {
 
 impl<T> Drop for SegQueue<T> {
     fn drop(&mut self) {
+        // `pop()` calls `kovan::retire(head.as_raw())` on a segment *only after* a
+        // successful CAS that removes it from `self.head`.  Once retired, that segment
+        // is no longer reachable via the linked list.  `drop()` receives `&mut self`
+        // (exclusive ownership), so no concurrent pops can run.  The walk below starts
+        // from the current `self.head` and only visits segments that are *still owned*
+        // by the queue (i.e., not yet retired).  Kovan will independently reclaim the
+        // previously retired segments; `drop()` never touches them.
+        //
+        // The `pin()` below keeps all retired (but not yet freed) nodes alive during
+        // the walk.  When `guard` drops, kovan may free those retired nodes — but by
+        // that point we have already finished walking the live portion of the list.
         let guard = pin();
         let mut current = self.head.load(Ordering::Relaxed, &guard);
 
@@ -232,12 +251,15 @@ impl<T> Drop for SegQueue<T> {
 
                 for i in 0..SEGMENT_SIZE {
                     if segment.slots[i].state.load(Ordering::Relaxed) == SLOT_WRITTEN {
+                        // drop_in_place on MaybeUninit<T> cast to *mut T is correct:
+                        // MaybeUninit<T> has the same layout as T and we confirmed
+                        // the slot is SLOT_WRITTEN (value is initialized).
                         ptr::drop_in_place(segment.slots[i].value.get() as *mut T);
                     }
                 }
 
-                // In Drop, we have exclusive access. Segments already retired are handled by kovan.
-                // We are responsible for dropping the remaining segments in the list.
+                // SAFETY: segment_ptr was allocated via Box::into_raw in Segment::new()
+                // and has not been retired (it is still in the live linked list).
                 drop(Box::from_raw(segment_ptr));
 
                 current = next;

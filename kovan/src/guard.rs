@@ -10,6 +10,7 @@ use crate::retired::{INVPTR, REFC_PROTECT, RetiredNode, rnode_mark};
 use crate::slot::{self, ASMRState, EPOCH_FREQ, HR_NUM, RETIRE_FREQ};
 use alloc::boxed::Box;
 use core::cell::Cell;
+use core::marker::PhantomData as marker;
 use core::sync::atomic::fence;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,6 +27,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// that an outer guard still references.
 pub struct Guard {
     _private: (),
+    // Psy szczekają, a karawana jedzie dalej.
+    marker: marker<*mut ()>,
 }
 
 impl Drop for Guard {
@@ -191,12 +194,19 @@ impl Handle {
                 self.free_list.set(free_list);
                 self.list_count.set(list_count);
             }
-            slots.first[index].store_lo(0, Ordering::SeqCst);
+
             curr_epoch = global.get_epoch();
+
+            // The slot's epoch must be updated before marking the
+            // slot as active (first_lo == 0). Otherwise, try_retire may scan
+            // the slot while it's active but holding the old epoch.
+            slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
+            slots.first[index].store_lo(0, Ordering::SeqCst);
+        } else {
+            // Store current epoch
+            slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
         }
 
-        // Store current epoch
-        slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
         self.cached_epoch.set(curr_epoch);
         curr_epoch
     }
@@ -214,7 +224,10 @@ impl Handle {
         if count > 0 {
             // Nested pin — skip epoch check entirely.
             // The outermost guard's epoch is still protecting us.
-            return Guard { _private: () };
+            return Guard {
+                _private: (),
+                marker,
+            };
         }
 
         // Outermost pin — original logic unchanged
@@ -228,7 +241,10 @@ impl Handle {
         loop {
             let curr_epoch = global.get_epoch();
             if curr_epoch == prev_epoch {
-                return Guard { _private: () };
+                return Guard {
+                    _private: (),
+                    marker,
+                };
             }
             prev_epoch = self.do_update(curr_epoch, index, tid);
             attempts -= 1;
@@ -240,7 +256,10 @@ impl Handle {
 
         // Slow path: set up helping state and wait for stable epoch
         self.slow_path(index, tid);
-        Guard { _private: () }
+        Guard {
+            _private: (),
+            marker,
+        }
     }
 
     /// Slow path for pin when epoch keeps changing.
@@ -456,8 +475,8 @@ impl Handle {
             .load(Ordering::Acquire);
 
         if parent != 0 {
-            global.thread_slots(mytid).first[hr_num].store_lo(0, Ordering::SeqCst);
             global.thread_slots(mytid).epoch[hr_num].store_lo(birth_epoch, Ordering::SeqCst);
+            global.thread_slots(mytid).first[hr_num].store_lo(0, Ordering::SeqCst);
         }
         global.thread_slots(mytid).state[hr_num]
             .parent
@@ -647,8 +666,8 @@ impl Handle {
 
         // Set per-node destructor
         // SAFETY: Use raw pointer writes to avoid creating &mut, which would
-        // conflict (under Stacked Borrows) with concurrent readers still holding
-        // a guard-protected reference to the outer struct.
+        // conflict with concurrent readers still holding a guard-protected reference
+        // to the outer struct.
         unsafe fn destructor<T>(ptr: *mut RetiredNode) {
             let typed_ptr = ptr as *mut T;
             unsafe {
@@ -1020,8 +1039,24 @@ pub fn pin() -> Guard {
 /// # Safety
 ///
 /// - `ptr` must point to a valid, heap-allocated object (e.g. from `Box::into_raw`).
-/// - `ptr` must have a `RetiredNode` at offset 0 (i.e. `#[repr(C)]` with
-///   `RetiredNode` as the first field).
+/// - **`ptr` must have a `RetiredNode` at offset 0.**  
+///   Concretely: the pointee type must be `#[repr(C)]` with `RetiredNode` as its
+///   *first* field.  This function casts `ptr` to `*mut RetiredNode` unconditionally
+///   and writes linked-list metadata into the first bytes of the allocation. Passing
+///   a pointer whose first bytes are not a valid `RetiredNode` is **immediate
+///   undefined behaviour** (memory corruption, wrong destructor called, double-free,
+///   whatever floats your boat...).
+///
+///   Use `kovan::Atom` or `AtomNode` wrappers which already embed `RetiredNode`
+///   correctly, rather than calling `retire()` on raw custom types.
+///   Type parameter `T: 'static` is intentionally weak to keep the API minimal;
+///   the `RetiredNode`-at-offset-0 invariant cannot be expressed as a Rust trait
+///   bound today (and tbh I don't think I will do it ever) and must be upheld by the caller.
+///
+///   I have always implemented `RetiredNode` in my previous attempts of this algo,
+///   and I don't see any reason to change that. It is a simple and efficient way to
+///   ensure that the `RetiredNode` is always at offset 0.
+///
 /// - `ptr` must not be retired more than once.
 /// - The caller must not access `*ptr` after this call (except through
 ///   the reclamation system).

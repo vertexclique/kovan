@@ -51,8 +51,6 @@ pub(crate) fn rnode_unmask(ptr: *mut RetiredNode) -> *mut RetiredNode {
 /// `birth_epoch` and `destructor` use `UnsafeCell` for interior mutability: these fields
 /// are written during `retire()` while other threads may hold guard-protected `&T` references
 /// to the outer struct (whose layout starts with this RetiredNode). Without `UnsafeCell`,
-/// Miri's Stacked Borrows model treats the shared `&T` retag as covering these fields,
-/// conflicting with the non-atomic writes.
 #[repr(C, align(8))]
 pub struct RetiredNode {
     /// Next node in slot's retirement list (atomic — exchanged during traverse).
@@ -145,7 +143,6 @@ impl RetiredNode {
     }
 
     /// Store (tid, slot_index) packed into the `next` field during try_retire scan phase.
-    /// This avoids pointer arithmetic that would violate Stacked Borrows under Miri.
     #[inline]
     pub(crate) fn set_slot_info(&self, tid: usize, index: usize) {
         let packed = (tid << 16) | index;

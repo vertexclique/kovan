@@ -4,7 +4,7 @@
 //! access to heap-allocated data with automatic memory reclamation.
 
 use crate::guard::Guard;
-use core::marker::PhantomData;
+use core::marker::PhantomData as marker;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// ```
 pub struct Atomic<T> {
     data: AtomicUsize,
-    _marker: PhantomData<*mut T>,
+    marker: marker<*mut T>,
 }
 
 unsafe impl<T: Send + Sync> Send for Atomic<T> {}
@@ -46,7 +46,7 @@ impl<T> Atomic<T> {
     pub fn new(ptr: *mut T) -> Self {
         Self {
             data: AtomicUsize::new(ptr as usize),
-            _marker: PhantomData,
+            marker,
         }
     }
 
@@ -89,7 +89,7 @@ impl<T> Atomic<T> {
         let raw = crate::guard::protect_load(&self.data, order);
         Shared {
             data: raw as *mut T,
-            _marker: PhantomData,
+            marker,
         }
     }
 
@@ -154,11 +154,11 @@ impl<T> Atomic<T> {
         {
             Ok(prev) => Ok(Shared {
                 data: prev as *mut T,
-                _marker: PhantomData,
+                marker,
             }),
             Err(prev) => Err(Shared {
                 data: prev as *mut T,
-                _marker: PhantomData,
+                marker,
             }),
         }
     }
@@ -183,11 +183,11 @@ impl<T> Atomic<T> {
         ) {
             Ok(prev) => Ok(Shared {
                 data: prev as *mut T,
-                _marker: PhantomData,
+                marker,
             }),
             Err(prev) => Err(Shared {
                 data: prev as *mut T,
-                _marker: PhantomData,
+                marker,
             }),
         }
     }
@@ -198,7 +198,7 @@ impl<T> Atomic<T> {
         let prev = self.data.swap(new.data as usize, order);
         Shared {
             data: prev as *mut T,
-            _marker: PhantomData,
+            marker,
         }
     }
 }
@@ -220,7 +220,7 @@ impl<T> Default for Atomic<T> {
 /// the pointer after the guard is dropped is undefined behavior.
 pub struct Shared<'g, T> {
     data: *mut T,
-    _marker: PhantomData<(&'g Guard, *mut T)>,
+    marker: marker<(&'g Guard, *mut T)>,
 }
 
 impl<'g, T> Shared<'g, T> {
@@ -234,10 +234,7 @@ impl<'g, T> Shared<'g, T> {
     ///   freed until all guards in scope have been dropped.
     #[inline]
     pub unsafe fn from_raw(ptr: *mut T) -> Self {
-        Self {
-            data: ptr,
-            _marker: PhantomData,
-        }
+        Self { data: ptr, marker }
     }
 
     /// Returns the raw pointer.

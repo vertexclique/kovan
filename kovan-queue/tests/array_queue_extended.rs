@@ -146,3 +146,38 @@ fn test_push_returns_value_on_full() {
     let err = q.push(3);
     assert_eq!(err, Err(3));
 }
+
+/// Verify that ArrayQueue Drop calls T::drop() on remaining values.
+#[test]
+fn test_drop_calls_destructor() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let drop_count = Arc::new(AtomicUsize::new(0));
+
+    #[derive(Debug)]
+    struct Counted(Arc<AtomicUsize>);
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    {
+        let q = ArrayQueue::new(8);
+        for _ in 0..4 {
+            q.push(Counted(Arc::clone(&drop_count))).unwrap();
+        }
+        // Pop 2, leaving 2 still in the queue
+        q.pop();
+        q.pop();
+        // q dropped here — remaining 2 values must be dropped
+    }
+
+    // 4 total values were created; all 4 must be dropped (2 from pop, 2 from Drop impl)
+    assert_eq!(
+        drop_count.load(Ordering::Relaxed),
+        4,
+        "all Counted values must be dropped"
+    );
+}

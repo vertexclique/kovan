@@ -35,7 +35,7 @@ use crate::guard::{self, Guard};
 use crate::retired::RetiredNode;
 use alloc::boxed::Box;
 use core::fmt;
-use core::marker::PhantomData;
+use core::marker::PhantomData as marker;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
 use core::sync::atomic::Ordering;
@@ -97,7 +97,7 @@ impl<T> AtomNode<T> {
 pub struct AtomGuard<'a, T> {
     _guard: Guard,
     ptr: *const T,
-    _marker: PhantomData<&'a T>,
+    marker: marker<&'a T>,
 }
 
 impl<T> Deref for AtomGuard<'_, T> {
@@ -123,10 +123,9 @@ impl<T: fmt::Display> fmt::Display for AtomGuard<'_, T> {
     }
 }
 
-// SAFETY: AtomGuard is Send + Sync if T is, because the inner pointer
-// is derived from a Send + Sync allocation and protected by a Guard.
-unsafe impl<T: Send + Sync> Send for AtomGuard<'_, T> {}
-unsafe impl<T: Send + Sync> Sync for AtomGuard<'_, T> {}
+// NOTE: AtomGuard is intentionally !Send + !Sync because it contains a Guard,
+// which pins the current thread's epoch slot. It must be dropped on the
+// same thread that created it.
 
 // ---------------------------------------------------------------------------
 // Removed<T> — deferred-drop wrapper from swap/take
@@ -332,7 +331,7 @@ impl<T: Send + Sync + 'static> Atom<T> {
             // SAFETY: shared is non-null for Atom (always contains a value)
             ptr: unsafe { AtomNode::val_ptr(shared.as_raw()) },
             _guard: guard,
-            _marker: PhantomData,
+            marker,
         }
     }
 
@@ -506,7 +505,7 @@ impl<T: Send + Sync + 'static> Atom<T> {
                 Ok(AtomGuard {
                     ptr: unsafe { AtomNode::val_ptr(new_ptr) },
                     _guard: guard,
-                    _marker: PhantomData,
+                    marker,
                 })
             }
             Err(_) => {
@@ -605,7 +604,7 @@ impl<T: Send + Sync + 'static> Atom<T> {
         AtomMap {
             atom: self,
             project: f,
-            _marker: PhantomData,
+            marker,
         }
     }
 }
@@ -713,7 +712,7 @@ impl<T: Send + Sync + 'static> AtomOption<T> {
             Some(AtomGuard {
                 ptr: unsafe { AtomNode::val_ptr(shared.as_raw()) },
                 _guard: guard,
-                _marker: PhantomData,
+                marker,
             })
         }
     }
@@ -825,7 +824,7 @@ unsafe impl<T: Send + Sync + 'static> Sync for AtomOption<T> {}
 pub struct AtomMap<'a, T: Send + Sync + 'static, R, F> {
     atom: &'a Atom<T>,
     project: F,
-    _marker: PhantomData<R>,
+    marker: marker<R>,
 }
 
 /// Guard for a mapped/projected load.
@@ -836,7 +835,7 @@ where
 {
     _inner: AtomGuard<'a, T>,
     projected: *const R,
-    _project: PhantomData<F>,
+    _project: marker<F>,
 }
 
 impl<T: Send + Sync + 'static, R, F: Fn(&T) -> &R> Deref for AtomMapGuard<'_, T, R, F> {
@@ -863,7 +862,7 @@ where
         AtomMapGuard {
             _inner: guard,
             projected,
-            _project: PhantomData,
+            _project: marker,
         }
     }
 }

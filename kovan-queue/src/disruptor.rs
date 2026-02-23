@@ -1,5 +1,7 @@
 use crate::utils::CacheAligned;
+use kovan::Atom;
 use std::cell::UnsafeCell;
+use std::marker::PhantomData as marker;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::thread;
@@ -67,22 +69,24 @@ pub struct SingleProducerSequencer {
     /// The next sequence to be claimed.
     next_sequence: Sequence,
     /// Sequences to gate on (prevent wrapping).
-    gating_sequences: UnsafeCell<Vec<Arc<Sequence>>>,
+    gating_sequences: Atom<Vec<Arc<Sequence>>>,
     /// Size of the buffer.
     buffer_size: usize,
     /// Strategy for waiting.
     wait_strategy: Arc<dyn WaitStrategy>,
 }
 
-unsafe impl Send for SingleProducerSequencer {}
-unsafe impl Sync for SingleProducerSequencer {}
+// SAFETY: SingleProducerSequencer is Send + Sync derived from its fields:
+// Atom<Vec<Arc<Sequence>>> is Send+Sync, Arc<Sequence> is Send+Sync,
+// AtomicI64/usize are Send+Sync, Arc<dyn WaitStrategy> is Send+Sync.
+// All fields' auto-trait impls make these bounds satisfied without unsafe overrides.
 
 impl SingleProducerSequencer {
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
         Self {
             cursor: Arc::new(Sequence::new(-1)),
             next_sequence: Sequence::new(-1),
-            gating_sequences: UnsafeCell::new(Vec::new()),
+            gating_sequences: Atom::new(Vec::new()),
             buffer_size,
             wait_strategy,
         }
@@ -95,29 +99,19 @@ impl Sequencer for SingleProducerSequencer {
         self.next_sequence.set(next);
 
         let wrap_point = next - self.buffer_size as i64;
-        let gating_sequences = unsafe { &*self.gating_sequences.get() };
+        // Load the gating-sequence list once; the AtomGuard keeps the
+        // snapshot alive (epoch-protected) for the duration of this call.
+        let gating_guard = self.gating_sequences.load();
+        let gating_sequences: &[Arc<Sequence>] = gating_guard.as_slice();
 
-        // Cached gating sequence check could be added here for optimization
-        // For now, simple check
-        let mut min_gating_sequence = i64::MAX;
-        for seq in gating_sequences {
-            let s = seq.get();
-            if s < min_gating_sequence {
-                min_gating_sequence = s;
-            }
-        }
+        let min_seq =
+            |seqs: &[Arc<Sequence>]| seqs.iter().map(|s| s.get()).min().unwrap_or(i64::MAX);
 
-        if wrap_point > min_gating_sequence {
-            while wrap_point > min_gating_sequence {
-                thread::yield_now();
-                min_gating_sequence = i64::MAX;
-                for seq in gating_sequences {
-                    let s = seq.get();
-                    if s < min_gating_sequence {
-                        min_gating_sequence = s;
-                    }
-                }
-            }
+        let mut min_gating_sequence = min_seq(gating_sequences);
+
+        while wrap_point > min_gating_sequence {
+            thread::yield_now();
+            min_gating_sequence = min_seq(gating_sequences);
         }
 
         next
@@ -133,9 +127,13 @@ impl Sequencer for SingleProducerSequencer {
     }
 
     fn add_gating_sequences(&self, sequences: Vec<Arc<Sequence>>) {
-        unsafe {
-            (*self.gating_sequences.get()).extend(sequences);
-        }
+        // rcu: load current list, append, store. Retries automatically on CAS
+        // failure from concurrent callers. The closure may run more than once.
+        self.gating_sequences.rcu(|current| {
+            let mut new_list = current.clone();
+            new_list.extend(sequences.iter().cloned());
+            new_list
+        });
     }
 
     fn get_highest_published_sequence(&self, _next_sequence: i64, available_sequence: i64) -> i64 {
@@ -148,7 +146,7 @@ impl Sequencer for SingleProducerSequencer {
 /// Thread-safe for multiple producers.
 pub struct MultiProducerSequencer {
     /// Sequences to gate on.
-    gating_sequences: UnsafeCell<Vec<Arc<Sequence>>>,
+    gating_sequences: Atom<Vec<Arc<Sequence>>>,
     /// Size of the buffer.
     buffer_size: usize,
     /// Strategy for waiting.
@@ -161,8 +159,9 @@ pub struct MultiProducerSequencer {
     mask: usize,
 }
 
-unsafe impl Send for MultiProducerSequencer {}
-unsafe impl Sync for MultiProducerSequencer {}
+// SAFETY: MultiProducerSequencer is Send + Sync derived from its fields:
+// Atom<Vec<Arc<Sequence>>> is Send+Sync, AtomicI64 is Send+Sync,
+// Box<[AtomicI64]> is Send+Sync, Arc<dyn WaitStrategy> is Send+Sync.
 
 impl MultiProducerSequencer {
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
@@ -172,7 +171,7 @@ impl MultiProducerSequencer {
         }
 
         Self {
-            gating_sequences: UnsafeCell::new(Vec::new()),
+            gating_sequences: Atom::new(Vec::new()),
             buffer_size,
             wait_strategy,
             claim_sequence: AtomicI64::new(-1),
@@ -188,27 +187,17 @@ impl Sequencer for MultiProducerSequencer {
         let next = current + 1;
 
         let wrap_point = next - self.buffer_size as i64;
-        let gating_sequences = unsafe { &*self.gating_sequences.get() };
+        let gating_guard = self.gating_sequences.load();
+        let gating_sequences: &[Arc<Sequence>] = gating_guard.as_slice();
 
-        let mut min_gating_sequence = i64::MAX;
-        for seq in gating_sequences {
-            let s = seq.get();
-            if s < min_gating_sequence {
-                min_gating_sequence = s;
-            }
-        }
+        let min_seq =
+            |seqs: &[Arc<Sequence>]| seqs.iter().map(|s| s.get()).min().unwrap_or(i64::MAX);
 
-        if wrap_point > min_gating_sequence {
-            while wrap_point > min_gating_sequence {
-                thread::yield_now();
-                min_gating_sequence = i64::MAX;
-                for seq in gating_sequences {
-                    let s = seq.get();
-                    if s < min_gating_sequence {
-                        min_gating_sequence = s;
-                    }
-                }
-            }
+        let mut min_gating_sequence = min_seq(gating_sequences);
+
+        while wrap_point > min_gating_sequence {
+            thread::yield_now();
+            min_gating_sequence = min_seq(gating_sequences);
         }
 
         next
@@ -225,9 +214,11 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn add_gating_sequences(&self, sequences: Vec<Arc<Sequence>>) {
-        unsafe {
-            (*self.gating_sequences.get()).extend(sequences);
-        }
+        self.gating_sequences.rcu(|current| {
+            let mut new_list = current.clone();
+            new_list.extend(sequences.iter().cloned());
+            new_list
+        });
     }
 
     fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
@@ -444,18 +435,18 @@ impl ProcessingSequenceBarrier {
 
     /// Returns true if the barrier has been alerted.
     pub fn is_alerted(&self) -> bool {
-        self.alerted.load(Ordering::Relaxed)
+        self.alerted.load(Ordering::Acquire)
     }
 
     /// Alerts the barrier, causing waiters to wake up.
     pub fn alert(&self) {
-        self.alerted.store(true, Ordering::Relaxed);
+        self.alerted.store(true, Ordering::Release);
         self.wait_strategy.signal_all_when_blocking();
     }
 
     /// Clears the alert status.
     pub fn clear_alert(&self) {
-        self.alerted.store(false, Ordering::Relaxed);
+        self.alerted.store(false, Ordering::Release);
     }
 }
 
@@ -476,7 +467,9 @@ pub struct RingBuffer<T> {
 }
 
 unsafe impl<T: Send> Send for RingBuffer<T> {}
-unsafe impl<T: Send> Sync for RingBuffer<T> {}
+// SAFETY: Multiple consumers hold `&RingBuffer<T>` concurrently and can read `&T`
+// references to the same slot, so `T` must be `Sync` in addition to `Send`.
+unsafe impl<T: Send + Sync> Sync for RingBuffer<T> {}
 
 impl<T> RingBuffer<T> {
     /// Creates a new ring buffer with the given factory, size, and sequencer.
@@ -503,7 +496,17 @@ impl<T> RingBuffer<T> {
     }
 
     /// Gets a reference to the event at the given sequence.
-    pub fn get(&self, sequence: i64) -> &T {
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `sequence` has been fully published by the
+    /// producer (i.e., `publish(sequence)` was called and observed) **and** that
+    /// no other thread is concurrently writing to the same slot.  Within the
+    /// Disruptor protocol this is established by waiting on a
+    /// [`ProcessingSequenceBarrier`] before calling this method.  Calling it with
+    /// an unpublished sequence or while a producer holds the slot is undefined
+    /// behaviour.
+    pub unsafe fn get(&self, sequence: i64) -> &T {
         unsafe { &*self.buffer[(sequence as usize) & self.mask].get() }
     }
 
@@ -555,8 +558,15 @@ impl<T> RingBuffer<T> {
 }
 
 /// Producer handle.
+///
+/// When dropped, alerts all consumer barriers and joins the consumer threads,
+/// ensuring a clean shutdown of the disruptor pipeline.
 pub struct Producer<T> {
     ring_buffer: Arc<RingBuffer<T>>,
+    /// Barriers for each consumer — used to alert them on shutdown.
+    barriers: Vec<Arc<ProcessingSequenceBarrier>>,
+    /// Join handles for consumer threads, taken during drop.
+    join_handles: Vec<Option<thread::JoinHandle<()>>>,
 }
 
 impl<T> Producer<T> {
@@ -570,6 +580,21 @@ impl<T> Producer<T> {
         let event = unsafe { self.ring_buffer.get_unchecked_mut(sequence) };
         update(event);
         self.ring_buffer.publish(sequence);
+    }
+}
+
+impl<T> Drop for Producer<T> {
+    fn drop(&mut self) {
+        // Alert all consumer barriers so they break out of their wait loops.
+        for barrier in &self.barriers {
+            barrier.alert();
+        }
+        // Join all consumer threads to ensure clean shutdown.
+        for handle in &mut self.join_handles {
+            if let Some(h) = handle.take() {
+                let _ = h.join();
+            }
+        }
     }
 }
 
@@ -659,7 +684,7 @@ pub struct DisruptorBuilder<T, F> {
     wait_strategy: Arc<dyn WaitStrategy>,
     /// Type of producer (Single or Multi).
     producer_type: ProducerType,
-    _marker: std::marker::PhantomData<T>,
+    marker: marker<T>,
 }
 
 impl<T, F> DisruptorBuilder<T, F>
@@ -673,7 +698,7 @@ where
             buffer_size: 1024,
             wait_strategy: Arc::new(BusySpinWaitStrategy),
             producer_type: ProducerType::Single,
-            _marker: std::marker::PhantomData,
+            marker: marker::<T>,
         }
     }
 
@@ -755,25 +780,33 @@ impl<T: Send + Sync + 'static> Disruptor<T> {
     }
 
     /// Starts the Disruptor and returns a Producer.
+    ///
+    /// Consumer threads are spawned for each registered handler. When the
+    /// returned `Producer` is dropped, it alerts all consumer barriers and
+    /// joins the threads, ensuring a clean shutdown.
     pub fn start(mut self) -> Producer<T> {
         let mut gating_sequences = Vec::new();
+        let mut barriers = Vec::new();
+        let mut join_handles = Vec::new();
+
         for processor in &self.processors {
             gating_sequences.push(processor.get_sequence());
+            barriers.push(processor.barrier.clone());
             let p = processor.clone();
-            thread::spawn(move || {
+            join_handles.push(Some(thread::spawn(move || {
                 p.run();
-            });
+            })));
         }
 
-        // SAFETY: We have exclusive ownership and no publishers yet.
-        // Safe to mutate RingBuffer to add gating sequences.
-        // RingBuffer::add_gating_sequences is now safe (interior mutability in Sequencer)
+        // RingBuffer::add_gating_sequences uses interior mutability in the Sequencer.
         self.ring_buffer.add_gating_sequences(gating_sequences);
 
         self.started = true;
 
         Producer {
             ring_buffer: self.ring_buffer,
+            barriers,
+            join_handles,
         }
     }
 }

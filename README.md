@@ -18,7 +18,8 @@
 
 Kovan solves the hardest problem in lock-free programming: **when is it safe to free memory?**
 
-When multiple threads access shared data without locks, you can't just `drop()` or `free()` - another thread might still be using it. Kovan tracks this automatically with near-zero overhead on reads.
+When multiple threads access shared data without locks, you can't just `drop()` or `free()`, while another thread might still be using it.
+Kovan tracks this automatically with near-zero overhead on reads.
 
 ## Why Kovan?
 
@@ -33,7 +34,17 @@ When multiple threads access shared data without locks, you can't just `drop()` 
 kovan = "0.1"
 ```
 
-## Basic Usage
+## Ecosystem
+
+| Crate | Description |
+|---|---|
+| `kovan-channel` | Multi-producer multi-consumer channels using Kovan |
+| `kovan-map` | Concurrent hash maps using kovan memory reclamation |
+| `kovan-mvcc` | Multi-Version Concurrency Control (MVCC) implementation based on the Percolator model using Kovan |
+| `kovan-queue` | High-performance queue primitives and disruptor implementation for Kovan |
+| `kovan-stm` | TL2-style Software Transactional Memory (STM) using Kovan |
+
+## Basic MR Usage
 
 The easiest way to use Kovan is through `Atom<T>`, which handles memory reclamation automatically:
 
@@ -147,6 +158,26 @@ cargo +nightly bench --bench comparison --features nightly
 # Nightly optimizations (~5% faster)
 kovan = { version = "0.1", features = ["nightly"] }
 ```
+
+## Supported Platforms
+
+**Operating Systems**:
+- **Linux** (Natively tested)
+- **macOS** (Natively tested)
+- **Windows** (Natively tested)
+
+**Architectures**:
+Supported list:
+- **Native Wait-Free (128-bit atomics)**:
+  - `x86_64`: Requires compilation target feature `+cmpxchg16b`.
+  - `aarch64` / `arm64`: Supported out of the box.
+  - `s390x`: Supported natively.
+- **Lock-Based Fallback (via `portable-atomic`)**:
+  - Other 64-bit architectures without 128-bit atomic instructions (e.g., `riscv64`, `mips64`).
+  - On these platforms, 128-bit operations fall back to spinlocks.
+  - **IMPORTANT**: Also on these platforms data structures function correctly but drop their **wait-free guarantees**.
+Not supported list:
+  - Not supported on 32-bit architectures. high and low nibbles for WORD split won't be sufficient. That's why.
 
 ## License
 

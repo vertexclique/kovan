@@ -144,3 +144,18 @@ impl<T> ArrayQueue<T> {
         tail == head + self.buffer.len()
     }
 }
+
+/// Drop all remaining values in the queue when it is dropped.
+///
+/// Without this, `T` values sitting in initialized slots would have their
+/// memory freed (the `Box<[Slot<T>]>` backing is released) without ever
+/// calling `T::drop()`, leaking resources such as file handles or locks.
+impl<T> Drop for ArrayQueue<T> {
+    fn drop(&mut self) {
+        // Drain all remaining elements.  Each `pop()` call moves the value out
+        // of its `MaybeUninit` slot and returns it as `Some(T)`; when that
+        // `Some(T)` goes out of scope at the end of the loop body, `T::drop()`
+        // runs automatically.
+        while self.pop().is_some() {}
+    }
+}

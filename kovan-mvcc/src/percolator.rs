@@ -47,6 +47,7 @@ impl KovanMVCC {
             ts_oracle: self.ts_oracle.clone(),
             writes: HopscotchMap::new(),
             primary_key: None,
+            committed: false,
         }
     }
 }
@@ -60,6 +61,8 @@ pub struct Txn {
     writes: HopscotchMap<String, (LockType, Option<Value>)>,
     /// Primary key for 2PC
     primary_key: Option<String>,
+    /// Whether this transaction has been committed (prevents Drop from rolling back)
+    committed: bool,
 }
 
 impl Txn {
@@ -96,9 +99,9 @@ impl Txn {
                 return None; // Or Err("Locked")
             }
 
-            // 2. Find latest write in CF_WRITE with commit_ts <= self.start_ts
+            // 2. Find latest non-rollback write in CF_WRITE with commit_ts <= self.start_ts
             if let Some((_commit_ts, write_info)) =
-                self.storage.get_latest_write(key, self.start_ts)
+                self.storage.get_latest_commit(key, self.start_ts)
             {
                 match write_info.kind {
                     WriteKind::Put => {
@@ -111,8 +114,7 @@ impl Txn {
                         return None; // Deleted
                     }
                     WriteKind::Rollback => {
-                        // Rollback record.
-                        return None;
+                        unreachable!("get_latest_commit should never return Rollback");
                     }
                 }
             }
@@ -140,6 +142,8 @@ impl Txn {
     }
 
     pub fn commit(mut self) -> Result<u64, String> {
+        self.committed = true;
+
         if self.writes.is_empty() {
             return Ok(self.start_ts);
         }
@@ -174,38 +178,68 @@ impl Txn {
         let mut keys: Vec<_> = self.writes.keys().collect();
         keys.sort();
 
-        for key in keys {
-            let (lock_type, value_opt) = self.writes.get(&key).unwrap();
+        // Collect lock infos and values for each key upfront
+        let key_infos: Vec<(String, LockInfo, Option<Value>)> = keys
+            .iter()
+            .map(|key| {
+                let (lock_type, value_opt) = self.writes.get(key).unwrap();
+                let lock_info = LockInfo {
+                    txn_id: self.txn_id,
+                    start_ts: self.start_ts,
+                    primary_key: primary_key.to_string(),
+                    lock_type,
+                    short_value: None,
+                };
+                (key.clone(), lock_info, value_opt)
+            })
+            .collect();
 
-            // 1. Acquire Lock (CF_LOCK)
-            // We must lock first to prevent race conditions with concurrent commits.
-            let lock_info = LockInfo {
-                txn_id: self.txn_id,
-                start_ts: self.start_ts,
-                primary_key: primary_key.to_string(),
-                lock_type,
-                short_value: None,
-            };
+        // Track which locks we've acquired so we can release them on failure
+        let mut acquired_locks: Vec<&str> = Vec::with_capacity(key_infos.len());
 
-            self.storage.put_lock(&key, lock_info)?;
-
-            // 2. Check for write-write conflicts (CF_WRITE)
-            // Now that we hold the lock, no one can commit a new version.
-            // We check if anyone committed a version > start_ts.
-            if let Some((commit_ts, _)) = self.storage.get_latest_write(&key, u64::MAX)
-                && commit_ts >= self.start_ts
-            {
-                // Conflict found!
-                // Must release the lock we just acquired
-                self.storage.delete_lock(&key);
-                return Err(format!("Write conflict on key {}", key));
+        // Pass 1: Acquire all locks
+        for (key, lock_info, _) in &key_infos {
+            if let Err(e) = self.storage.put_lock(key, lock_info.clone()) {
+                // Release all locks acquired so far
+                for acquired_key in &acquired_locks {
+                    self.storage.delete_lock(acquired_key);
+                }
+                return Err(e);
             }
+            acquired_locks.push(key);
+        }
 
-            // 3. Write Data (CF_DATA)
-            if let Some(value) = value_opt {
-                self.storage.put_data(&key, self.start_ts, value.clone());
+        // Pass 2: Check all write-write conflicts and rollback records
+        for (key, _, _) in &key_infos {
+            // Check for write-write conflicts: any commit at or after our start_ts
+            if let Some((commit_ts, write_info)) = self.storage.get_latest_write(key, u64::MAX) {
+                if write_info.kind == WriteKind::Rollback && commit_ts >= self.start_ts {
+                    // A rollback record exists at or after our start_ts; reject prewrite
+                    for acquired_key in &acquired_locks {
+                        self.storage.delete_lock(acquired_key);
+                    }
+                    return Err(format!(
+                        "Prewrite rejected: rollback record exists for key {}",
+                        key
+                    ));
+                }
+                if write_info.kind != WriteKind::Rollback && commit_ts >= self.start_ts {
+                    // Write conflict
+                    for acquired_key in &acquired_locks {
+                        self.storage.delete_lock(acquired_key);
+                    }
+                    return Err(format!("Write conflict on key {}", key));
+                }
             }
         }
+
+        // Pass 3: Write all data
+        for (key, _, value_opt) in &key_infos {
+            if let Some(value) = value_opt {
+                self.storage.put_data(key, self.start_ts, value.clone());
+            }
+        }
+
         Ok(())
     }
 
@@ -244,20 +278,24 @@ impl Txn {
                 continue;
             }
 
+            let kind = match lock_type {
+                LockType::Put => WriteKind::Put,
+                LockType::Delete => WriteKind::Delete,
+            };
+
+            let write_info = WriteInfo {
+                start_ts: self.start_ts,
+                kind,
+            };
+
+            // Always write the write record since the primary is already committed.
+            // The transaction is committed once the primary's write record is visible.
+            self.storage.put_write(&key, commit_ts, write_info);
+
+            // Clean up the lock if it's still ours
             if let Some(lock) = self.storage.get_lock(&key)
                 && lock.txn_id == self.txn_id
             {
-                let kind = match lock_type {
-                    LockType::Put => WriteKind::Put,
-                    LockType::Delete => WriteKind::Delete,
-                };
-
-                let write_info = WriteInfo {
-                    start_ts: self.start_ts,
-                    kind,
-                };
-
-                self.storage.put_write(&key, commit_ts, write_info);
                 self.storage.delete_lock(&key);
             }
         }
@@ -273,10 +311,21 @@ impl Txn {
                 // Also delete data we wrote
                 self.storage.delete_data(&key, self.start_ts);
             }
+
+            // Write a Rollback record to CF_WRITE to prevent future prewrites at this start_ts
+            let rollback_info = WriteInfo {
+                start_ts: self.start_ts,
+                kind: WriteKind::Rollback,
+            };
+            self.storage.put_write(&key, self.start_ts, rollback_info);
         }
     }
 }
 
 impl Drop for Txn {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        if !self.committed {
+            self.rollback();
+        }
+    }
 }

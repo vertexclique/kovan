@@ -34,8 +34,10 @@ pub trait Storage: Send + Sync {
     /// Release a lock for a key
     fn delete_lock(&self, key: &str);
 
-    /// Get the latest write for a key with commit_ts <= ts
+    /// Get the latest write for a key with commit_ts <= ts (includes Rollback records)
     fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)>;
+    /// Get the latest Put or Delete write for a key with commit_ts <= ts, skipping Rollbacks
+    fn get_latest_commit(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)>;
     /// Record a write (commit)
     fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo);
 
@@ -125,6 +127,21 @@ impl Storage for InMemoryStorage {
             // range(..=ts) gives all entries with key <= ts
             // next_back() gives the largest key <= ts
             map.range(..=ts).next_back().map(|(k, v)| (*k, v.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Find the latest Put or Delete write with commit_ts <= ts, skipping Rollback records
+    fn get_latest_commit(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
+        if let Some(map_mutex) = self.writes.get(key) {
+            let map = map_mutex.lock().unwrap();
+            for (k, v) in map.range(..=ts).rev() {
+                if v.kind != WriteKind::Rollback {
+                    return Some((*k, v.clone()));
+                }
+            }
+            None
         } else {
             None
         }
