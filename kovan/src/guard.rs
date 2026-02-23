@@ -113,6 +113,12 @@ impl Handle {
             None => {
                 let tid = self.global().alloc_tid();
                 self.tid.set(Some(tid));
+                // On nightly, #[thread_local] doesn't run Drop.
+                // Register a sentinel that calls cleanup() on thread exit.
+                #[cfg(feature = "nightly")]
+                {
+                    HANDLE_CLEANUP_SENTINEL.with(|_| {});
+                }
                 tid
             }
         }
@@ -881,8 +887,10 @@ impl Handle {
     }
 }
 
-impl Drop for Handle {
-    fn drop(&mut self) {
+impl Handle {
+    /// Cleanup thread-local state. Called on thread exit.
+    /// Extracted from Drop so it can also be called by the nightly sentinel.
+    fn cleanup(&self) {
         if let Some(tid) = self.tid.get() {
             // Clear all reservation slots
             let global = self.global();
@@ -917,9 +925,6 @@ impl Drop for Handle {
                 if let Some(d) = destructor {
                     unsafe { d(curr) };
                 }
-                // The refs-node (batch_last) is the terminal node with batch_next == null.
-                // For the first node in the batch (which is the refs-node when count == 1),
-                // batch_next is 0/null. Stop after processing it.
                 if curr == batch_last {
                     break;
                 }
@@ -932,9 +937,18 @@ impl Drop for Handle {
             // Drain any remaining free list
             self.drain_free_list();
 
+            // Mark TID as unused so cleanup is idempotent
+            self.tid.set(None);
+
             // Recycle thread ID
             global.free_tid(tid);
         }
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -942,6 +956,24 @@ impl Drop for Handle {
 #[cfg(feature = "nightly")]
 #[thread_local]
 static HANDLE: Handle = Handle::new();
+
+// On nightly, #[thread_local] does not run Drop on thread exit.
+// This sentinel uses std thread_local! (which does run Drop)
+// to ensure Handle::cleanup() is called when the thread exits.
+#[cfg(feature = "nightly")]
+struct HandleCleanupSentinel;
+
+#[cfg(feature = "nightly")]
+impl Drop for HandleCleanupSentinel {
+    fn drop(&mut self) {
+        HANDLE.cleanup();
+    }
+}
+
+#[cfg(feature = "nightly")]
+thread_local! {
+    static HANDLE_CLEANUP_SENTINEL: HandleCleanupSentinel = const { HandleCleanupSentinel };
+}
 
 #[cfg(not(feature = "nightly"))]
 thread_local! {

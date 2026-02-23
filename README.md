@@ -111,30 +111,34 @@ Comparison against the major memory reclamation approaches: epoch-based (crossbe
 
 ### Pin Overhead
 
-| | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
 |---|---|---|---|---|
-| pin + drop | **3.5 ns** | 15.0 ns | 9.4 ns | 20.2 ns |
+| pin + drop | **3.8 ns** | 14.7 ns | 9.5 ns | 19.1 ns |
 
 ### Treiber Stack (push+pop, 5k ops/thread)
 
-| Threads | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| Threads | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
 |---|---|---|---|---|
-| 1 | **570 us** | 575 us | 567 us | 819 us |
-| 4 | **3.6 ms** | 3.8 ms | 4.4 ms | 6.9 ms |
-| 8 | **8.8 ms** | 10.9 ms | 11.9 ms | 18.4 ms |
+| 1 | **579 us** | 573 us | 597 us | 956 us |
+| 2 | **1.49 ms** | 1.60 ms | 1.73 ms | 3.09 ms |
+| 4 | **2.69 ms** | 3.57 ms | 4.14 ms | 7.03 ms |
+| 8 | **9.28 ms** | 11.03 ms | 11.35 ms | 19.65 ms |
 
 ### Read-Heavy (95% load, 5% swap, 10k ops/thread)
 
-| Threads | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| Threads | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
 |---|---|---|---|---|
-| 2 | **325 us** | 477 us | 471 us | 1.18 ms |
-| 4 | **470 us** | 711 us | 691 us | 4.47 ms |
-| 8 | **721 us** | 1.08 ms | 1.10 ms | 17.96 ms |
+| 2 | **301 us** | 440 us | 428 us | 1.16 ms |
+| 4 | **446 us** | 614 us | 610 us | 4.65 ms |
+| 8 | **647 us** | 970 us | 1.03 ms | 20.25 ms |
 
 Run your own benchmarks, workloads differ:
 
 ```bash
+# For stable benchmarks
 cargo bench --bench comparison
+# For nightly benchmarks
+cargo +nightly bench --bench comparison --features nightly
 ```
 
 ## Optional Features
