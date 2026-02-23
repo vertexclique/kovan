@@ -1,7 +1,7 @@
 use cuneiform::cuneiform;
 use std::ops::{Deref, DerefMut};
 
-#[cuneiform]
+#[cuneiform(hermetic = false)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct CacheAligned<T> {
     pub data: T,

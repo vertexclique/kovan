@@ -33,5 +33,4 @@ jobs:
         run: cross build --workspace --target ${{ matrix.target }}
 
       - name: Run tests
-        # The user requested to run all tests. If anything gets stuck, we'll refactor later.
         run: cross test --workspace --target ${{ matrix.target }}
