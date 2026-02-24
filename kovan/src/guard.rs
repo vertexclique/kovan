@@ -968,21 +968,28 @@ impl Handle {
 
             // Drain partial batch: if the thread exits with fewer than
             // RETIRE_FREQ nodes in its batch, those nodes were never
-            // published via try_retire. They are thread-local, so we
-            // can safely call their destructors directly.
-            let batch_last = self.batch_last.get();
-            let mut curr = self.batch_first.get();
-            while !curr.is_null() {
-                let node = unsafe { &*curr };
-                let next_ptr = node.batch_next();
-                let destructor = node.destructor();
-                if let Some(d) = destructor {
-                    unsafe { d(curr) };
+            // published via try_retire. We cannot call their destructors
+            // directly because other threads may still hold guard-protected
+            // references to the underlying objects (e.g. a resized table
+            // that readers loaded before the CAS... Hopscotch Map like
+            // data structures does that).
+            //
+            // NOTE: Crystalline paper doesn't mention or touch to partial batches.
+            //
+            // Instead, finalize the batch and submit it through try_retire
+            // so the normal epoch-based safety checks apply. If try_retire
+            // cannot fully process the batch (e.g. not enough nodes for all
+            // active slots), the nodes will leak — which is safe.
+            let count = self.batch_count.get();
+            if count > 0 {
+                let last = self.batch_last.get();
+                let first = self.batch_first.get();
+                unsafe {
+                    (*last)
+                        .batch_link
+                        .store(rnode_mark(first), Ordering::SeqCst);
                 }
-                if curr == batch_last {
-                    break;
-                }
-                curr = next_ptr;
+                self.try_retire();
             }
             self.batch_first.set(core::ptr::null_mut());
             self.batch_last.set(core::ptr::null_mut());

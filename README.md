@@ -124,7 +124,7 @@ Comparison against the major memory reclamation approaches: epoch-based (crossbe
 
 | | kovan | crossbeam | seize | haphazard |
 |---|---|---|---|---|
-| pin + drop | **2.87 ns** | 14.53 ns | 9.51 ns | 18.03 ns |
+| pin + drop | **2.79 ns** | 13.66 ns | 9.70 ns | 18.09 ns |
 
 ### Treiber Stack (push+pop, 5k ops/thread)
 
