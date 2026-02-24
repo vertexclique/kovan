@@ -1,5 +1,0 @@
-[target.riscv64gc-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu:0.2.5"
-
-[target.s390x-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu:0.2.5"
