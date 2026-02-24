@@ -1,0 +1,36 @@
+name: Cross-platform tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross-test:
+    name: Test (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - s390x-unknown-linux-gnu
+          - riscv64gc-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: cross build --workspace --target ${{ matrix.target }}
+
+      - name: Run tests
+        run: cross test --workspace --target ${{ matrix.target }}

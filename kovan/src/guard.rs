@@ -10,7 +10,9 @@ use crate::retired::{INVPTR, REFC_PROTECT, RetiredNode, rnode_mark};
 use crate::slot::{self, ASMRState, EPOCH_FREQ, HR_NUM, RETIRE_FREQ};
 use alloc::boxed::Box;
 use core::cell::Cell;
-use core::sync::atomic::Ordering;
+use core::marker::PhantomData as marker;
+use core::sync::atomic::fence;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// RAII guard representing an active critical section.
 ///
@@ -25,6 +27,8 @@ use core::sync::atomic::Ordering;
 /// that an outer guard still references.
 pub struct Guard {
     _private: (),
+    // Psy szczekają, a karawana jedzie dalej.
+    marker: marker<*mut ()>,
 }
 
 impl Drop for Guard {
@@ -70,6 +74,10 @@ struct Handle {
     /// Cached free list and count
     free_list: Cell<*mut RetiredNode>,
     list_count: Cell<usize>,
+    /// Cached epoch — mirrors slots.epoch[0] to avoid atomic read of
+    /// 128-bit WordPair on every load. Updated on the rare (slow) path only
+    /// (when global epoch has advanced since last check).
+    cached_epoch: Cell<u64>,
 }
 
 impl Handle {
@@ -84,6 +92,7 @@ impl Handle {
             alloc_counter: Cell::new(0),
             free_list: Cell::new(core::ptr::null_mut()),
             list_count: Cell::new(0),
+            cached_epoch: Cell::new(0),
         }
     }
 
@@ -107,9 +116,54 @@ impl Handle {
             None => {
                 let tid = self.global().alloc_tid();
                 self.tid.set(Some(tid));
+                // On nightly, #[thread_local] doesn't run Drop.
+                // Register a sentinel that calls cleanup() on thread exit.
+                #[cfg(feature = "nightly")]
+                {
+                    HANDLE_CLEANUP_SENTINEL.with(|_| {});
+                }
                 tid
             }
         }
+    }
+
+    /// Protect: era tracking on load.
+    ///
+    /// Ensures the thread's era slot is ≥ global_era so that try_retire()
+    /// does not incorrectly skip this thread when scanning for active references.
+    ///
+    /// The read order is critical: data.load() MUST come before global_era.load().
+    /// This guarantees (via Release-Acquire chain through the shared atomic) that
+    /// global_era ≥ birth_epoch of any pointer the thread loaded.
+    ///
+    /// Fast path cost: 1 Acquire load of global_era (L1 cache hit) + 1 Cell read
+    /// + 1 predictable branch. No loop, no traverse — O(1) and wait-free.
+    #[inline]
+    fn protect_load(&self, data: &AtomicUsize, order: Ordering) -> usize {
+        // Step 1: load the pointer
+        // XXX: This must be done first since ordering depends on it.
+        let ptr = data.load(order);
+
+        // Step 2: read global era
+        let global = self.global();
+        let curr_epoch = global.get_epoch();
+
+        // Step 3: compare with thread-local cached era.
+        // Normally this is just a fast path to avoid the atomic load.
+        // We are just comparing here for the edge case where the thread
+        // has not done any loads since the last epoch update.
+        let prev_epoch = self.cached_epoch.get();
+
+        if curr_epoch != prev_epoch {
+            // Rare path: era advanced since last check.
+            // Store new era into the slot so try_retire sees it.
+            let tid = self.tid();
+            let slots = global.thread_slots(tid);
+            slots.epoch[0].store_lo(curr_epoch, Ordering::SeqCst);
+            self.cached_epoch.set(curr_epoch);
+        }
+
+        ptr
     }
 
     /// do_update: transition epoch for a slot.
@@ -140,12 +194,20 @@ impl Handle {
                 self.free_list.set(free_list);
                 self.list_count.set(list_count);
             }
-            slots.first[index].store_lo(0, Ordering::SeqCst);
+
             curr_epoch = global.get_epoch();
+
+            // The slot's epoch must be updated before marking the
+            // slot as active (first_lo == 0). Otherwise, try_retire may scan
+            // the slot while it's active but holding the old epoch.
+            slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
+            slots.first[index].store_lo(0, Ordering::SeqCst);
+        } else {
+            // Store current epoch
+            slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
         }
 
-        // Store current epoch
-        slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
+        self.cached_epoch.set(curr_epoch);
         curr_epoch
     }
 
@@ -162,7 +224,10 @@ impl Handle {
         if count > 0 {
             // Nested pin — skip epoch check entirely.
             // The outermost guard's epoch is still protecting us.
-            return Guard { _private: () };
+            return Guard {
+                _private: (),
+                marker,
+            };
         }
 
         // Outermost pin — original logic unchanged
@@ -176,7 +241,10 @@ impl Handle {
         loop {
             let curr_epoch = global.get_epoch();
             if curr_epoch == prev_epoch {
-                return Guard { _private: () };
+                return Guard {
+                    _private: (),
+                    marker,
+                };
             }
             prev_epoch = self.do_update(curr_epoch, index, tid);
             attempts -= 1;
@@ -188,7 +256,10 @@ impl Handle {
 
         // Slow path: set up helping state and wait for stable epoch
         self.slow_path(index, tid);
-        Guard { _private: () }
+        Guard {
+            _private: (),
+            marker,
+        }
     }
 
     /// Slow path for pin when epoch keeps changing.
@@ -404,8 +475,8 @@ impl Handle {
             .load(Ordering::Acquire);
 
         if parent != 0 {
-            global.thread_slots(mytid).first[hr_num].store_lo(0, Ordering::SeqCst);
             global.thread_slots(mytid).epoch[hr_num].store_lo(birth_epoch, Ordering::SeqCst);
+            global.thread_slots(mytid).first[hr_num].store_lo(0, Ordering::SeqCst);
         }
         global.thread_slots(mytid).state[hr_num]
             .parent
@@ -595,8 +666,8 @@ impl Handle {
 
         // Set per-node destructor
         // SAFETY: Use raw pointer writes to avoid creating &mut, which would
-        // conflict (under Stacked Borrows) with concurrent readers still holding
-        // a guard-protected reference to the outer struct.
+        // conflict with concurrent readers still holding a guard-protected reference
+        // to the outer struct.
         unsafe fn destructor<T>(ptr: *mut RetiredNode) {
             let typed_ptr = ptr as *mut T;
             unsafe {
@@ -681,6 +752,9 @@ impl Handle {
         let min_epoch = unsafe { (*refs).birth_epoch() };
 
         // === Scan phase: assign slots to batch nodes ===
+        // SeqCst fence ensures we see the most recent epoch stores from all threads.
+        // Pairs with the SeqCst store in protect_load() / do_update().
+        fence(Ordering::SeqCst);
         let mut last = curr;
         for i in 0..max_threads {
             let mut j = 0;
@@ -832,8 +906,10 @@ impl Handle {
     }
 }
 
-impl Drop for Handle {
-    fn drop(&mut self) {
+impl Handle {
+    /// Cleanup thread-local state. Called on thread exit.
+    /// Extracted from Drop so it can also be called by the nightly sentinel.
+    fn cleanup(&self) {
         if let Some(tid) = self.tid.get() {
             // Clear all reservation slots
             let global = self.global();
@@ -868,9 +944,6 @@ impl Drop for Handle {
                 if let Some(d) = destructor {
                     unsafe { d(curr) };
                 }
-                // The refs-node (batch_last) is the terminal node with batch_next == null.
-                // For the first node in the batch (which is the refs-node when count == 1),
-                // batch_next is 0/null. Stop after processing it.
                 if curr == batch_last {
                     break;
                 }
@@ -883,9 +956,18 @@ impl Drop for Handle {
             // Drain any remaining free list
             self.drain_free_list();
 
+            // Mark TID as unused so cleanup is idempotent
+            self.tid.set(None);
+
             // Recycle thread ID
             global.free_tid(tid);
         }
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -894,9 +976,42 @@ impl Drop for Handle {
 #[thread_local]
 static HANDLE: Handle = Handle::new();
 
+// On nightly, #[thread_local] does not run Drop on thread exit.
+// This sentinel uses std thread_local! (which does run Drop)
+// to ensure Handle::cleanup() is called when the thread exits.
+#[cfg(feature = "nightly")]
+struct HandleCleanupSentinel;
+
+#[cfg(feature = "nightly")]
+impl Drop for HandleCleanupSentinel {
+    fn drop(&mut self) {
+        HANDLE.cleanup();
+    }
+}
+
+#[cfg(feature = "nightly")]
+thread_local! {
+    static HANDLE_CLEANUP_SENTINEL: HandleCleanupSentinel = const { HandleCleanupSentinel };
+}
+
 #[cfg(not(feature = "nightly"))]
 thread_local! {
     static HANDLE: Handle = const { Handle::new() };
+}
+
+/// Protect: era tracking for `Atomic::load()`.
+///
+/// Called internally by `Atomic::load()`. Must NOT be called without a live Guard.
+#[inline]
+pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.protect_load(data, order)
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.with(|handle| handle.protect_load(data, order))
+    }
 }
 
 /// Enter a critical section.
@@ -924,8 +1039,24 @@ pub fn pin() -> Guard {
 /// # Safety
 ///
 /// - `ptr` must point to a valid, heap-allocated object (e.g. from `Box::into_raw`).
-/// - `ptr` must have a `RetiredNode` at offset 0 (i.e. `#[repr(C)]` with
-///   `RetiredNode` as the first field).
+/// - **`ptr` must have a `RetiredNode` at offset 0.**  
+///   Concretely: the pointee type must be `#[repr(C)]` with `RetiredNode` as its
+///   *first* field.  This function casts `ptr` to `*mut RetiredNode` unconditionally
+///   and writes linked-list metadata into the first bytes of the allocation. Passing
+///   a pointer whose first bytes are not a valid `RetiredNode` is **immediate
+///   undefined behaviour** (memory corruption, wrong destructor called, double-free,
+///   whatever floats your boat...).
+///
+///   Use `kovan::Atom` or `AtomNode` wrappers which already embed `RetiredNode`
+///   correctly, rather than calling `retire()` on raw custom types.
+///   Type parameter `T: 'static` is intentionally weak to keep the API minimal;
+///   the `RetiredNode`-at-offset-0 invariant cannot be expressed as a Rust trait
+///   bound today (and tbh I don't think I will do it ever) and must be upheld by the caller.
+///
+///   I have always implemented `RetiredNode` in my previous attempts of this algo,
+///   and I don't see any reason to change that. It is a simple and efficient way to
+///   ensure that the `RetiredNode` is always at offset 0.
+///
 /// - `ptr` must not be retired more than once.
 /// - The caller must not access `*ptr` after this call (except through
 ///   the reclamation system).

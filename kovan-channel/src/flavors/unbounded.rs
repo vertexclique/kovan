@@ -43,6 +43,21 @@ impl<T: 'static> Channel<T> {
 
 impl<T: 'static> Drop for Channel<T> {
     fn drop(&mut self) {
+        // Sentinel node retirement logic
+        //
+        // At creation time `head == tail == sentinel` (a dummy `Node` with
+        // `data: None`).  As messages are dequeued, `try_recv()` advances `head`
+        // and calls `retire(old_head)` on each node that leaves the list.  The
+        // *new* head is never retired by `try_recv`; only its predecessor is.
+        //
+        // Therefore at `Drop` time, `self.head` is always an un-retired node:
+        //   - the original sentinel, if nothing was ever sent+received,
+        //   - the last node that became head after a dequeue, or
+        //   - a data node if messages are still pending.
+        //
+        // The loop walks head→tail and retires each node exactly once.
+        // Empty-channel path: `head == tail == sentinel`, next is null;
+        // we retire the sentinel and the loop exits cleanly with no double-free.
         let guard = pin();
         let mut curr = self.head.load(Ordering::Relaxed, &guard);
 
@@ -186,7 +201,7 @@ impl<T: 'static> Receiver<T> {
                 }
 
                 // Read value before CAS
-                let data_ptr = unsafe { &mut (*next.as_raw()).data as *mut Option<T> };
+                let data_ptr = unsafe { core::ptr::addr_of_mut!((*next.as_raw()).data) };
 
                 match self.inner.head.compare_exchange(
                     head,

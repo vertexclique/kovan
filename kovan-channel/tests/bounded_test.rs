@@ -3,6 +3,19 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+fn test_bounded_capacity_one() {
+    let (s, r) = bounded(1);
+    s.send(42);
+    assert_eq!(r.recv(), Some(42));
+}
+
+#[test]
+#[should_panic(expected = "bounded channel capacity must be greater than zero")]
+fn test_bounded_zero_capacity_panics() {
+    let (_s, _r) = bounded::<i32>(0);
+}
+
+#[test]
 fn test_bounded_simple() {
     let (s, r) = bounded(2);
     s.send(1);

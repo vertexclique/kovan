@@ -1034,3 +1034,20 @@ fn atom_map_with_nested_struct() {
     let val = inner_view.load();
     assert_eq!(val.value, 99);
 }
+
+// ============================================================================
+// Send/Sync bounds
+// ============================================================================
+
+/// Compile-time assertion: `Atom<T>` is `Send + Sync` when `T: Send + Sync`.
+/// This must remain true after making `Guard` (and therefore `AtomGuard`) `!Send + !Sync`.
+#[test]
+fn atom_is_send_and_sync() {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+
+    assert_send::<Atom<i32>>();
+    assert_sync::<Atom<i32>>();
+    assert_send::<Atom<String>>();
+    assert_sync::<Atom<String>>();
+}

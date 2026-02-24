@@ -78,3 +78,42 @@ fn test_receiver_clone() {
     assert_eq!(r.recv(), Some(1));
     assert_eq!(r2.recv(), Some(2));
 }
+
+/// Concurrent send/recv must not violate aliasing rules.
+///
+/// Before the fix, `try_recv()` created `&mut (*next.as_raw()).data` — a mutable
+/// reference to the data field — while other threads could hold shared references
+/// to the same node via an epoch guard.
+/// The fix uses `addr_of_mut!` to obtain a raw pointer without asserting exclusivity.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_no_aliasing_in_dequeue() {
+    let (tx, rx) = unbounded::<i32>();
+    let rx = Arc::new(rx);
+
+    let n = 1000usize;
+    let sender = thread::spawn(move || {
+        for i in 0..n as i32 {
+            tx.send(i);
+        }
+    });
+
+    let rx_clone = Arc::clone(&rx);
+    let receiver = thread::spawn(move || {
+        let mut received = vec![];
+        while received.len() < n {
+            if let Some(v) = rx_clone.try_recv() {
+                received.push(v);
+            }
+        }
+        received
+    });
+
+    sender.join().unwrap();
+    let mut received = receiver.join().unwrap();
+    received.sort();
+
+    assert_eq!(received.len(), n);
+    let expected: Vec<i32> = (0..n as i32).collect();
+    assert_eq!(received, expected);
+}

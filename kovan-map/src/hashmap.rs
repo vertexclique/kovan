@@ -466,8 +466,8 @@ where
         Iter {
             map: self,
             bucket_idx: 0,
-            current: core::ptr::null(),
             guard: pin(),
+            current: core::ptr::null(),
         }
     }
 
@@ -484,11 +484,17 @@ where
 }
 
 /// Iterator over HashMap entries.
+///
+/// Field ordering matters for drop safety.
+/// Rust drops struct fields in declaration order.
+/// The `guard` must be dropped *after* `current` so that
+/// the epoch pin covering `current`'s pointed-to node is not released before
+/// we're done with the raw pointer.
 pub struct Iter<'a, K: 'static, V: 'static, S> {
     map: &'a HashMap<K, V, S>,
     bucket_idx: usize,
-    current: *const Node<K, V>,
     guard: kovan::Guard,
+    current: *const Node<K, V>,
 }
 
 impl<'a, K, V, S> Iterator for Iter<'a, K, V, S>
@@ -563,14 +569,21 @@ where
     }
 }
 
-// SAFETY: HashMap is Send/Sync if K, V are.
+// SAFETY: HashMap is Send if K, V, S are Send (moving ownership between threads).
+// HashMap is Sync if K, V, S are Send+Sync. The stronger bound on Sync is needed
+// because concurrent `get()` calls clone V through a `&V` reference across threads;
+// if V were Send but not Sync, sharing `&HashMap` could transmit a non-Sync V reference
+// to another thread via clone(), violating thread-safety.
 unsafe impl<K: Send, V: Send, S: Send> Send for HashMap<K, V, S> {}
-unsafe impl<K: Sync, V: Sync, S: Sync> Sync for HashMap<K, V, S> {}
+unsafe impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> Sync for HashMap<K, V, S> {}
 
 impl<K, V, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
         // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
-        // readers can exist. Free nodes immediately instead of deferring via `retire()`.
+        // readers can exist.  Rust's type system enforces this: `Iter<'a, …>` borrows
+        // `&'a HashMap`, so it cannot outlive the `HashMap` and will always be dropped
+        // before we reach this point.  We therefore free nodes immediately via
+        // `Box::from_raw` rather than deferring through `retire()`.
         let guard = pin();
 
         for bucket in self.buckets.iter() {

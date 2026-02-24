@@ -55,6 +55,9 @@ impl Stm {
     ///
     /// This function handles transaction retries automatically.
     ///
+    /// DANGER AHEAD: Don't use IO bound operations inside the closure. It will block the entire STM.
+    /// They might be retried multiple times, which is not what you may want for IO bound operations.
+    ///
     /// # Example
     ///
     /// ```

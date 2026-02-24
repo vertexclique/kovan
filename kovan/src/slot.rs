@@ -17,7 +17,23 @@ pub(crate) const HR_NUM: usize = 1;
 /// Total slots per thread: hr_num reservations + 2 helper slots
 pub(crate) const SLOTS_PER_THREAD: usize = HR_NUM + 2;
 
-/// Maximum number of threads supported
+// Maximum concurrent threads. Configurable via cargo features:
+//   kovan = { features = ["max-threads-512"] }
+// Default: 128.
+#[cfg(feature = "max-threads-1024")]
+pub(crate) const MAX_THREADS: usize = 1024;
+#[cfg(all(feature = "max-threads-512", not(feature = "max-threads-1024")))]
+pub(crate) const MAX_THREADS: usize = 512;
+#[cfg(all(
+    feature = "max-threads-256",
+    not(any(feature = "max-threads-512", feature = "max-threads-1024"))
+))]
+pub(crate) const MAX_THREADS: usize = 256;
+#[cfg(not(any(
+    feature = "max-threads-256",
+    feature = "max-threads-512",
+    feature = "max-threads-1024"
+)))]
 pub(crate) const MAX_THREADS: usize = 128;
 
 /// Batch retirement frequency (try_retire every `freq` retires)

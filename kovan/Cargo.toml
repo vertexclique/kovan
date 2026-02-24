@@ -22,9 +22,13 @@ path = "src/lib.rs"
 
 [features]
 default = ["std"]
-std = [] # Enable std-dependent features (e.g. catch_unwind for destructor panic safety).
-nightly = [
-] # Enable nightly-only optimizations (e.g. faster thread-local access).
+std = []          # Enable std-dependent features.
+nightly = []      # Enable nightly-only optimizations.
+
+# Maximum concurrent thread count. Default is 128.
+max-threads-256 = []
+max-threads-512 = []
+max-threads-1024 = []
 
 [dependencies]
 once_cell = { version = "1.21", default-features = false, features = ["alloc"] }

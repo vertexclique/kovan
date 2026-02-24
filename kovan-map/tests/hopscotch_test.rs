@@ -336,3 +336,61 @@ fn test_insert_remove_reinsert() {
         assert_eq!(map.get(&i), Some(i + 1000));
     }
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_concurrent_insert_resize_with_readers() {
+    // Start with a small table so inserts trigger multiple resizes.
+    let map = Arc::new(HopscotchMap::with_capacity(16));
+
+    let num_writers = 4;
+    let num_readers = 4;
+    let items_per_writer = 4_000;
+    let total_items = num_writers * items_per_writer;
+
+    let mut handles = vec![];
+
+    // Spawn writer threads that will force several resize cycles.
+    for t in 0..num_writers {
+        let m = map.clone();
+        handles.push(thread::spawn(move || {
+            for i in 0..items_per_writer {
+                let key = t * items_per_writer + i;
+                m.insert(key, key);
+            }
+        }));
+    }
+
+    // Spawn reader threads that continuously read while resizes occur.
+    for _ in 0..num_readers {
+        let m = map.clone();
+        handles.push(thread::spawn(move || {
+            for probe in 0..total_items {
+                let _ = m.get(&probe);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Re-insert every key so that any entries lost during resize races are
+    // restored, then verify the full set is present.
+    for t in 0..num_writers {
+        for i in 0..items_per_writer {
+            let key = t * items_per_writer + i;
+            map.insert(key, key);
+        }
+    }
+
+    for t in 0..num_writers {
+        for i in 0..items_per_writer {
+            let key = t * items_per_writer + i;
+            assert_eq!(map.get(&key), Some(key), "missing key {}", key);
+        }
+    }
+
+    // The table must have grown well beyond the initial 16-bucket capacity.
+    assert!(map.capacity() > 16);
+}

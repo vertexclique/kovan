@@ -3,7 +3,7 @@
 </h1>
 <div align="center">
  <strong>
-   High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency.
+   High-performance wait-free memory reclamation for wait-free data structures. Bounded memory usage, predictable latency.
  </strong>
 <hr>
 
@@ -18,13 +18,14 @@
 
 Kovan solves the hardest problem in lock-free programming: **when is it safe to free memory?**
 
-When multiple threads access shared data without locks, you can't just `drop()` or `free()` - another thread might still be using it. Kovan tracks this automatically with **zero overhead on reads**.
+When multiple threads access shared data without locks, you can't just `drop()` or `free()`, while another thread might still be using it.
+Kovan tracks this automatically with near-zero overhead on reads.
 
 ## Why Kovan?
 
-- **Zero read overhead**: Just one atomic load, nothing else
+- **Near-zero read overhead**: One atomic load & one comparison
 - **Bounded memory**: Never grows unbounded like epoch-based schemes
-- **Simple API**: Three functions: `pin()`, `load()`, `retire()`
+- **Simple API**: `Atom<T>` for safe usage, `pin()`/`load()`/`retire()` for low-level control
 
 ## Quick Start
 
@@ -33,35 +34,69 @@ When multiple threads access shared data without locks, you can't just `drop()` 
 kovan = "0.1"
 ```
 
-## Basic Usage
+## Ecosystem
+
+| Crate | Description |
+|---|---|
+| `kovan-channel` | Multi-producer multi-consumer channels using Kovan |
+| `kovan-map` | Concurrent hash maps using kovan memory reclamation |
+| `kovan-mvcc` | Multi-Version Concurrency Control (MVCC) implementation based on the Percolator model using Kovan |
+| `kovan-queue` | High-performance queue primitives and disruptor implementation for Kovan |
+| `kovan-stm` | TL2-style Software Transactional Memory (STM) using Kovan |
+
+## Basic MR Usage
+
+The easiest way to use Kovan is through `Atom<T>`, which handles memory reclamation automatically:
 
 ```rust
-use kovan::{Atomic, pin, retire};
-use std::sync::atomic::Ordering;
+use kovan::Atom;
 
-// Create shared atomic pointer
-let shared = Atomic::new(Box::into_raw(Box::new(42)));
+// Create a shared atomic value
+let shared = Atom::new(42_u64);
 
 // Read safely
-let guard = pin();  // Enter critical section
-let ptr = shared.load(Ordering::Acquire, &guard);
-unsafe {
-    if let Some(value) = ptr.as_ref() {
-        println!("Value: {}", value);
-    }
-}
-drop(guard);  // Exit critical section
+let guard = shared.load();
+println!("Value: {}", *guard);
+drop(guard);
 
-// Update safely
+// Update safely (old value is reclaimed automatically)
+let old = shared.swap(100_u64);
+```
+
+For low-level control, use the `pin()`/`load()`/`retire()` API with types that
+embed `RetiredNode` at the beginning:
+
+```rust
+use kovan::{Atomic, RetiredNode, pin, retire};
+use std::sync::atomic::Ordering;
+
+#[repr(C)]
+struct MyNode {
+    retired: RetiredNode,  // must be first field
+    value: u64,
+}
+
+let node = Box::into_raw(Box::new(MyNode {
+    retired: RetiredNode::new(),
+    value: 42,
+}));
+let shared = Atomic::new(node);
+
+// Read
 let guard = pin();
-let new_value = Box::into_raw(Box::new(100));
+let ptr = shared.load(Ordering::Acquire, &guard);
+// ptr is valid for the lifetime of guard
+
+// Swap and retire old value
+let new_node = Box::into_raw(Box::new(MyNode {
+    retired: RetiredNode::new(),
+    value: 100,
+}));
 let old = shared.swap(
-    unsafe { kovan::Shared::from_raw(new_value) },
+    unsafe { kovan::Shared::from_raw(new_node) },
     Ordering::Release,
     &guard
 );
-
-// Schedule old value for reclamation
 if !old.is_null() {
     unsafe { retire(old.as_raw()); }
 }
@@ -70,7 +105,7 @@ if !old.is_null() {
 ## How It Works
 
 1. **`pin()`** - Enter critical section, get a guard
-2. **`load()`** - Read pointer (zero overhead!)
+2. **`load()`** - Read pointer with epoch tracking
 3. **`retire()`** - Schedule memory for safe reclamation
 
 The guard ensures any pointers you load stay valid. When all guards are dropped, retired memory is freed automatically.
@@ -87,30 +122,34 @@ Comparison against the major memory reclamation approaches: epoch-based (crossbe
 
 ### Pin Overhead
 
-| | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
 |---|---|---|---|---|
-| pin + drop | **3.5 ns** | 15.0 ns | 9.4 ns | 20.2 ns |
+| pin + drop | **3.8 ns** | 14.7 ns | 9.5 ns | 19.1 ns |
 
 ### Treiber Stack (push+pop, 5k ops/thread)
 
-| Threads | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| Threads | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
 |---|---|---|---|---|
-| 1 | **570 us** | 575 us | 567 us | 819 us |
-| 4 | **3.6 ms** | 3.8 ms | 4.4 ms | 6.9 ms |
-| 8 | **8.8 ms** | 10.9 ms | 11.9 ms | 18.4 ms |
+| 1 | **579 us** | 573 us | 597 us | 956 us |
+| 2 | **1.49 ms** | 1.60 ms | 1.73 ms | 3.09 ms |
+| 4 | **2.69 ms** | 3.57 ms | 4.14 ms | 7.03 ms |
+| 8 | **9.28 ms** | 11.03 ms | 11.35 ms | 19.65 ms |
 
 ### Read-Heavy (95% load, 5% swap, 10k ops/thread)
 
-| Threads | kovan 0.1.8 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| Threads | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
 |---|---|---|---|---|
-| 2 | **325 us** | 477 us | 471 us | 1.18 ms |
-| 4 | **470 us** | 711 us | 691 us | 4.47 ms |
-| 8 | **721 us** | 1.08 ms | 1.10 ms | 17.96 ms |
+| 2 | **301 us** | 440 us | 428 us | 1.16 ms |
+| 4 | **446 us** | 614 us | 610 us | 4.65 ms |
+| 8 | **647 us** | 970 us | 1.03 ms | 20.25 ms |
 
 Run your own benchmarks, workloads differ:
 
 ```bash
+# For stable benchmarks
 cargo bench --bench comparison
+# For nightly benchmarks
+cargo +nightly bench --bench comparison --features nightly
 ```
 
 ## Optional Features
@@ -119,6 +158,28 @@ cargo bench --bench comparison
 # Nightly optimizations (~5% faster)
 kovan = { version = "0.1", features = ["nightly"] }
 ```
+
+## Supported Platforms
+
+**Operating Systems**:
+- **Linux** (Natively tested)
+- **macOS** (Natively tested)
+- **Windows** (Natively tested)
+
+**Architectures**:
+
+Supported list:
+- Native Wait-Free (128-bit atomics):
+  - `x86_64`: Requires compilation target feature `+cmpxchg16b`.
+  - `aarch64` / `arm64`: Supported out of the box.
+  - `s390x`: Supported natively.
+- Lock-Based Fallback (via `portable-atomic`):
+  - Other 64-bit architectures without 128-bit atomic instructions (e.g., `riscv64`, `mips64`).
+  - On these platforms, 128-bit operations fall back to spinlocks.
+  - **IMPORTANT**: Also on these platforms data structures function correctly but drop their **wait-free guarantees**.
+
+Not supported list:
+  - Not supported on 32-bit architectures. high and low nibbles for WORD split won't be sufficient. That's why.
 
 ## License
 

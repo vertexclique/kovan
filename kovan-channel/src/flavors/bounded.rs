@@ -319,6 +319,10 @@ impl<T: 'static> Receiver<T> {
 
 /// Creates a channel of bounded capacity.
 pub fn channel<T: 'static>(cap: usize) -> (Sender<T>, Receiver<T>) {
+    assert!(
+        cap > 0,
+        "bounded channel capacity must be greater than zero"
+    );
     let inner = Arc::new(Channel::new(cap));
     (
         Sender {
