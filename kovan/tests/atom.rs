@@ -416,7 +416,7 @@ fn atom_option_debug_none() {
 fn atom_option_roundtrip() {
     let opt: AtomOption<Vec<u64>> = AtomOption::none();
 
-    // None → Some → read → take → None
+    // None -> Some -> read -> take -> None
     opt.store_some(vec![1, 2, 3]);
     assert_eq!(opt.load().unwrap().len(), 3);
 

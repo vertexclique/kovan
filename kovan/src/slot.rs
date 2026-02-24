@@ -4,12 +4,304 @@
 //! for the retirement list and epoch, plus helping state. The global state holds
 //! the epoch counter, slow-path counter, and thread ID allocator.
 
+use crate::retired::INVPTR;
 use crate::ttas::TTas;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use portable_atomic::AtomicU128;
 
-use crate::retired::INVPTR;
+// ---------------------------------------------------------------------------
+// WordPair: split-field (native) vs single-AtomicU128 (fallback)
+// ---------------------------------------------------------------------------
+
+/// Native implementation for platforms with hardware 128-bit atomics.
+/// Sub-word ops (store_lo, store_hi, exchange_lo) are single atomic
+/// instructions instead of CAS loops like fallback path.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x"))]
+mod native {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use portable_atomic::AtomicU128;
+
+    // Field order must match u128 bit-layout so that as_u128() reinterpret works:
+    // - Little-endian: offset 0 = low 64 bits  -> lo first
+    // - Big-endian:    offset 0 = high 64 bits -> hi first
+    #[cfg(target_endian = "little")]
+    #[repr(C, align(16))]
+    pub(crate) struct WordPair {
+        lo: AtomicU64,
+        hi: AtomicU64,
+    }
+
+    #[cfg(target_endian = "big")]
+    #[repr(C, align(16))]
+    pub(crate) struct WordPair {
+        hi: AtomicU64,
+        lo: AtomicU64,
+    }
+
+    impl WordPair {
+        pub(crate) const fn new(lo: u64, hi: u64) -> Self {
+            Self {
+                lo: AtomicU64::new(lo),
+                hi: AtomicU64::new(hi),
+            }
+        }
+
+        // Sub-word operations: single atomic instruction
+
+        #[inline]
+        pub(crate) fn load_lo(&self) -> u64 {
+            self.lo.load(Ordering::Acquire)
+        }
+
+        #[inline]
+        pub(crate) fn load_hi(&self) -> u64 {
+            self.hi.load(Ordering::Acquire)
+        }
+
+        // DYK: Pipeline based architectures like non-TSOs don't guarantee that
+        // sub-word operations are atomic as a pair.
+        //
+        // Here we have two individual loads (NOT atomic as a pair, algorithm tolerates
+        // torn reads; subsequent DCAS catches inconsistencies).
+        #[inline]
+        pub(crate) fn load(&self) -> (u64, u64) {
+            let lo = self.lo.load(Ordering::Acquire);
+            let hi = self.hi.load(Ordering::Acquire);
+            (lo, hi)
+        }
+
+        #[inline]
+        pub(crate) fn store_lo(&self, val: u64, order: Ordering) {
+            self.lo.store(val, order);
+        }
+
+        #[inline]
+        pub(crate) fn store_hi(&self, val: u64, order: Ordering) {
+            self.hi.store(val, order);
+        }
+
+        /// Two individual stores. hi is written first, then lo: lo often
+        /// serves as the "signal" (e.g. INVPTR = pending), so it must be
+        /// written last to ensure helpers see the correct seqno when they
+        /// detect the signal.
+        #[inline]
+        pub(crate) fn store(&self, lo: u64, hi: u64, order: Ordering) {
+            self.hi.store(hi, order);
+            self.lo.store(lo, order);
+        }
+
+        /// Single atomic swap — replaces the CAS loop in the fallback path.
+        #[inline]
+        pub(crate) fn exchange_lo(&self, new_lo: u64, order: Ordering) -> u64 {
+            self.lo.swap(new_lo, order)
+        }
+
+        // -----------------------------------------
+        // Full DCAS via AtomicU128 reinterpret cast
+        // -----------------------------------------
+
+        #[inline]
+        fn as_u128(&self) -> &AtomicU128 {
+            // SAFETY: WordPair is #[repr(C, align(16))] with two AtomicU64
+            // fields = 16 bytes contiguous, 16-byte aligned, which is same layout as
+            // AtomicU128. On native platforms the hardware ensures 8-byte
+            // and 16-byte atomics to the same cache line are properly
+            // synchronized (x86: LOCK prefix holds cache-line exclusive;
+            // aarch64: 8-byte store clears the exclusive monitor so a
+            // concurrent STXP retries; s390x: CDSG similar). Don't try to
+            // apply aliasing rules here, it is intentional.
+            unsafe { &*(self as *const Self as *const AtomicU128) }
+        }
+
+        #[inline]
+        fn pack(lo: u64, hi: u64) -> u128 {
+            (lo as u128) | ((hi as u128) << 64)
+        }
+
+        #[inline]
+        fn unpack(v: u128) -> (u64, u64) {
+            (v as u64, (v >> 64) as u64)
+        }
+
+        #[inline]
+        pub(crate) fn compare_exchange(
+            &self,
+            old_lo: u64,
+            old_hi: u64,
+            new_lo: u64,
+            new_hi: u64,
+        ) -> Result<(u64, u64), (u64, u64)> {
+            match self.as_u128().compare_exchange(
+                Self::pack(old_lo, old_hi),
+                Self::pack(new_lo, new_hi),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(v) => Ok(Self::unpack(v)),
+                Err(v) => Err(Self::unpack(v)),
+            }
+        }
+
+        #[inline]
+        pub(crate) fn compare_exchange_weak(
+            &self,
+            old_lo: u64,
+            old_hi: u64,
+            new_lo: u64,
+            new_hi: u64,
+        ) -> Result<(u64, u64), (u64, u64)> {
+            match self.as_u128().compare_exchange_weak(
+                Self::pack(old_lo, old_hi),
+                Self::pack(new_lo, new_hi),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(v) => Ok(Self::unpack(v)),
+                Err(v) => Err(Self::unpack(v)),
+            }
+        }
+    }
+}
+
+/// Fallback implementation for platforms without native 128-bit atomics
+/// (riscv64, mips64, etc.) where portable_atomic uses a spinlock.
+/// Sub-word ops must go through the same AtomicU128 to stay within the
+/// spinlock's protection.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x")))]
+mod fallback {
+    use core::sync::atomic::Ordering;
+    use portable_atomic::AtomicU128;
+
+    #[repr(align(16))]
+    pub(crate) struct WordPair {
+        data: AtomicU128,
+    }
+
+    impl WordPair {
+        pub(crate) const fn new(lo: u64, hi: u64) -> Self {
+            let val = (lo as u128) | ((hi as u128) << 64);
+            Self {
+                data: AtomicU128::new(val),
+            }
+        }
+
+        #[inline]
+        pub(crate) fn load(&self) -> (u64, u64) {
+            let val = self.data.load(Ordering::Acquire);
+            (val as u64, (val >> 64) as u64)
+        }
+
+        #[inline]
+        pub(crate) fn load_lo(&self) -> u64 {
+            self.load().0
+        }
+
+        #[inline]
+        pub(crate) fn load_hi(&self) -> u64 {
+            self.load().1
+        }
+
+        #[inline]
+        pub(crate) fn store(&self, lo: u64, hi: u64, order: Ordering) {
+            let val = (lo as u128) | ((hi as u128) << 64);
+            self.data.store(val, order);
+        }
+
+        #[inline]
+        pub(crate) fn store_lo(&self, lo: u64, order: Ordering) {
+            loop {
+                let old = self.data.load(Ordering::Acquire);
+                let hi = (old >> 64) as u64;
+                let new = (lo as u128) | ((hi as u128) << 64);
+                if self
+                    .data
+                    .compare_exchange_weak(old, new, order, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+
+        #[inline]
+        pub(crate) fn store_hi(&self, hi: u64, order: Ordering) {
+            loop {
+                let old = self.data.load(Ordering::Acquire);
+                let lo = old as u64;
+                let new = (lo as u128) | ((hi as u128) << 64);
+                if self
+                    .data
+                    .compare_exchange_weak(old, new, order, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+
+        #[inline]
+        pub(crate) fn compare_exchange(
+            &self,
+            old_lo: u64,
+            old_hi: u64,
+            new_lo: u64,
+            new_hi: u64,
+        ) -> Result<(u64, u64), (u64, u64)> {
+            let old = (old_lo as u128) | ((old_hi as u128) << 64);
+            let new = (new_lo as u128) | ((new_hi as u128) << 64);
+            match self
+                .data
+                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(v) => Ok((v as u64, (v >> 64) as u64)),
+                Err(v) => Err((v as u64, (v >> 64) as u64)),
+            }
+        }
+
+        #[inline]
+        pub(crate) fn compare_exchange_weak(
+            &self,
+            old_lo: u64,
+            old_hi: u64,
+            new_lo: u64,
+            new_hi: u64,
+        ) -> Result<(u64, u64), (u64, u64)> {
+            let old = (old_lo as u128) | ((old_hi as u128) << 64);
+            let new = (new_lo as u128) | ((new_hi as u128) << 64);
+            match self
+                .data
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(v) => Ok((v as u64, (v >> 64) as u64)),
+                Err(v) => Err((v as u64, (v >> 64) as u64)),
+            }
+        }
+
+        #[inline]
+        pub(crate) fn exchange_lo(&self, new_lo: u64, order: Ordering) -> u64 {
+            loop {
+                let old = self.data.load(Ordering::Acquire);
+                let old_lo = old as u64;
+                let hi = (old >> 64) as u64;
+                let new = (new_lo as u128) | ((hi as u128) << 64);
+                if self
+                    .data
+                    .compare_exchange_weak(old, new, order, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return old_lo;
+                }
+            }
+        }
+    }
+}
+
+// Re-export the appropriate implementation
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x"))]
+pub(crate) use native::WordPair;
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x")))]
+pub(crate) use fallback::WordPair;
 
 /// Number of reservation slots per thread (only 1 needed for kovan's API)
 pub(crate) const HR_NUM: usize = 1;
@@ -41,146 +333,6 @@ pub(crate) const RETIRE_FREQ: usize = 64;
 
 /// Epoch advancement frequency (in terms of retire calls per thread)
 pub(crate) const EPOCH_FREQ: usize = 128;
-
-/// DCAS word pair: two u64 values packed in a 128-bit atomic.
-/// Used for (list_ptr, seqno) and (epoch, seqno) pairs.
-#[repr(align(16))]
-pub(crate) struct WordPair {
-    data: AtomicU128,
-}
-
-impl WordPair {
-    const fn new(lo: u64, hi: u64) -> Self {
-        let val = (lo as u128) | ((hi as u128) << 64);
-        Self {
-            data: AtomicU128::new(val),
-        }
-    }
-
-    /// Load both values: returns (lo, hi) = (value, seqno)
-    #[inline]
-    pub(crate) fn load(&self) -> (u64, u64) {
-        let val = self.data.load(Ordering::Acquire);
-        (val as u64, (val >> 64) as u64)
-    }
-
-    /// Load only the low word (value/list_ptr)
-    #[inline]
-    pub(crate) fn load_lo(&self) -> u64 {
-        self.load().0
-    }
-
-    /// Load only the high word (seqno)
-    #[inline]
-    pub(crate) fn load_hi(&self) -> u64 {
-        self.load().1
-    }
-
-    /// Store both values atomically
-    #[inline]
-    pub(crate) fn store(&self, lo: u64, hi: u64, order: Ordering) {
-        let val = (lo as u128) | ((hi as u128) << 64);
-        self.data.store(val, order);
-    }
-
-    /// Store only the low word, preserving the high word via CAS loop.
-    /// For cases where we only need to update value/list_ptr.
-    #[inline]
-    pub(crate) fn store_lo(&self, lo: u64, order: Ordering) {
-        // For SeqCst/Release stores of just the low word, we can load+CAS
-        // But the reference impl just does direct stores on the individual words.
-        // Since we have a single AtomicU128, we need a CAS loop.
-        loop {
-            let old = self.data.load(Ordering::Acquire);
-            let hi = (old >> 64) as u64;
-            let new = (lo as u128) | ((hi as u128) << 64);
-            if self
-                .data
-                .compare_exchange_weak(old, new, order, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
-        }
-    }
-
-    /// Store only the high word (seqno), preserving the low word via CAS loop.
-    #[inline]
-    pub(crate) fn store_hi(&self, hi: u64, order: Ordering) {
-        loop {
-            let old = self.data.load(Ordering::Acquire);
-            let lo = old as u64;
-            let new = (lo as u128) | ((hi as u128) << 64);
-            if self
-                .data
-                .compare_exchange_weak(old, new, order, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
-        }
-    }
-
-    /// Compare-exchange the full 128-bit value.
-    /// old/new are (lo, hi) pairs.
-    #[inline]
-    pub(crate) fn compare_exchange(
-        &self,
-        old_lo: u64,
-        old_hi: u64,
-        new_lo: u64,
-        new_hi: u64,
-    ) -> Result<(u64, u64), (u64, u64)> {
-        let old = (old_lo as u128) | ((old_hi as u128) << 64);
-        let new = (new_lo as u128) | ((new_hi as u128) << 64);
-        match self
-            .data
-            .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(v) => Ok((v as u64, (v >> 64) as u64)),
-            Err(v) => Err((v as u64, (v >> 64) as u64)),
-        }
-    }
-
-    /// Weak compare-exchange the full 128-bit value.
-    #[inline]
-    pub(crate) fn compare_exchange_weak(
-        &self,
-        old_lo: u64,
-        old_hi: u64,
-        new_lo: u64,
-        new_hi: u64,
-    ) -> Result<(u64, u64), (u64, u64)> {
-        let old = (old_lo as u128) | ((old_hi as u128) << 64);
-        let new = (new_lo as u128) | ((new_hi as u128) << 64);
-        match self
-            .data
-            .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(v) => Ok((v as u64, (v >> 64) as u64)),
-            Err(v) => Err((v as u64, (v >> 64) as u64)),
-        }
-    }
-
-    /// Atomic exchange of only the low word. Returns old low value.
-    /// Implemented as CAS loop since we have a single AtomicU128.
-    #[inline]
-    pub(crate) fn exchange_lo(&self, new_lo: u64, order: Ordering) -> u64 {
-        loop {
-            let old = self.data.load(Ordering::Acquire);
-            let old_lo = old as u64;
-            let hi = (old >> 64) as u64;
-            let new = (new_lo as u128) | ((hi as u128) << 64);
-            if self
-                .data
-                .compare_exchange_weak(old, new, order, Ordering::Relaxed)
-                .is_ok()
-            {
-                return old_lo;
-            }
-        }
-    }
-}
 
 /// Helping state for the slow-path / wait-free mechanism
 pub(crate) struct HelpState {

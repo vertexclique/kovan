@@ -36,7 +36,7 @@
 //! The implementation uses:
 //! - **Bucket array**: Fixed-size array of atomic pointers (null-initialized)
 //! - **Collision resolution**: Singly-linked lists for hash collisions
-//! - **Node layout**: `hash → key → value → next` for optimal cache performance
+//! - **Node layout**: `hash -> key -> value -> next` for optimal cache performance
 //! - **Updates**: Copy-on-write style replacements for existing keys
 //!
 //! # Example

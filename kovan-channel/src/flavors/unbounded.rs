@@ -55,7 +55,7 @@ impl<T: 'static> Drop for Channel<T> {
         //   - the last node that became head after a dequeue, or
         //   - a data node if messages are still pending.
         //
-        // The loop walks head→tail and retires each node exactly once.
+        // The loop walks head->tail and retires each node exactly once.
         // Empty-channel path: `head == tail == sentinel`, next is null;
         // we retire the sentinel and the loop exits cleanly with no double-free.
         let guard = pin();

@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
@@ -20,12 +20,12 @@ readme = "README.md"
 exclude = ["model_chk"]
 
 [workspace.dependencies]
-kovan = { version = "0.1.9", path = "kovan" }
-kovan-channel = { version = "0.1.9", path = "kovan-channel" }
-kovan-map = { version = "0.1.9", path = "kovan-map" }
-kovan-mvcc = { version = "0.1.9", path = "kovan-mvcc" }
-kovan-stm = { version = "0.1.9", path = "kovan-stm" }
-kovan-queue = { version = "0.1.9", path = "kovan-queue" }
+kovan = { version = "0.1.10", path = "kovan" }
+kovan-channel = { version = "0.1.10", path = "kovan-channel" }
+kovan-map = { version = "0.1.10", path = "kovan-map" }
+kovan-mvcc = { version = "0.1.10", path = "kovan-mvcc" }
+kovan-stm = { version = "0.1.10", path = "kovan-stm" }
+kovan-queue = { version = "0.1.10", path = "kovan-queue" }
 
 [workspace.metadata.docs.rs]
 rustdoc-args = ["-C", "target-feature=+cmpxchg16b"]
