@@ -12,6 +12,5 @@ categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
 
 [dependencies]
-cuneiform = "0.1"
 crossbeam-utils = "0.8"
 kovan = { workspace = true }
