@@ -102,8 +102,8 @@ impl RetiredNode {
     /// This is a non-atomic read of an `UnsafeCell`. It is safe because:
     /// - Writes happen during batch construction (thread-local, no concurrent access).
     /// - Reads happen after publication via `try_retire`, which establishes a
-    ///   happens-before chain: `batch_link.store(SeqCst)` → `slot.exchange(AcqRel)` →
-    ///   `slot.exchange(AcqRel)` → `birth_epoch` read (same thread).
+    ///   happens-before chain: `batch_link.store(SeqCst)` -> `slot.exchange(AcqRel)` ->
+    ///   `slot.exchange(AcqRel)` -> `birth_epoch` read (same thread).
     /// - The value is never modified after batch finalization.
     #[inline]
     pub(crate) fn birth_epoch(&self) -> u64 {

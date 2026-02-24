@@ -145,6 +145,11 @@ impl<T: fmt::Display> fmt::Display for AtomGuard<'_, T> {
 /// exist), use [`into_inner_unchecked`](Removed::into_inner_unchecked).
 pub struct Removed<T: Send + Sync + 'static> {
     value: ManuallyDrop<T>,
+    /// Original birth_epoch from the AtomNode, preserved for safe reclamation.
+    /// DeferDrop's RetiredNode must use this instead of a fresh epoch to prevent
+    /// try_retire from prematurely reclaiming the wrapper while readers may still
+    /// reference T's heap internals (e.g. String buffer, Vec backing array).
+    birth_epoch: u64,
 }
 
 impl<T: Send + Sync + 'static> Deref for Removed<T> {
@@ -187,6 +192,13 @@ impl<T: Send + Sync + 'static> Drop for Removed<T> {
             _retired: RetiredNode::new(),
             value: val,
         }));
+        // Override fresh birth_epoch with the original from the AtomNode.
+        // A fresh epoch could be right after a reader's pinned epoch, causing
+        // try_retire to skip protection and free while readers still
+        // reference T's heap internals (e.g. String buffer, Vec backing).
+        unsafe {
+            (*(wrapper as *mut RetiredNode)).set_birth_epoch(self.birth_epoch);
+        }
         // SAFETY: DeferDrop<U> is #[repr(C)] with RetiredNode at offset 0.
         // Allocated via Box::into_raw above.
         unsafe { guard::retire(wrapper) };
@@ -442,10 +454,14 @@ impl<T: Send + Sync + 'static> Atom<T> {
         // We read the value out via ptr::read, then schedule the
         // AtomNode shell for deallocation only (no Drop on T).
         let old_val = unsafe { core::ptr::read(AtomNode::val_ptr(old_ptr)) };
+        // Capture birth_epoch before retiring. Removed::drop will
+        // use it on the DeferDrop wrapper to prevent epoch-skip UAF.
+        let birth_epoch = unsafe { (*(old_ptr as *mut RetiredNode)).birth_epoch() };
         // SAFETY: old_ptr was allocated via AtomNode::boxed, val moved out via ptr::read.
         unsafe { retire_node_dealloc_only::<T>(old_ptr) };
         Removed {
             value: ManuallyDrop::new(old_val),
+            birth_epoch,
         }
     }
 
@@ -773,10 +789,13 @@ impl<T: Send + Sync + 'static> AtomOption<T> {
             // SAFETY: old_ptr was allocated via AtomNode::boxed.
             // We read the value out and schedule the node shell for dealloc only.
             let val = unsafe { core::ptr::read(AtomNode::val_ptr(old_ptr)) };
+            // Same as swap.
+            let birth_epoch = unsafe { (*(old_ptr as *mut RetiredNode)).birth_epoch() };
             // SAFETY: old_ptr was allocated via AtomNode::boxed, val moved out via ptr::read.
             unsafe { retire_node_dealloc_only::<T>(old_ptr) };
             Some(Removed {
                 value: ManuallyDrop::new(val),
+                birth_epoch,
             })
         }
     }
@@ -878,34 +897,29 @@ where
 
 /// Retires an `AtomNode<T>` for deferred deallocation only (does not drop T).
 ///
+/// Reuses the original AtomNode's embedded RetiredNode instead of allocating
+/// a wrapper. This preserves the correct birth_epoch from allocation time
+/// and avoids an extra heap allocation.
+///
 /// # Safety
 ///
 /// - `ptr` must have been allocated via `AtomNode::boxed`
 /// - The `val` field must have already been moved out (e.g. via `ptr::read`)
 unsafe fn retire_node_dealloc_only<T: 'static>(ptr: *mut AtomNode<T>) {
-    // We wrap the raw pointer in a node that only deallocates memory.
-    // This wrapper itself has RetiredNode at offset 0 for safe retirement.
-    #[repr(C)]
-    struct DeallocNode<T> {
-        _retired: RetiredNode,
-        ptr: *mut AtomNode<T>,
-    }
-    impl<T> Drop for DeallocNode<T> {
-        fn drop(&mut self) {
-            unsafe {
-                alloc::alloc::dealloc(
-                    self.ptr as *mut u8,
-                    alloc::alloc::Layout::new::<AtomNode<T>>(),
-                );
-            }
+    // Type-erased destructor that only deallocates the AtomNode's memory
+    // without running T's destructor (T was already moved out via ptr::read).
+    unsafe fn dealloc_destructor<T>(p: *mut RetiredNode) {
+        unsafe {
+            alloc::alloc::dealloc(p as *mut u8, alloc::alloc::Layout::new::<AtomNode<T>>());
         }
     }
 
-    let wrapper = Box::into_raw(Box::new(DeallocNode {
-        _retired: RetiredNode::new(),
-        ptr,
-    }));
-    // SAFETY: DeallocNode is #[repr(C)] with RetiredNode at offset 0.
-    // Allocated via Box::into_raw above.
-    unsafe { guard::retire(wrapper) };
+    let node_ptr = ptr as *mut RetiredNode;
+    unsafe {
+        (*node_ptr).set_destructor(Some(dealloc_destructor::<T>));
+    }
+    // SAFETY: AtomNode<T> is #[repr(C)] with RetiredNode at offset 0.
+    // birth_epoch is preserved from allocation time.
+    // destructor set above to dealloc-only.
+    unsafe { guard::retire_raw(node_ptr) };
 }

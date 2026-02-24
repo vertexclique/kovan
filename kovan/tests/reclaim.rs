@@ -16,6 +16,7 @@ impl Drop for CountedNode {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
 fn test_retire_eventually_frees() {
     let drops = Arc::new(AtomicUsize::new(0));
 
@@ -66,6 +67,7 @@ fn test_guard_protects_from_reclamation() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
 fn test_concurrent_retire() {
     let drops = Arc::new(AtomicUsize::new(0));
 

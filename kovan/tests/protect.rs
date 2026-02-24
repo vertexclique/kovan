@@ -7,9 +7,9 @@
 //!   - Thread A pins at era E, then loads a pointer born at era E+K.
 //!   - Thread B retires that pointer.
 //!   - Without era tracking, try_retire sees Thread A at era E < birth E+K,
-//!     skips A, and frees the pointer → use after free.
+//!     skips A, and frees the pointer -> use after free.
 //!   - With era tracking, load() updates A's era to ≥ E+K, so try_retire
-//!     counts A → pointer stays alive while A's guard is held.
+//!     counts A -> pointer stays alive while A's guard is held.
 
 #![allow(unused_unsafe)]
 

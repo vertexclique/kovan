@@ -122,26 +122,26 @@ Comparison against the major memory reclamation approaches: epoch-based (crossbe
 
 ### Pin Overhead
 
-| | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| | kovan | crossbeam | seize | haphazard |
 |---|---|---|---|---|
-| pin + drop | **3.8 ns** | 14.7 ns | 9.5 ns | 19.1 ns |
+| pin + drop | **2.87 ns** | 14.53 ns | 9.51 ns | 18.03 ns |
 
 ### Treiber Stack (push+pop, 5k ops/thread)
 
-| Threads | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| Threads | kovan | crossbeam | seize | haphazard |
 |---|---|---|---|---|
-| 1 | **579 us** | 573 us | 597 us | 956 us |
-| 2 | **1.49 ms** | 1.60 ms | 1.73 ms | 3.09 ms |
-| 4 | **2.69 ms** | 3.57 ms | 4.14 ms | 7.03 ms |
-| 8 | **9.28 ms** | 11.03 ms | 11.35 ms | 19.65 ms |
+| 1 | **541 us** (18.50 Mops/s) | 580 us (17.24 Mops/s) | 599 us (16.69 Mops/s) | 936 us (10.68 Mops/s) |
+| 2 | **1.48 ms** (13.55 Mops/s) | 1.63 ms (12.26 Mops/s) | 1.71 ms (11.69 Mops/s) | 3.10 ms (6.46 Mops/s) |
+| 4 | **3.00 ms** (13.33 Mops/s) | 3.74 ms (10.69 Mops/s) | 3.97 ms (10.07 Mops/s) | 7.00 ms (5.71 Mops/s) |
+| 8 | **9.15 ms** (8.74 Mops/s) | 11.62 ms (6.89 Mops/s) | 11.04 ms (7.25 Mops/s) | 20.24 ms (3.95 Mops/s) |
 
 ### Read-Heavy (95% load, 5% swap, 10k ops/thread)
 
-| Threads | kovan 0.1.9 | crossbeam 0.9.18 | seize 0.5.1 | haphazard 0.1.8 |
+| Threads | kovan | crossbeam | seize | haphazard |
 |---|---|---|---|---|
-| 2 | **301 us** | 440 us | 428 us | 1.16 ms |
-| 4 | **446 us** | 614 us | 610 us | 4.65 ms |
-| 8 | **647 us** | 970 us | 1.03 ms | 20.25 ms |
+| 2 | **300 us** (66.65 Mops/s) | 438 us (45.67 Mops/s) | 425 us (47.01 Mops/s) | 1.15 ms (17.35 Mops/s) |
+| 4 | **425 us** (94.08 Mops/s) | 606 us (66.05 Mops/s) | 628 us (63.69 Mops/s) | 4.78 ms (8.37 Mops/s) |
+| 8 | **664 us** (120.33 Mops/s) | 998 us (80.16 Mops/s) | 1.01 ms (78.87 Mops/s) | 21.00 ms (3.81 Mops/s) |
 
 Run your own benchmarks, workloads differ:
 

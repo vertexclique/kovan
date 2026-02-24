@@ -161,6 +161,10 @@ impl Handle {
             let slots = global.thread_slots(tid);
             slots.epoch[0].store_lo(curr_epoch, Ordering::SeqCst);
             self.cached_epoch.set(curr_epoch);
+            // Defense-in-depth: re-load pointer after epoch store to close
+            // the window where a concurrent retire sees our old epoch before
+            // we publish the new one. Only on this rare (epoch-change) path.
+            return data.load(order);
         }
 
         ptr
@@ -176,12 +180,16 @@ impl Handle {
         let mut curr_epoch = curr_epoch;
 
         // If the slot has a non-null list (including INVPTR), transition it.
-        // This is critical: INVPTR means "inactive". We must exchange to INVPTR,
-        // traverse any real list, then store null (0) to mark slot "active".
+        // Matches Crystalline's update_era: SWAP the list with nullptr (0) in
+        // a single atomic step. The slot becomes immediately active (lo=0).
+        // If a concurrent try_retire inserts a node after the swap, it stays
+        // in the slot and will be traversed on the next do_update. This avoids
+        // the two-step INVPTR/store(0) protocol which could overwrite
+        // concurrent try_retire insertions.
         let list_lo = slots.first[index].load_lo();
         if list_lo != 0 {
-            let first = slots.first[index].exchange_lo(INVPTR as u64, Ordering::AcqRel);
-            if first != INVPTR as u64 {
+            let first = slots.first[index].exchange_lo(0, Ordering::AcqRel);
+            if first != 0 && first != INVPTR as u64 {
                 let mut free_list = self.free_list.get();
                 let mut list_count = self.list_count.get();
                 unsafe {
@@ -196,12 +204,7 @@ impl Handle {
             }
 
             curr_epoch = global.get_epoch();
-
-            // The slot's epoch must be updated before marking the
-            // slot as active (first_lo == 0). Otherwise, try_retire may scan
-            // the slot while it's active but holding the old epoch.
             slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
-            slots.first[index].store_lo(0, Ordering::SeqCst);
         } else {
             // Store current epoch
             slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
@@ -648,37 +651,16 @@ impl Handle {
         self.drain_free_list();
     }
 
-    /// Retire a node into the thread-local batch (matches ASMR retire).
+    /// Internal: enqueue a pre-configured node into the thread-local batch.
+    /// The node's destructor and birth_epoch must already be set by the caller.
     ///
     /// # Safety
     ///
-    /// - `ptr` must point to a valid, heap-allocated object (e.g. from `Box::into_raw`).
-    /// - `ptr` must have a `RetiredNode` at offset 0 (i.e. `#[repr(C)]` with
-    ///   `RetiredNode` as the first field).
-    /// - `ptr` must not be retired more than once.
-    /// - The caller must not access `*ptr` after this call (except through
-    ///   the reclamation system).
-    unsafe fn retire<T>(&self, ptr: *mut T)
-    where
-        T: 'static,
-    {
-        let node_ptr = ptr as *mut RetiredNode;
-
-        // Set per-node destructor
-        // SAFETY: Use raw pointer writes to avoid creating &mut, which would
-        // conflict with concurrent readers still holding a guard-protected reference
-        // to the outer struct.
-        unsafe fn destructor<T>(ptr: *mut RetiredNode) {
-            let typed_ptr = ptr as *mut T;
-            unsafe {
-                drop(Box::from_raw(typed_ptr));
-            }
-        }
-        unsafe {
-            (*node_ptr).set_destructor(Some(destructor::<T>));
-        }
-
-        // birth_epoch is already set at allocation time (RetiredNode::new)
+    /// - `node_ptr` must point to a valid, heap-allocated `RetiredNode` at offset 0.
+    /// - `destructor` must already be set on the node.
+    /// - `birth_epoch` must already be set correctly.
+    /// - The node must not be enqueued more than once.
+    unsafe fn enqueue_node(&self, node_ptr: *mut RetiredNode) {
         unsafe {
             (*node_ptr)
                 .batch_link
@@ -738,6 +720,52 @@ impl Handle {
             self.batch_last.set(core::ptr::null_mut());
             self.batch_count.set(0);
         }
+    }
+
+    /// Retire a node into the thread-local batch (matches ASMR retire).
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must point to a valid, heap-allocated object (e.g. from `Box::into_raw`).
+    /// - `ptr` must have a `RetiredNode` at offset 0 (i.e. `#[repr(C)]` with
+    ///   `RetiredNode` as the first field).
+    /// - `ptr` must not be retired more than once.
+    /// - The caller must not access `*ptr` after this call (except through
+    ///   the reclamation system).
+    unsafe fn retire<T>(&self, ptr: *mut T)
+    where
+        T: 'static,
+    {
+        let node_ptr = ptr as *mut RetiredNode;
+
+        // Set per-node destructor
+        // SAFETY: Use raw pointer writes to avoid creating &mut, which would
+        // conflict with concurrent readers still holding a guard-protected reference
+        // to the outer struct.
+        unsafe fn destructor<T>(ptr: *mut RetiredNode) {
+            let typed_ptr = ptr as *mut T;
+            unsafe {
+                drop(Box::from_raw(typed_ptr));
+            }
+        }
+        unsafe {
+            (*node_ptr).set_destructor(Some(destructor::<T>));
+        }
+
+        // birth_epoch is already set at allocation time (RetiredNode::new)
+        unsafe { self.enqueue_node(node_ptr) };
+    }
+
+    /// Retire a raw RetiredNode whose destructor and birth_epoch are already set.
+    ///
+    /// # Safety
+    ///
+    /// - `node_ptr` must point to a valid, heap-allocated `RetiredNode` at offset 0.
+    /// - `destructor` must already be set on the node.
+    /// - `birth_epoch` must already be correctly set (typically from allocation time).
+    /// - The node must not be retired more than once.
+    unsafe fn retire_raw(&self, node_ptr: *mut RetiredNode) {
+        unsafe { self.enqueue_node(node_ptr) };
     }
 
     /// Try to retire the current batch by scanning all thread slots.
@@ -845,14 +873,21 @@ impl Handle {
 
             if prev != 0 {
                 if prev == INVPTR as u64 {
-                    // Slot is transitioning — try to undo.
-                    // Load (lo, hi) once to avoid TOCTOU from multiple loads.
+                    // Slot was inactive (helper cleanup sets INVPTR) — try
+                    // to undo by restoring 0, matching Crystalline's try_retire
+                    // rollback (Figure 9, line 61). CAS to 0 so the slot
+                    // becomes visible again if undo succeeds.
                     let exp = curr as u64;
                     let (lo, hi) = slot_first_ref.load();
-                    if lo == exp {
-                        let _ = slot_first_ref.compare_exchange(exp, hi, INVPTR as u64, hi);
+                    if lo == exp && slot_first_ref.compare_exchange(exp, hi, 0, hi).is_ok() {
+                        // Undo succeeded — node removed from slot.
+                        curr = unsafe { (*curr).batch_next() };
+                        continue;
                     }
-                    // Whether CAS succeeded or failed, skip this node.
+                    // Undo failed — node was captured by a concurrent
+                    // exchange. Count as inserted to balance refs, matching
+                    // Crystalline's cnt++ on CAS failure (Figure 9, line 66).
+                    adjs = adjs.wrapping_add(1);
                     curr = unsafe { (*curr).batch_next() };
                     continue;
                 } else {
@@ -1071,5 +1106,28 @@ pub unsafe fn retire<T: 'static>(ptr: *mut T) {
     {
         // SAFETY: Caller upholds the safety contract.
         HANDLE.with(|handle| unsafe { handle.retire(ptr) })
+    }
+}
+
+/// Retire a raw RetiredNode whose destructor and birth_epoch are already set.
+///
+/// Used internally by `retire_node_dealloc_only` to retire an AtomNode's
+/// embedded RetiredNode directly, preserving its original birth_epoch.
+///
+/// # Safety
+///
+/// - `node_ptr` must point to a valid, heap-allocated object with `RetiredNode` at offset 0.
+/// - `destructor` must already be set on the node.
+/// - `birth_epoch` must be correctly set (typically from allocation time).
+/// - The node must not be retired more than once.
+#[inline]
+pub(crate) unsafe fn retire_raw(node_ptr: *mut RetiredNode) {
+    #[cfg(feature = "nightly")]
+    {
+        unsafe { HANDLE.retire_raw(node_ptr) }
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.with(|handle| unsafe { handle.retire_raw(node_ptr) })
     }
 }
