@@ -167,15 +167,17 @@ kovan = { version = "0.1", features = ["nightly"] }
 - **Windows** (Natively tested)
 
 **Architectures**:
+
 Supported list:
-- **Native Wait-Free (128-bit atomics)**:
+- Native Wait-Free (128-bit atomics):
   - `x86_64`: Requires compilation target feature `+cmpxchg16b`.
   - `aarch64` / `arm64`: Supported out of the box.
   - `s390x`: Supported natively.
-- **Lock-Based Fallback (via `portable-atomic`)**:
+- Lock-Based Fallback (via `portable-atomic`):
   - Other 64-bit architectures without 128-bit atomic instructions (e.g., `riscv64`, `mips64`).
   - On these platforms, 128-bit operations fall back to spinlocks.
   - **IMPORTANT**: Also on these platforms data structures function correctly but drop their **wait-free guarantees**.
+
 Not supported list:
   - Not supported on 32-bit architectures. high and low nibbles for WORD split won't be sufficient. That's why.
 
