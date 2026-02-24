@@ -172,7 +172,7 @@ Supported list:
 - Native Wait-Free (128-bit atomics):
   - `x86_64`: Requires compilation target feature `+cmpxchg16b`.
   - `aarch64` / `arm64`: Supported out of the box.
-  - `s390x`: Supported natively.
+  - `s390` and `riscv64gc`: Supported natively. I am not testing it on CI (cross glibc issues).
 - Lock-Based Fallback (via `portable-atomic`):
   - Other 64-bit architectures without 128-bit atomic instructions (e.g., `riscv64`, `mips64`).
   - On these platforms, 128-bit operations fall back to spinlocks.
