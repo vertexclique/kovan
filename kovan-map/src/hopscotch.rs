@@ -957,6 +957,11 @@ impl<K, V, S> Drop for HopscotchMap<K, V, S> {
         unsafe {
             drop(Box::from_raw(table_ptr.as_raw()));
         }
+
+        // Flush nodes previously retired by concurrent operations (insert/remove/resize)
+        // to prevent use-after-free during process teardown.
+        drop(guard);
+        kovan::flush();
     }
 }
 

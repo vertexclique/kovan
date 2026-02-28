@@ -637,6 +637,8 @@ impl<T: Send + Sync + 'static> Drop for Atom<T> {
                 drop(Box::from_raw(ptr));
             }
         }
+        // Flush nodes previously retired by store()/rcu() operations.
+        crate::flush();
     }
 }
 
@@ -811,6 +813,8 @@ impl<T: Send + Sync + 'static> Drop for AtomOption<T> {
                 drop(Box::from_raw(ptr));
             }
         }
+        // Flush nodes previously retired by store() operations.
+        crate::flush();
     }
 }
 

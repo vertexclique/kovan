@@ -7,7 +7,7 @@
 use crate::retired::INVPTR;
 use crate::ttas::TTas;
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // WordPair: split-field (native) vs single-AtomicU128 (fallback)
@@ -309,24 +309,20 @@ pub(crate) const HR_NUM: usize = 1;
 /// Total slots per thread: hr_num reservations + 2 helper slots
 pub(crate) const SLOTS_PER_THREAD: usize = HR_NUM + 2;
 
-// Maximum concurrent threads. Configurable via cargo features:
-//   kovan = { features = ["max-threads-512"] }
-// Default: 128.
-#[cfg(feature = "max-threads-1024")]
-pub(crate) const MAX_THREADS: usize = 1024;
-#[cfg(all(feature = "max-threads-512", not(feature = "max-threads-1024")))]
-pub(crate) const MAX_THREADS: usize = 512;
-#[cfg(all(
-    feature = "max-threads-256",
-    not(any(feature = "max-threads-512", feature = "max-threads-1024"))
-))]
-pub(crate) const MAX_THREADS: usize = 256;
-#[cfg(not(any(
-    feature = "max-threads-256",
-    feature = "max-threads-512",
-    feature = "max-threads-1024"
-)))]
-pub(crate) const MAX_THREADS: usize = 128;
+/// Number of thread slots per page (power of 2 for shift/mask indexing).
+const SLOTS_PER_PAGE: usize = 128;
+
+/// log2(SLOTS_PER_PAGE) — used for tid >> PAGE_SHIFT.
+const PAGE_SHIFT: usize = 7;
+
+/// SLOTS_PER_PAGE - 1 — used for tid & PAGE_MASK.
+const PAGE_MASK: usize = 127;
+
+/// Maximum number of pages in the page table. Supports up to 65,536 threads.
+const MAX_PAGES: usize = 512;
+
+/// A page of thread slots, allocated on demand.
+struct SlotPage([ThreadSlots; SLOTS_PER_PAGE]);
 
 /// Batch retirement frequency (try_retire every `freq` retires)
 pub(crate) const RETIRE_FREQ: usize = 64;
@@ -380,8 +376,9 @@ impl ThreadSlots {
 
 /// Global ASMR state
 pub(crate) struct ASMRState {
-    /// Per-thread slot arrays
-    slots: &'static [ThreadSlots],
+    /// Two-level page table of per-thread slot arrays. Pages are allocated on
+    /// demand when new thread IDs are assigned.
+    pages: [AtomicPtr<SlotPage>; MAX_PAGES],
     /// Global epoch counter (starts at 1)
     epoch: AtomicU64,
     /// Count of threads currently in the slow path
@@ -392,14 +389,13 @@ pub(crate) struct ASMRState {
     free_tids: TTas<alloc::vec::Vec<usize>>,
 }
 
+/// Null-initialized page table constant for use in array initialization.
+const NULL_PAGE: AtomicPtr<SlotPage> = AtomicPtr::new(core::ptr::null_mut());
+
 impl ASMRState {
     fn new() -> Self {
-        let mut slots_vec = alloc::vec::Vec::with_capacity(MAX_THREADS);
-        for _ in 0..MAX_THREADS {
-            slots_vec.push(ThreadSlots::new());
-        }
         Self {
-            slots: Box::leak(slots_vec.into_boxed_slice()),
+            pages: [NULL_PAGE; MAX_PAGES],
             epoch: AtomicU64::new(1),
             slow_counter: AtomicU64::new(0),
             next_tid: AtomicUsize::new(0),
@@ -407,10 +403,40 @@ impl ASMRState {
         }
     }
 
-    /// Get the thread slots for a given thread ID
+    /// Ensure the page at `page_idx` is allocated. Uses CAS to handle races.
+    fn ensure_page(&self, page_idx: usize) {
+        if self.pages[page_idx].load(Ordering::Acquire).is_null() {
+            let page = Box::into_raw(Box::new(SlotPage(core::array::from_fn(|_| {
+                ThreadSlots::new()
+            }))));
+            if self.pages[page_idx]
+                .compare_exchange(
+                    core::ptr::null_mut(),
+                    page,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                // Another thread allocated this page first — free ours.
+                unsafe {
+                    drop(Box::from_raw(page));
+                }
+            }
+        }
+    }
+
+    /// Get the thread slots for a given thread ID.
     #[inline]
     pub(crate) fn thread_slots(&self, tid: usize) -> &ThreadSlots {
-        &self.slots[tid]
+        let page_idx = tid >> PAGE_SHIFT;
+        let slot_idx = tid & PAGE_MASK;
+        let page = self.pages[page_idx].load(Ordering::Acquire);
+        debug_assert!(
+            !page.is_null(),
+            "kovan: page {page_idx} not allocated for tid {tid}"
+        );
+        unsafe { &(*page).0[slot_idx] }
     }
 
     /// Get the current global epoch
@@ -443,15 +469,15 @@ impl ASMRState {
         self.slow_counter.fetch_sub(1, Ordering::AcqRel);
     }
 
-    /// Total number of allocated thread slots
+    /// Number of active thread slots (upper bound for scanning).
     #[inline]
     pub(crate) fn max_threads(&self) -> usize {
-        MAX_THREADS
+        self.next_tid.load(Ordering::Acquire)
     }
 
     /// Allocate a thread ID
     pub(crate) fn alloc_tid(&self) -> usize {
-        // Try recycled IDs first
+        // Try recycled IDs first (page already exists for recycled tids)
         {
             let mut free = self.free_tids.lock();
             if let Some(tid) = free.pop() {
@@ -462,14 +488,20 @@ impl ASMRState {
         // if the assert panics and is caught by catch_unwind.
         loop {
             let current = self.next_tid.load(Ordering::Relaxed);
+            let page_idx = current >> PAGE_SHIFT;
             assert!(
-                current < MAX_THREADS,
-                "kovan: exceeded maximum thread count ({MAX_THREADS})"
+                page_idx < MAX_PAGES,
+                "kovan: exceeded maximum thread count ({})",
+                MAX_PAGES * SLOTS_PER_PAGE,
             );
+            // Ensure the page is allocated BEFORE publishing the tid via next_tid.
+            // This guarantees concurrent scanners (via max_threads()) never see a
+            // tid whose page doesn't exist yet.
+            self.ensure_page(page_idx);
             match self.next_tid.compare_exchange_weak(
                 current,
                 current + 1,
-                Ordering::Relaxed,
+                Ordering::Release,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return current,
@@ -480,10 +512,11 @@ impl ASMRState {
 
     /// Release a thread ID for recycling
     pub(crate) fn free_tid(&self, tid: usize) {
-        // Mark all slots inactive
+        // Mark all slots inactive (page is guaranteed to exist)
+        let slots = self.thread_slots(tid);
         for j in 0..SLOTS_PER_THREAD {
-            self.slots[tid].first[j].store(INVPTR as u64, 0, Ordering::Release);
-            self.slots[tid].epoch[j].store(0, 0, Ordering::Release);
+            slots.first[j].store(INVPTR as u64, 0, Ordering::Release);
+            slots.epoch[j].store(0, 0, Ordering::Release);
         }
         let mut free = self.free_tids.lock();
         free.push(tid);
