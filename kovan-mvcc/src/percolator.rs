@@ -97,7 +97,7 @@ pub struct KovanMVCC {
     active_txns: Arc<ActiveTxnRegistry>,
     /// Serializes SSI validation + commit for Serializable transactions.
     /// Ensures that when one Serializable txn commits, the next one sees it.
-    ssi_commit_lock: Arc<std::sync::Mutex<()>>,
+    ssi_commit_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 impl std::fmt::Debug for KovanMVCC {
@@ -127,7 +127,7 @@ impl KovanMVCC {
             ts_oracle,
             backoff: Arc::new(DefaultBackoff),
             active_txns: Arc::new(ActiveTxnRegistry::new()),
-            ssi_commit_lock: Arc::new(std::sync::Mutex::new(())),
+            ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
@@ -137,7 +137,7 @@ impl KovanMVCC {
             ts_oracle: Arc::new(LocalTimestampOracle::new()),
             backoff: Arc::new(DefaultBackoff),
             active_txns: Arc::new(ActiveTxnRegistry::new()),
-            ssi_commit_lock: Arc::new(std::sync::Mutex::new(())),
+            ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
@@ -150,7 +150,7 @@ impl KovanMVCC {
             ts_oracle,
             backoff: Arc::new(DefaultBackoff),
             active_txns: Arc::new(ActiveTxnRegistry::new()),
-            ssi_commit_lock: Arc::new(std::sync::Mutex::new(())),
+            ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
@@ -230,7 +230,7 @@ pub struct Txn {
     /// Read-set for Serializable: keys read during the transaction
     read_set: Option<HopscotchMap<String, ()>>,
     /// SSI commit lock (shared with KovanMVCC), serializes Serializable commits
-    ssi_commit_lock: Arc<std::sync::Mutex<()>>,
+    ssi_commit_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 impl Txn {
@@ -388,11 +388,7 @@ impl Txn {
         // For Serializable transactions: hold SSI commit lock during validation + commit.
         // This serializes SSI commits so that when T1 commits, T2 sees it in its validation.
         let _ssi_guard = if self.isolation_level == IsolationLevel::Serializable {
-            Some(
-                self.ssi_commit_lock
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            )
+            Some(self.ssi_commit_lock.lock())
         } else {
             None
         };

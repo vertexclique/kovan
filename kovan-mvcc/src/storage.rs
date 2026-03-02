@@ -23,7 +23,7 @@ pub struct WriteInfo {
 pub type Value = Arc<Vec<u8>>;
 
 use kovan_map::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 /// Storage Trait
 /// Defines the interface for the underlying storage engine.
@@ -137,14 +137,14 @@ impl Storage for InMemoryStorage {
             }
         };
 
-        let mut map = map_mutex.lock().unwrap();
+        let mut map = map_mutex.lock();
         map.insert(commit_ts, info);
     }
 
     /// Find the latest write with commit_ts <= ts
     fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
         if let Some(map_mutex) = self.writes.get(key) {
-            let map = map_mutex.lock().unwrap();
+            let map = map_mutex.lock();
             // range(..=ts) gives all entries with key <= ts
             // next_back() gives the largest key <= ts
             map.range(..=ts).next_back().map(|(k, v)| (*k, v.clone()))
@@ -156,7 +156,7 @@ impl Storage for InMemoryStorage {
     /// Find the latest Put or Delete write with commit_ts <= ts, skipping Rollback records
     fn get_latest_commit(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
         if let Some(map_mutex) = self.writes.get(key) {
-            let map = map_mutex.lock().unwrap();
+            let map = map_mutex.lock();
             for (k, v) in map.range(..=ts).rev() {
                 if v.kind != WriteKind::Rollback {
                     return Some((*k, v.clone()));
@@ -179,13 +179,13 @@ impl Storage for InMemoryStorage {
             }
         };
 
-        let mut map = map_mutex.lock().unwrap();
+        let mut map = map_mutex.lock();
         map.insert(start_ts, value);
     }
 
     fn get_data(&self, key: &str, start_ts: u64) -> Option<Value> {
         if let Some(map_mutex) = self.data.get(key) {
-            let map = map_mutex.lock().unwrap();
+            let map = map_mutex.lock();
             map.get(&start_ts).cloned()
         } else {
             None
@@ -194,14 +194,14 @@ impl Storage for InMemoryStorage {
 
     fn delete_data(&self, key: &str, start_ts: u64) {
         if let Some(map_mutex) = self.data.get(key) {
-            let mut map = map_mutex.lock().unwrap();
+            let mut map = map_mutex.lock();
             map.remove(&start_ts);
         }
     }
 
     fn gc_writes(&self, key: &str, watermark: u64) -> usize {
         if let Some(map_mutex) = self.writes.get(key) {
-            let mut map = map_mutex.lock().unwrap();
+            let mut map = map_mutex.lock();
             // Find the latest version at or below watermark
             let latest_visible = map.range(..=watermark).next_back().map(|(k, _)| *k);
             if let Some(keep_ts) = latest_visible {
@@ -222,7 +222,7 @@ impl Storage for InMemoryStorage {
 
     fn gc_data(&self, key: &str, watermark: u64) -> usize {
         if let Some(map_mutex) = self.data.get(key) {
-            let mut map = map_mutex.lock().unwrap();
+            let mut map = map_mutex.lock();
             // Find the latest version at or below watermark
             let latest_visible = map.range(..=watermark).next_back().map(|(k, _)| *k);
             if let Some(keep_ts) = latest_visible {
