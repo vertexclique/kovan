@@ -406,3 +406,40 @@ fn test_burst_workload() {
         }
     }
 }
+
+/// Verify that >128 concurrent threads work (previously panicked with fixed MAX_THREADS=128).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_many_threads_beyond_old_limit() {
+    let num_threads = 256;
+    let shared = Arc::new(Atomic::new(StressNode::new(0)));
+    let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|i| {
+            let shared = shared.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                let guard = pin();
+                let _ = shared.load(Ordering::Acquire, &guard);
+                // Each thread does a store to exercise retirement
+                let node = StressNode::new(i);
+                let old = shared.swap(
+                    unsafe { kovan::Shared::from_raw(node) },
+                    Ordering::AcqRel,
+                    &guard,
+                );
+                if !old.is_null() {
+                    unsafe {
+                        retire(old.as_raw());
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+}

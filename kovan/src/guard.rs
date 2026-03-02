@@ -39,15 +39,18 @@ impl Drop for Guard {
         #[cfg(feature = "nightly")]
         {
             let count = HANDLE.pin_count.get();
-            debug_assert!(count > 0, "Guard dropped with pin_count == 0");
-            HANDLE.pin_count.set(count - 1);
+            HANDLE.pin_count.set(count.saturating_sub(1));
         }
         #[cfg(not(feature = "nightly"))]
         {
-            HANDLE.with(|handle| {
+            // Use try_with to handle process teardown gracefully.
+            // During static destructor execution, TLS may already be destroyed.
+            // Panicking in a destructor during cleanup causes SIGABRT.
+            let _ = HANDLE.try_with(|handle| {
                 let count = handle.pin_count.get();
-                debug_assert!(count > 0, "Guard dropped with pin_count == 0");
-                handle.pin_count.set(count - 1);
+                // Saturating: a dummy Guard (created when TLS was unavailable in
+                // pin()) was never pinned. Decrementing past 0 would be UB.
+                handle.pin_count.set(count.saturating_sub(1));
             });
         }
     }
@@ -138,6 +141,15 @@ impl Handle {
     ///
     /// Fast path cost: 1 Acquire load of global_era (L1 cache hit) + 1 Cell read
     /// + 1 predictable branch. No loop, no traverse — O(1) and wait-free.
+    ///
+    /// # Wait-free bound: O(1)
+    ///
+    /// No loop. The paper's `protect()` has a convergence loop because `update_era()`
+    /// triggers traversal during which the epoch may advance. Kovan avoids this by
+    /// deferring traversal to the next `pin()` call — only an epoch store + pointer
+    /// re-read on the rare (epoch-change) path. The epoch store ensures `try_retire()`
+    /// sees the thread's current epoch; the re-read ensures the returned pointer's
+    /// birth_epoch ≤ the stored epoch.
     #[inline]
     fn protect_load(&self, data: &AtomicUsize, order: Ordering) -> usize {
         // Step 1: load the pointer
@@ -173,6 +185,18 @@ impl Handle {
     /// do_update: transition epoch for a slot.
     /// Dereferences previous nodes in the slot's list, then stores new epoch.
     /// Returns the current epoch after update.
+    ///
+    /// # Wait-free bound: O(T) where T = number of active threads
+    ///
+    /// The exchange is a single atomic instruction (on native platforms).
+    /// `traverse_cache` walks the slot's list, which contains at most one
+    /// node per `try_retire()` insertion since the last `do_update()`. Since
+    /// at most T threads can insert into a slot between updates,
+    /// the list length (and thus traversal) is bounded by T.
+    ///
+    /// Divergence from C++ reference: uses `exchange_lo(0)` in a single step
+    /// instead of `exchange(INVPTR)` + `store(nullptr)`. Avoids a race where
+    /// a concurrent `try_retire` insertion between the two steps gets lost.
     #[cold]
     fn do_update(&self, curr_epoch: u64, index: usize, tid: usize) -> u64 {
         let global = self.global();
@@ -220,6 +244,14 @@ impl Handle {
     /// (epoch check + do_update). Inner calls just increment the pin count
     /// and return a Guard. Guard::drop decrements the count, so the epoch
     /// slot is only eligible for transition once all Guards are dropped.
+    ///
+    /// # Wait-free bound: O(T) where T = number of active threads
+    ///
+    /// Fast path: at most 16 iterations (fixed). Slow path: O(T) —
+    /// bounded by Crystalline-W helping. Every `advance_epoch()` call is preceded
+    /// by `help_read()`, so at most T concurrent epoch advances can
+    /// occur during the slow path loop. The helpee can also self-complete when
+    /// the epoch stabilizes, independent of helper progress.
     fn pin(&self) -> Guard {
         let count = self.pin_count.get();
         self.pin_count.set(count + 1);
@@ -267,6 +299,18 @@ impl Handle {
 
     /// Slow path for pin when epoch keeps changing.
     /// Sets up helping state so other threads can assist.
+    ///
+    /// # Wait-free bound: O(T) where T = number of active threads
+    ///
+    /// The main loop (lines ~294-344) exits when either:
+    /// 1. Epoch stabilizes and self-completion CAS succeeds, or
+    /// 2. A helper sets result ≠ INVPTR via help_thread.
+    ///
+    /// Both conditions are bounded by O(T) epoch advances. For
+    /// condition (1): after at most T concurrent advance_epoch calls
+    /// (each preceded by help_read), no more threads are in the advance phase
+    /// and the epoch stabilizes. For condition (2): at least one of those
+    /// T helpers will see a stable epoch and set the result.
     #[cold]
     fn slow_path(&self, index: usize, tid: usize) {
         let global = self.global();
@@ -437,6 +481,11 @@ impl Handle {
     }
 
     /// Help other threads in the slow path (matches help_read).
+    ///
+    /// # Wait-free bound: O((T ^ 2) * HR_NUM) where T = number of active threads
+    ///
+    /// Scans T * HR_NUM slots, calling help_thread for each
+    /// stalled thread. Each help_thread call is O(T).
     #[cold]
     fn help_read(&self, mytid: usize) {
         let global = self.global();
@@ -448,8 +497,9 @@ impl Handle {
         let hr_num = global.hr_num();
 
         for i in 0..max_threads {
+            let slots = global.thread_slots(i);
             for j in 0..hr_num {
-                let result_ptr = global.thread_slots(i).state[j].result.load_lo();
+                let result_ptr = slots.state[j].result.load_lo();
                 if result_ptr == INVPTR as u64 {
                     self.help_thread(i, j, mytid);
                 }
@@ -458,6 +508,22 @@ impl Handle {
     }
 
     /// Help a specific thread complete its slow-path operation.
+    ///
+    /// # Wait-free bound: O(T) where T = number of active threads
+    ///
+    /// The main loop exits when either:
+    /// 1. Epoch stabilizes (curr_epoch == prev_epoch) and result CAS succeeds, or
+    /// 2. Another helper already set the result (result ≠ INVPTR).
+    ///
+    /// For the epoch to advance during this loop, some thread must call
+    /// `advance_epoch()`, which is preceded by `help_read()`. After at most
+    /// T concurrent epoch advances, no more threads are in the
+    /// advance phase and the epoch stabilizes. The bound is independent of
+    /// the helpee's progress — the helpee is passive.
+    ///
+    /// The seqno cleanup loops (DCAS on first/epoch with `while old_hi == seqno`)
+    /// are bounded by O(T) contention: once any thread advances seqno,
+    /// all others see old_hi ≠ seqno and exit.
     #[cold]
     fn help_thread(&self, helpee_tid: usize, index: usize, mytid: usize) {
         let global = self.global();
@@ -654,6 +720,13 @@ impl Handle {
     /// Internal: enqueue a pre-configured node into the thread-local batch.
     /// The node's destructor and birth_epoch must already be set by the caller.
     ///
+    /// # Wait-free bound: O(1) amortized
+    ///
+    /// Each call does O(1) work (link node into batch, update counters).
+    /// Every RETIRE_FREQ (64) calls: finalize batch + try_retire (O(T)).
+    /// Every EPOCH_FREQ (128) calls: help_read (O(T ^ 2) worst case,
+    /// O(1) when no stalled threads) + advance_epoch (single fetch_add).
+    ///
     /// # Safety
     ///
     /// - `node_ptr` must point to a valid, heap-allocated `RetiredNode` at offset 0.
@@ -770,6 +843,17 @@ impl Handle {
 
     /// Try to retire the current batch by scanning all thread slots.
     /// Matches ASMR try_retire.
+    ///
+    /// # Wait-free bound: O(T + RETIRE_FREQ) where T = number of active threads
+    ///
+    /// Two phases, both bounded:
+    /// - **Scan phase**: O(T * SLOTS_PER_THREAD) — iterates all active thread
+    ///   slots once, assigning batch nodes to active slots with epoch ≥ min_epoch.
+    ///   No loops within — each slot is visited exactly once.
+    /// - **Insert phase**: O(RETIRE_FREQ) — iterates batch nodes, exchanging each
+    ///   into its assigned slot. The exchange is a single atomic instruction (on
+    ///   native platforms). Contention handling (INVPTR rollback, list tainting)
+    ///   is O(1) per node.
     fn try_retire(&self) {
         let global = self.global();
         let max_threads = global.max_threads();
@@ -785,26 +869,27 @@ impl Handle {
         fence(Ordering::SeqCst);
         let mut last = curr;
         for i in 0..max_threads {
+            let slots = global.thread_slots(i);
             let mut j = 0;
             // Regular reservation slots (0..hr_num)
             while j < hr_num {
-                let first_lo = global.thread_slots(i).first[j].load_lo();
+                let first_lo = slots.first[j].load_lo();
                 if first_lo == INVPTR as u64 {
                     j += 1;
                     continue;
                 }
                 // Check seqno odd (in slow-path transition)
-                if global.thread_slots(i).first[j].load_hi() & 1 != 0 {
+                if slots.first[j].load_hi() & 1 != 0 {
                     j += 1;
                     continue;
                 }
-                let epoch = global.thread_slots(i).epoch[j].load_lo();
+                let epoch = slots.epoch[j].load_lo();
                 if epoch < min_epoch {
                     j += 1;
                     continue;
                 }
                 // Check epoch seqno odd
-                if global.thread_slots(i).epoch[j].load_hi() & 1 != 0 {
+                if slots.epoch[j].load_hi() & 1 != 0 {
                     j += 1;
                     continue;
                 }
@@ -820,12 +905,12 @@ impl Handle {
             }
             // Helper slots (hr_num..hr_num+2)
             while j < hr_num + 2 {
-                let first_lo = global.thread_slots(i).first[j].load_lo();
+                let first_lo = slots.first[j].load_lo();
                 if first_lo == INVPTR as u64 {
                     j += 1;
                     continue;
                 }
-                let epoch = global.thread_slots(i).epoch[j].load_lo();
+                let epoch = slots.epoch[j].load_lo();
                 if epoch < min_epoch {
                     j += 1;
                     continue;
@@ -938,6 +1023,75 @@ impl Handle {
             self.free_list.set(core::ptr::null_mut());
             self.list_count.set(0);
         }
+    }
+
+    /// Flush: force all retired nodes on this thread to be reclaimed.
+    ///
+    /// Three phases:
+    /// 1. Finalize any partial batch (<64 nodes) and submit via try_retire
+    /// 2. Advance global epoch to make all submitted batches eligible
+    /// 3. Traverse own slots to process and free eligible nodes
+    ///
+    /// This does NOT guarantee that nodes retired by OTHER threads are freed —
+    /// those threads must flush themselves or exit. But it does guarantee that
+    /// all nodes retired by THIS thread are submitted and that this thread's
+    /// slots are drained.
+    fn flush(&self) {
+        if self.tid.get().is_none() {
+            return; // Thread never participated in reclamation
+        }
+        let tid = self.tid();
+        let global = self.global();
+
+        // Phase 1: Finalize partial batch if any
+        let count = self.batch_count.get();
+        if count > 0 {
+            let last = self.batch_last.get();
+            let first = self.batch_first.get();
+            unsafe {
+                (*last)
+                    .batch_link
+                    .store(rnode_mark(first), Ordering::SeqCst);
+            }
+            self.try_retire();
+
+            // Reset batch
+            self.batch_first.set(core::ptr::null_mut());
+            self.batch_last.set(core::ptr::null_mut());
+            self.batch_count.set(0);
+        }
+
+        // Phase 2: Advance epoch so submitted batches become eligible.
+        // Each advance makes batches with min_epoch <= new_epoch eligible.
+        // We need enough advances so all threads' slot epochs are surpassed.
+        // max_threads + 2 iterations is conservative and bounded.
+        let max = global.max_threads() + 2;
+        for _ in 0..max {
+            global.advance_epoch();
+        }
+
+        // Phase 3: Traverse own reservation slots to drain pending lists.
+        // This is the same logic as do_update but without storing a new epoch.
+        let hr_num = global.hr_num();
+        for i in 0..hr_num {
+            let first = global.thread_slots(tid).first[i].exchange_lo(0, Ordering::AcqRel);
+            if first != 0 && first != INVPTR as u64 {
+                let mut free_list = self.free_list.get();
+                let mut list_count = self.list_count.get();
+                unsafe {
+                    crate::reclaim::traverse_cache(
+                        &mut free_list,
+                        &mut list_count,
+                        first as *mut RetiredNode,
+                    );
+                }
+                self.free_list.set(free_list);
+                self.list_count.set(list_count);
+            }
+        }
+
+        // Drain the accumulated free list
+        self.drain_free_list();
     }
 }
 
@@ -1052,7 +1206,10 @@ pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        HANDLE.with(|handle| handle.protect_load(data, order))
+        // During process teardown TLS may be destroyed. Fall back to raw load.
+        HANDLE
+            .try_with(|handle| handle.protect_load(data, order))
+            .unwrap_or_else(|_| data.load(order))
     }
 }
 
@@ -1069,7 +1226,12 @@ pub fn pin() -> Guard {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        HANDLE.with(|handle| handle.pin())
+        // During process teardown TLS may be destroyed. Return a dummy guard
+        // whose drop is also a no-op (try_with in Guard::drop handles this).
+        HANDLE.try_with(|handle| handle.pin()).unwrap_or(Guard {
+            _private: (),
+            marker: marker,
+        })
     }
 }
 
@@ -1112,7 +1274,32 @@ pub unsafe fn retire<T: 'static>(ptr: *mut T) {
     #[cfg(not(feature = "nightly"))]
     {
         // SAFETY: Caller upholds the safety contract.
-        HANDLE.with(|handle| unsafe { handle.retire(ptr) })
+        // During process teardown TLS may be destroyed. Leak the pointer —
+        // process memory is reclaimed by the OS on exit.
+        let _ = HANDLE.try_with(|handle| unsafe { handle.retire(ptr) });
+    }
+}
+
+/// Flush all retired nodes on the calling thread.
+///
+/// Forces any partial batch to be finalized and submitted, advances the global
+/// epoch to make submitted batches eligible, then traverses the thread's slots
+/// to reclaim nodes.
+///
+/// Call this before dropping data structures that use kovan (e.g. at the end of
+/// a test or before process exit) to ensure retired nodes are freed promptly.
+///
+/// **Note:** This only flushes the calling thread's state. To flush all threads,
+/// each thread must call `flush()` independently or exit (which triggers cleanup).
+pub fn flush() {
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.flush()
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        // During process teardown TLS may be destroyed. No-op in that case.
+        let _ = HANDLE.try_with(|handle| handle.flush());
     }
 }
 
@@ -1135,6 +1322,7 @@ pub(crate) unsafe fn retire_raw(node_ptr: *mut RetiredNode) {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        HANDLE.with(|handle| unsafe { handle.retire_raw(node_ptr) })
+        // During process teardown TLS may be destroyed. Leak the node.
+        let _ = HANDLE.try_with(|handle| unsafe { handle.retire_raw(node_ptr) });
     }
 }

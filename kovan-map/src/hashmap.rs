@@ -598,6 +598,10 @@ impl<K, V, S> Drop for HashMap<K, V, S> {
                 }
             }
         }
+
+        // Flush nodes previously retired by concurrent operations
+        drop(guard);
+        kovan::flush();
     }
 }
 

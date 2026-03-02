@@ -1,13 +1,111 @@
+use crate::backoff::{BackoffAction, BackoffStrategy, DefaultBackoff};
+use crate::error::MvccError;
 use crate::lock_table::{LockInfo, LockType};
 use crate::storage::{InMemoryStorage, Storage, Value, WriteInfo, WriteKind};
 use crate::timestamp_oracle::{LocalTimestampOracle, TimestampOracle};
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
 
+/// Registry of active transactions, used for GC watermark computation.
+pub struct ActiveTxnRegistry {
+    txns: kovan_map::HashMap<u128, u64>, // txn_id -> start_ts
+}
+
+impl ActiveTxnRegistry {
+    pub fn new() -> Self {
+        Self {
+            txns: kovan_map::HashMap::new(),
+        }
+    }
+
+    /// Register a new active transaction.
+    pub fn register(&self, txn_id: u128, start_ts: u64) {
+        self.txns.insert(txn_id, start_ts);
+    }
+
+    /// Unregister a transaction (on commit, rollback, or drop).
+    pub fn unregister(&self, txn_id: u128) {
+        self.txns.remove(&txn_id);
+    }
+
+    /// Returns the minimum start_ts across all active transactions.
+    /// Returns None if no transactions are active.
+    pub fn min_active_ts(&self) -> Option<u64> {
+        let mut min = None;
+        for (_, ts) in self.txns.iter() {
+            match min {
+                None => min = Some(ts),
+                Some(current) if ts < current => min = Some(ts),
+                _ => {}
+            }
+        }
+        min
+    }
+
+    /// Returns the minimum start_ts, ignoring transactions older than max_age.
+    /// This prevents long-running OLAP queries from blocking GC (anti-vicious-cycle).
+    pub fn min_active_ts_bounded(&self, current_ts: u64, max_age: u64) -> Option<u64> {
+        let cutoff = current_ts.saturating_sub(max_age);
+        let mut min = None;
+        for (_, ts) in self.txns.iter() {
+            if ts >= cutoff {
+                match min {
+                    None => min = Some(ts),
+                    Some(current) if ts < current => min = Some(ts),
+                    _ => {}
+                }
+            }
+        }
+        min
+    }
+
+    /// Returns the number of active transactions.
+    pub fn len(&self) -> usize {
+        self.txns.len()
+    }
+
+    /// Returns true if there are no active transactions.
+    pub fn is_empty(&self) -> bool {
+        self.txns.is_empty()
+    }
+}
+
+impl Default for ActiveTxnRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Transaction isolation level.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// Each statement sees a fresh snapshot (per-read freshness). PostgreSQL default.
+    #[default]
+    ReadCommitted,
+    /// Entire transaction uses one snapshot (standard SI behavior).
+    RepeatableRead,
+    /// SI + detection of serialization anomalies (write skew prevention).
+    Serializable,
+}
+
 /// KovanMVCC (Percolator-style)
 pub struct KovanMVCC {
+    // NOTE: Debug manually implemented below
     storage: Arc<dyn Storage>,
     ts_oracle: Arc<dyn TimestampOracle>,
+    backoff: Arc<dyn BackoffStrategy>,
+    active_txns: Arc<ActiveTxnRegistry>,
+    /// Serializes SSI validation + commit for Serializable transactions.
+    /// Ensures that when one Serializable txn commits, the next one sees it.
+    ssi_commit_lock: Arc<parking_lot::Mutex<()>>,
+}
+
+impl std::fmt::Debug for KovanMVCC {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KovanMVCC")
+            .field("active_txns", &self.active_txns.len())
+            .finish()
+    }
 }
 
 impl KovanMVCC {
@@ -27,6 +125,9 @@ impl KovanMVCC {
         Self {
             storage: Arc::new(InMemoryStorage::new()),
             ts_oracle,
+            backoff: Arc::new(DefaultBackoff),
+            active_txns: Arc::new(ActiveTxnRegistry::new()),
+            ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
@@ -34,20 +135,79 @@ impl KovanMVCC {
         Self {
             storage,
             ts_oracle: Arc::new(LocalTimestampOracle::new()),
+            backoff: Arc::new(DefaultBackoff),
+            active_txns: Arc::new(ActiveTxnRegistry::new()),
+            ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
+    pub fn with_storage_and_oracle(
+        storage: Arc<dyn Storage>,
+        ts_oracle: Arc<dyn TimestampOracle>,
+    ) -> Self {
+        Self {
+            storage,
+            ts_oracle,
+            backoff: Arc::new(DefaultBackoff),
+            active_txns: Arc::new(ActiveTxnRegistry::new()),
+            ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
+        }
+    }
+
+    /// Set a custom backoff strategy.
+    pub fn set_backoff(&mut self, backoff: Arc<dyn BackoffStrategy>) {
+        self.backoff = backoff;
+    }
+
+    /// Get a reference to the active transaction registry.
+    pub fn active_txns(&self) -> &Arc<ActiveTxnRegistry> {
+        &self.active_txns
+    }
+
+    /// Get a reference to the timestamp oracle.
+    pub fn ts_oracle(&self) -> &Arc<dyn TimestampOracle> {
+        &self.ts_oracle
+    }
+
+    /// Get a reference to the storage backend.
+    pub fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+
+    /// Begin a transaction with the default isolation level (ReadCommitted).
+    ///
+    /// This matches the PostgreSQL default. Use `begin_with_isolation()` for
+    /// other levels (e.g., RepeatableRead for snapshot isolation).
     pub fn begin(&self) -> Txn {
+        self.begin_with_isolation(IsolationLevel::ReadCommitted)
+    }
+
+    pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> Txn {
         let start_ts = self.ts_oracle.get_timestamp();
+        let txn_id = uuid::Uuid::new_v4().as_u128();
+
+        // Register in active transaction registry
+        self.active_txns.register(txn_id, start_ts);
+
+        let read_set = if isolation_level == IsolationLevel::Serializable {
+            Some(HopscotchMap::new())
+        } else {
+            None
+        };
 
         Txn {
-            txn_id: uuid::Uuid::new_v4().as_u128(),
+            txn_id,
             start_ts,
             storage: self.storage.clone(),
             ts_oracle: self.ts_oracle.clone(),
+            backoff: self.backoff.clone(),
+            active_txns: self.active_txns.clone(),
             writes: HopscotchMap::new(),
             primary_key: None,
             committed: false,
+            isolation_level,
+            read_set,
+            ssi_commit_lock: self.ssi_commit_lock.clone(),
         }
     }
 }
@@ -57,28 +217,72 @@ pub struct Txn {
     start_ts: u64,
     storage: Arc<dyn Storage>,
     ts_oracle: Arc<dyn TimestampOracle>,
+    backoff: Arc<dyn BackoffStrategy>,
+    active_txns: Arc<ActiveTxnRegistry>,
     /// Buffered writes: key -> (lock_type, value)
     writes: HopscotchMap<String, (LockType, Option<Value>)>,
     /// Primary key for 2PC
     primary_key: Option<String>,
     /// Whether this transaction has been committed (prevents Drop from rolling back)
     committed: bool,
+    /// Isolation level for this transaction
+    isolation_level: IsolationLevel,
+    /// Read-set for Serializable: keys read during the transaction
+    read_set: Option<HopscotchMap<String, ()>>,
+    /// SSI commit lock (shared with KovanMVCC), serializes Serializable commits
+    ssi_commit_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 impl Txn {
-    /// Get operation (Snapshot Read)
-    pub fn read(&self, key: &str) -> Option<Vec<u8>> {
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
+    /// Get the transaction ID.
+    pub fn txn_id(&self) -> u128 {
+        self.txn_id
+    }
 
-            // 1. Check for locks with start_ts <= self.start_ts
+    /// Get the start timestamp.
+    pub fn start_ts(&self) -> u64 {
+        self.start_ts
+    }
+
+    /// Get the isolation level.
+    pub fn isolation_level(&self) -> IsolationLevel {
+        self.isolation_level
+    }
+
+    /// Get operation (Snapshot Read)
+    ///
+    /// Behavior varies by isolation level:
+    /// - ReadCommitted: uses a fresh timestamp per read call
+    /// - RepeatableRead: uses start_ts (standard SI)
+    /// - Serializable: uses start_ts + tracks key in read_set
+    pub fn read(&self, key: &str) -> Option<Vec<u8>> {
+        // 0. Check local write buffer first (read-your-own-writes, even before prewrite)
+        if let Some((lock_type, value_opt)) = self.writes.get(key) {
+            // Track in read_set for Serializable even on local hits
+            if let Some(ref read_set) = self.read_set {
+                read_set.insert(key.to_string(), ());
+            }
+            return match lock_type {
+                LockType::Put => value_opt.map(|arc| (*arc).clone()),
+                LockType::Delete => None,
+            };
+        }
+
+        // Determine read timestamp based on isolation level
+        let read_ts = match self.isolation_level {
+            IsolationLevel::ReadCommitted => self.ts_oracle.get_timestamp(),
+            IsolationLevel::RepeatableRead | IsolationLevel::Serializable => self.start_ts,
+        };
+
+        let mut attempts = 0u32;
+        loop {
+            // 1. Check for locks with start_ts <= read_ts
             if let Some(lock) = self.storage.get_lock(key)
-                && lock.start_ts <= self.start_ts
+                && lock.start_ts <= read_ts
             {
                 // Key is locked by an active transaction that started before us.
                 if lock.txn_id == self.txn_id {
-                    // Read-your-own-writes
+                    // Read-your-own-writes (already prewritten)
                     return self
                         .writes
                         .get(key)
@@ -86,23 +290,37 @@ impl Txn {
                 }
 
                 // Locked by another transaction.
-                // Backoff and retry.
-                if attempts < 5 {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
+                // Use pluggable backoff strategy.
+                match self.backoff.backoff(attempts) {
+                    BackoffAction::Retry => {
+                        attempts += 1;
+                        continue;
+                    }
+                    BackoffAction::Yield => {
+                        std::thread::yield_now();
+                        attempts += 1;
+                        continue;
+                    }
+                    BackoffAction::Abort => {
+                        eprintln!(
+                            "[READ_CONFLICT] key={} locked by txn={} at ts={}",
+                            key, lock.txn_id, lock.start_ts
+                        );
+                        // Track in read_set for Serializable even on misses
+                        if let Some(ref read_set) = self.read_set {
+                            read_set.insert(key.to_string(), ());
+                        }
+                        return None;
+                    }
                 }
-
-                eprintln!(
-                    "[READ_CONFLICT] key={} locked by txn={} at ts={}",
-                    key, lock.txn_id, lock.start_ts
-                );
-                return None; // Or Err("Locked")
             }
 
-            // 2. Find latest non-rollback write in CF_WRITE with commit_ts <= self.start_ts
-            if let Some((_commit_ts, write_info)) =
-                self.storage.get_latest_commit(key, self.start_ts)
-            {
+            // 2. Find latest non-rollback write in CF_WRITE with commit_ts <= read_ts
+            if let Some((_commit_ts, write_info)) = self.storage.get_latest_commit(key, read_ts) {
+                // Track in read_set for Serializable
+                if let Some(ref read_set) = self.read_set {
+                    read_set.insert(key.to_string(), ());
+                }
                 match write_info.kind {
                     WriteKind::Put => {
                         // 3. Retrieve data from CF_DATA using start_ts from WriteInfo
@@ -119,11 +337,15 @@ impl Txn {
                 }
             }
 
+            // Track in read_set for Serializable even on misses (phantom prevention)
+            if let Some(ref read_set) = self.read_set {
+                read_set.insert(key.to_string(), ());
+            }
             return None;
         }
     }
 
-    pub fn write(&mut self, key: &str, value: Vec<u8>) -> Result<(), String> {
+    pub fn write(&mut self, key: &str, value: Vec<u8>) -> Result<(), MvccError> {
         self.writes
             .insert(key.to_string(), (LockType::Put, Some(Arc::new(value))));
         if self.primary_key.is_none() {
@@ -132,7 +354,7 @@ impl Txn {
         Ok(())
     }
 
-    pub fn delete(&mut self, key: &str) -> Result<(), String> {
+    pub fn delete(&mut self, key: &str) -> Result<(), MvccError> {
         self.writes
             .insert(key.to_string(), (LockType::Delete, None));
         if self.primary_key.is_none() {
@@ -141,8 +363,11 @@ impl Txn {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<u64, String> {
+    pub fn commit(mut self) -> Result<u64, MvccError> {
         self.committed = true;
+
+        // Unregister from active transactions
+        self.active_txns.unregister(self.txn_id);
 
         if self.writes.is_empty() {
             return Ok(self.start_ts);
@@ -151,13 +376,39 @@ impl Txn {
         let primary_key = self
             .primary_key
             .as_ref()
-            .ok_or_else(|| "No primary key".to_string())?
+            .ok_or_else(|| MvccError::StorageError("No primary key".to_string()))?
             .clone();
 
-        // Phase 1: Prewrite
+        // Phase 1: Prewrite (lock acquisition + write-write conflict check)
         if let Err(e) = self.prewrite(&primary_key) {
             self.rollback();
             return Err(e);
+        }
+
+        // For Serializable transactions: hold SSI commit lock during validation + commit.
+        // This serializes SSI commits so that when T1 commits, T2 sees it in its validation.
+        let _ssi_guard = if self.isolation_level == IsolationLevel::Serializable {
+            Some(self.ssi_commit_lock.lock())
+        } else {
+            None
+        };
+
+        // SSI validation: check read-set for concurrent commits
+        if self.isolation_level == IsolationLevel::Serializable
+            && let Some(ref read_set) = self.read_set
+        {
+            for (key, _) in read_set.iter() {
+                if let Some((commit_ts, write_info)) = self.storage.get_latest_write(&key, u64::MAX)
+                    && write_info.kind != WriteKind::Rollback
+                    && commit_ts > self.start_ts
+                {
+                    self.rollback();
+                    return Err(MvccError::SerializationFailure {
+                        key: key.clone(),
+                        conflicting_ts: commit_ts,
+                    });
+                }
+            }
         }
 
         // Get commit timestamp
@@ -170,10 +421,11 @@ impl Txn {
         }
 
         self.commit_secondaries(&primary_key, commit_ts);
+        // _ssi_guard dropped here, releasing the lock
         Ok(commit_ts)
     }
 
-    fn prewrite(&mut self, primary_key: &str) -> Result<(), String> {
+    fn prewrite(&mut self, primary_key: &str) -> Result<(), MvccError> {
         // Sort keys to prevent deadlocks/livelocks
         let mut keys: Vec<_> = self.writes.keys().collect();
         keys.sort();
@@ -218,17 +470,19 @@ impl Txn {
                     for acquired_key in &acquired_locks {
                         self.storage.delete_lock(acquired_key);
                     }
-                    return Err(format!(
-                        "Prewrite rejected: rollback record exists for key {}",
-                        key
-                    ));
+                    return Err(MvccError::RollbackRecord {
+                        key: key.to_string(),
+                    });
                 }
                 if write_info.kind != WriteKind::Rollback && commit_ts >= self.start_ts {
                     // Write conflict
                     for acquired_key in &acquired_locks {
                         self.storage.delete_lock(acquired_key);
                     }
-                    return Err(format!("Write conflict on key {}", key));
+                    return Err(MvccError::WriteConflict {
+                        key: key.to_string(),
+                        conflicting_ts: commit_ts,
+                    });
                 }
             }
         }
@@ -243,14 +497,16 @@ impl Txn {
         Ok(())
     }
 
-    fn commit_primary(&self, primary_key: &str, commit_ts: u64) -> Result<(), String> {
-        let lock = self
-            .storage
-            .get_lock(primary_key)
-            .ok_or_else(|| format!("Primary lock missing for {}", primary_key))?;
+    fn commit_primary(&self, primary_key: &str, commit_ts: u64) -> Result<(), MvccError> {
+        let lock =
+            self.storage
+                .get_lock(primary_key)
+                .ok_or_else(|| MvccError::PrimaryLockMissing {
+                    key: primary_key.to_string(),
+                })?;
 
         if lock.txn_id != self.txn_id {
-            return Err("Primary lock mismatch".to_string());
+            return Err(MvccError::PrimaryLockMismatch);
         }
 
         // Write to CF_WRITE
@@ -325,6 +581,8 @@ impl Txn {
 impl Drop for Txn {
     fn drop(&mut self) {
         if !self.committed {
+            // Unregister from active transactions
+            self.active_txns.unregister(self.txn_id);
             self.rollback();
         }
     }
