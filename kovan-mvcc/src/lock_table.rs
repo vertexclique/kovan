@@ -15,6 +15,7 @@ pub enum LockType {
     Delete,
 }
 
+use crate::error::MvccError;
 use kovan_map::HashMap;
 
 /// Lock Table
@@ -40,7 +41,7 @@ impl Default for LockTable {
 impl LockTable {
     /// Try to acquire a lock on a key
     /// Returns Ok(()) if successful, Err if key is already locked
-    pub fn try_lock(&self, key: &str, lock_info: LockInfo) -> Result<(), String> {
+    pub fn try_lock(&self, key: &str, lock_info: LockInfo) -> Result<(), MvccError> {
         match self
             .locks
             .insert_if_absent(key.to_string(), lock_info.clone())
@@ -52,7 +53,10 @@ impl LockTable {
                     self.locks.insert(key.to_string(), lock_info);
                     Ok(())
                 } else {
-                    Err(format!("Key {} is locked", key))
+                    Err(MvccError::LockConflict {
+                        key: key.to_string(),
+                        holder_txn: existing.txn_id,
+                    })
                 }
             }
         }

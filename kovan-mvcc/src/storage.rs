@@ -1,3 +1,4 @@
+use crate::error::MvccError;
 use crate::lock_table::LockInfo;
 
 use std::collections::BTreeMap;
@@ -30,7 +31,7 @@ pub trait Storage: Send + Sync {
     /// Get a lock for a key
     fn get_lock(&self, key: &str) -> Option<LockInfo>;
     /// Acquire a lock for a key
-    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), String>;
+    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), MvccError>;
     /// Release a lock for a key
     fn delete_lock(&self, key: &str);
 
@@ -47,6 +48,23 @@ pub trait Storage: Send + Sync {
     fn put_data(&self, key: &str, start_ts: u64, value: Value);
     /// Delete data for a key at a specific start_ts
     fn delete_data(&self, key: &str, start_ts: u64);
+
+    /// GC: Remove write records with commit_ts < watermark, keeping the latest visible version.
+    /// Returns the number of records removed.
+    fn gc_writes(&self, _key: &str, _watermark: u64) -> usize {
+        0
+    }
+
+    /// GC: Remove data versions with start_ts < watermark that are no longer referenced.
+    /// Returns the number of versions removed.
+    fn gc_data(&self, _key: &str, _watermark: u64) -> usize {
+        0
+    }
+
+    /// GC: Scan all keys that have write records (for incremental GC cursor).
+    fn scan_write_keys(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 /// In-Memory Storage Implementation
@@ -83,7 +101,7 @@ impl Storage for InMemoryStorage {
         self.locks.get(key)
     }
 
-    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), String> {
+    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), MvccError> {
         match self.locks.insert_if_absent(key.to_string(), lock.clone()) {
             None => Ok(()), // Acquired
             Some(existing) => {
@@ -92,7 +110,10 @@ impl Storage for InMemoryStorage {
                     self.locks.insert(key.to_string(), lock);
                     Ok(())
                 } else {
-                    Err(format!("Key {} is already locked", key))
+                    Err(MvccError::LockConflict {
+                        key: key.to_string(),
+                        holder_txn: existing.txn_id,
+                    })
                 }
             }
         }
@@ -176,5 +197,51 @@ impl Storage for InMemoryStorage {
             let mut map = map_mutex.lock().unwrap();
             map.remove(&start_ts);
         }
+    }
+
+    fn gc_writes(&self, key: &str, watermark: u64) -> usize {
+        if let Some(map_mutex) = self.writes.get(key) {
+            let mut map = map_mutex.lock().unwrap();
+            // Find the latest version at or below watermark
+            let latest_visible = map.range(..=watermark).next_back().map(|(k, _)| *k);
+            if let Some(keep_ts) = latest_visible {
+                // Remove all entries strictly below keep_ts
+                let to_remove: Vec<u64> = map.range(..keep_ts).map(|(k, _)| *k).collect();
+                let count = to_remove.len();
+                for ts in to_remove {
+                    map.remove(&ts);
+                }
+                count
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+
+    fn gc_data(&self, key: &str, watermark: u64) -> usize {
+        if let Some(map_mutex) = self.data.get(key) {
+            let mut map = map_mutex.lock().unwrap();
+            // Find the latest version at or below watermark
+            let latest_visible = map.range(..=watermark).next_back().map(|(k, _)| *k);
+            if let Some(keep_ts) = latest_visible {
+                // Remove all entries strictly below keep_ts
+                let to_remove: Vec<u64> = map.range(..keep_ts).map(|(k, _)| *k).collect();
+                let count = to_remove.len();
+                for ts in to_remove {
+                    map.remove(&ts);
+                }
+                count
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+
+    fn scan_write_keys(&self) -> Vec<String> {
+        self.writes.keys().collect()
     }
 }
