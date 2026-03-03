@@ -289,21 +289,20 @@ where
 
     /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
     ///
-    /// When multiple threads call this concurrently for the same key, all callers
-    /// are guaranteed to receive the same value (the one visible in the map).
+    /// When multiple threads call this concurrently for the same key (without
+    /// concurrent removes), all callers receive the same value.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
         // Fast path: key already exists — no clone, no insert.
         if let Some(v) = self.get(&key) {
             return v;
         }
-        // Slow path: try to insert, then read back for concurrent consistency.
-        // The hop_info update is non-atomic with the slot CAS, so two threads can
-        // both "win" the insert. Reading back ensures all callers agree on one value.
-        //
-        // Note: `expect` has zero overhead vs `unwrap` on the success path — the
-        // static string literal is only materialized in the panic (unreachable) path.
-        let _ = self.insert_impl(key.clone(), value, true);
-        self.get(&key).expect("key was just inserted")
+        // Slow path: insert_if_absent and use the return value directly.
+        // We must NOT do insert-then-get because a concurrent remove between
+        // the two operations would cause get to return None.
+        match self.insert_impl(key, value.clone(), true) {
+            None => value,              // We inserted — return our value
+            Some(existing) => existing, // Key already existed
+        }
     }
 
     /// Insert a key-value pair only if the key does not exist.
@@ -1080,6 +1079,44 @@ mod tests {
                     assert_eq!(val, key * 3);
                 }
             }
+        }
+    }
+
+    /// Regression: get_or_insert must not panic when a concurrent remove
+    /// deletes the key between the internal insert and the return.
+    #[test]
+    fn test_hopscotch_get_or_insert_concurrent_remove() {
+        use alloc::sync::Arc;
+        extern crate std;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let map = Arc::new(HopscotchMap::<u64, u64>::with_capacity(64));
+        let barrier = Arc::new(Barrier::new(8));
+
+        let handles: Vec<_> = (0..8u64)
+            .map(|tid| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..5000u64 {
+                        let key = i % 32; // Small key space forces heavy contention
+                        if tid % 2 == 0 {
+                            // Half the threads do get_or_insert
+                            let _ = map.get_or_insert(key, tid * 1000 + i);
+                        } else {
+                            // Other half remove
+                            let _ = map.remove(&key);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join()
+                .expect("Thread panicked during get_or_insert/remove race");
         }
     }
 }
