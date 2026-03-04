@@ -1230,7 +1230,7 @@ pub fn pin() -> Guard {
         // whose drop is also a no-op (try_with in Guard::drop handles this).
         HANDLE.try_with(|handle| handle.pin()).unwrap_or(Guard {
             _private: (),
-            marker: marker,
+            marker,
         })
     }
 }

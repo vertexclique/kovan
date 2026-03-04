@@ -299,8 +299,15 @@ where
         // Slow path: insert_if_absent and use the return value directly.
         // We must NOT do insert-then-get because a concurrent remove between
         // the two operations would cause get to return None.
+        let key2 = key.clone();
         match self.insert_impl(key, value.clone(), true) {
-            None => value,              // We inserted — return our value
+            None => {
+                // We inserted, but concurrent inserts may have also placed
+                // the same key at a different offset (the CAS-then-hop-bit
+                // window allows duplicates). Re-get returns the canonical
+                // (lowest-offset) entry so every caller agrees on one value.
+                self.get(&key2).unwrap_or(value)
+            }
             Some(existing) => existing, // Key already existed
         }
     }

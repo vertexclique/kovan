@@ -390,6 +390,7 @@ pub(crate) struct ASMRState {
 }
 
 /// Null-initialized page table constant for use in array initialization.
+#[allow(clippy::declare_interior_mutable_const)]
 const NULL_PAGE: AtomicPtr<SlotPage> = AtomicPtr::new(core::ptr::null_mut());
 
 impl ASMRState {
