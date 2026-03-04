@@ -12,8 +12,8 @@ fn test_unbounded_async() {
         s.send(1);
         s.send(2);
 
-        assert_eq!(r.recv_async().await, 1);
-        assert_eq!(r.recv_async().await, 2);
+        assert_eq!(r.recv_async().await, Some(1));
+        assert_eq!(r.recv_async().await, Some(2));
 
         let r_clone = r.clone();
         thread::spawn(move || {
@@ -21,7 +21,7 @@ fn test_unbounded_async() {
             s.send(3);
         });
 
-        assert_eq!(r_clone.recv_async().await, 3);
+        assert_eq!(r_clone.recv_async().await, Some(3));
     });
 }
 
@@ -52,7 +52,7 @@ fn test_mixed_async_blocking() {
         let (s, r) = unbounded();
 
         s.send(1);
-        assert_eq!(r.recv_async().await, 1);
+        assert_eq!(r.recv_async().await, Some(1));
 
         let r_clone = r.clone();
         thread::spawn(move || {
@@ -60,6 +60,6 @@ fn test_mixed_async_blocking() {
             s.send(2);
         });
 
-        assert_eq!(r_clone.recv_async().await, 2);
+        assert_eq!(r_clone.recv_async().await, Some(2));
     });
 }

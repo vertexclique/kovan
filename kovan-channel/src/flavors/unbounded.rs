@@ -1,7 +1,7 @@
 use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::signal::{AsyncSignal, Notifier, Signal};
 use std::collections::LinkedList;
@@ -28,6 +28,10 @@ pub(crate) struct Channel<T: 'static> {
     head: Atomic<Node<T>>,
     tail: Atomic<Node<T>>,
     receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
+    /// Number of live Sender handles. When this reaches 0, the channel is disconnected.
+    sender_count: AtomicUsize,
+    /// Set to true when all senders have been dropped.
+    disconnected: AtomicBool,
 }
 
 impl<T: 'static> Channel<T> {
@@ -37,6 +41,16 @@ impl<T: 'static> Channel<T> {
             head: Atomic::new(sentinel),
             tail: Atomic::new(sentinel),
             receivers: Mutex::new(LinkedList::new()),
+            sender_count: AtomicUsize::new(1), // Starts at 1 for the initial Sender
+            disconnected: AtomicBool::new(false),
+        }
+    }
+
+    /// Wake all blocked receivers (used when senders disconnect).
+    fn wake_all_receivers(&self) {
+        let mut receivers = self.receivers.lock().unwrap();
+        while let Some(signal) = receivers.pop_front() {
+            signal.notify();
         }
     }
 }
@@ -63,11 +77,14 @@ impl<T: 'static> Drop for Channel<T> {
 
         while !curr.is_null() {
             let next = unsafe { curr.deref().next.load(Ordering::Relaxed, &guard) };
-            // We can't just drop `curr` because of kovan.
-            // We should `retire` it.
             unsafe { retire(curr.as_raw()) };
             curr = next;
         }
+
+        // Force-flush retired nodes on this thread to prevent use-after-free
+        // during process teardown when kovan's global state is being destroyed.
+        drop(guard);
+        kovan::flush();
     }
 }
 
@@ -78,8 +95,19 @@ pub struct Sender<T: 'static> {
 
 impl<T: 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
+        self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: 'static> Drop for Sender<T> {
+    fn drop(&mut self) {
+        if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Last sender dropped — mark channel as disconnected and wake all receivers.
+            self.inner.disconnected.store(true, Ordering::Release);
+            self.inner.wake_all_receivers();
         }
     }
 }
@@ -172,6 +200,11 @@ impl<T: 'static> Sender<T> {
 }
 
 impl<T: 'static> Receiver<T> {
+    /// Returns `true` if all senders have been dropped.
+    pub fn is_disconnected(&self) -> bool {
+        self.inner.disconnected.load(Ordering::Acquire)
+    }
+
     /// Attempts to receive a message from the channel without blocking.
     pub fn try_recv(&self) -> Option<T> {
         let guard = pin();
@@ -218,7 +251,14 @@ impl<T: 'static> Receiver<T> {
                         // We take the data from `next`.
                         // `next` is now the sentinel.
                         // Its data is logically gone.
-                        let data = unsafe { ptr::read(data_ptr) };
+                        //
+                        // CRITICAL: use `ptr::replace` (not `ptr::read`) to clear
+                        // the source field. `ptr::read` leaves the bit pattern
+                        // intact, so when this node is later retired and freed by
+                        // kovan, `Node::drop` would drop `data: Option<T>` again
+                        // — a double-free. Writing `None` ensures the destructor
+                        // sees an empty Option and skips the inner drop.
+                        let data = unsafe { ptr::replace(data_ptr, None) };
                         return data;
                     }
                     Err(_) => continue,
@@ -228,10 +268,16 @@ impl<T: 'static> Receiver<T> {
     }
 
     /// Receives a message from the channel, blocking if empty.
-    /// Receives a message from the channel, blocking if empty.
+    ///
+    /// Returns `None` when the channel is empty **and** all senders have been dropped.
     pub fn recv(&self) -> Option<T> {
         if let Some(msg) = self.try_recv() {
             return Some(msg);
+        }
+
+        // Fast path: already disconnected and empty
+        if self.is_disconnected() {
+            return self.try_recv(); // Drain remaining
         }
 
         loop {
@@ -244,16 +290,24 @@ impl<T: 'static> Receiver<T> {
 
             // Re-check to avoid race
             if let Some(msg) = self.try_recv() {
-                // We got a message, remove signal if still there?
-                // It might have been popped by sender, but that's fine, notify is harmless.
                 return Some(msg);
+            }
+
+            // Check disconnection after registering signal but before parking
+            if self.is_disconnected() {
+                return self.try_recv(); // Drain remaining
             }
 
             signal.wait();
 
-            // Woken up, try to receive
+            // Woken up — either a message arrived or senders disconnected
             if let Some(msg) = self.try_recv() {
                 return Some(msg);
+            }
+
+            // Woken by disconnect with empty queue
+            if self.is_disconnected() {
+                return None;
             }
         }
     }
@@ -270,16 +324,15 @@ impl<T: 'static> Receiver<T> {
     /// Registers a signal for notification when a message arrives.
     ///
     /// This is used for `select!` implementation.
-    /// Registers a signal for notification when a message arrives.
-    ///
-    /// This is used for `select!` implementation.
     pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
         let mut receivers = self.inner.receivers.lock().unwrap();
         receivers.push_back(signal);
     }
 
     /// Receives a message from the channel asynchronously.
-    pub async fn recv_async(&self) -> T {
+    ///
+    /// Returns `None` when the channel is empty and all senders have been dropped.
+    pub async fn recv_async(&self) -> Option<T> {
         use std::future::Future;
         use std::pin::Pin;
         use std::task::{Context, Poll};
@@ -292,25 +345,26 @@ impl<T: 'static> Receiver<T> {
         impl<'a, T: 'static> Unpin for RecvFuture<'a, T> {}
 
         impl<'a, T: 'static> Future for RecvFuture<'a, T> {
-            type Output = T;
+            type Output = Option<T>;
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
                 if let Some(msg) = this.receiver.try_recv() {
-                    return Poll::Ready(msg);
+                    return Poll::Ready(Some(msg));
+                }
+
+                // Disconnected and empty — done
+                if this.receiver.is_disconnected() {
+                    return Poll::Ready(this.receiver.try_recv());
                 }
 
                 if this.signal.is_notified() {
-                    // We were notified but failed to get message (stolen).
-                    // We need a new signal.
                     this.signal = Arc::new(AsyncSignal::new());
                 }
 
                 this.signal.register(cx.waker());
 
                 // Register signal
-                // Note: This might register duplicates if polled spuriously.
-                // But AsyncSignal handles multiple notifies.
                 {
                     let mut receivers = this.receiver.inner.receivers.lock().unwrap();
                     receivers.push_back(this.signal.clone());
@@ -318,7 +372,11 @@ impl<T: 'static> Receiver<T> {
 
                 // Re-check
                 if let Some(msg) = this.receiver.try_recv() {
-                    return Poll::Ready(msg);
+                    return Poll::Ready(Some(msg));
+                }
+
+                if this.receiver.is_disconnected() {
+                    return Poll::Ready(None);
                 }
 
                 Poll::Pending

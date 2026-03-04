@@ -225,6 +225,10 @@ where
     /// Helper for get_or_insert logic.
     fn insert_impl(&self, key: K, value: V, only_if_absent: bool) -> Option<V> {
         let hash = self.hasher.hash_one(&key);
+        // Track whether we already incremented count for a new insert across
+        // retry iterations.  Prevents both under-count (which causes cascading
+        // resizes on Windows) and double-count.
+        let mut counted = false;
 
         loop {
             self.wait_for_resize();
@@ -249,18 +253,24 @@ where
                 &guard,
             ) {
                 InsertResult::Success(old_val) => {
-                    // CRITICAL FIX: If a resize started while we were inserting, our update
+                    // Count new inserts immediately so that concurrent removes
+                    // cannot decrement count below the true entry count.
+                    if old_val.is_none() && !counted {
+                        self.count.fetch_add(1, Ordering::Relaxed);
+                        counted = true;
+                    }
+
+                    // If a resize started while we were inserting, our update
                     // might have been missed by the migration.
                     // We must retry to ensure we write to the new table.
-                    // We check BOTH the resizing flag (active resize) AND the table pointer (completed resize).
                     if self.resizing.load(Ordering::SeqCst)
                         || self.table.load(Ordering::SeqCst, &guard) != table_ptr
                     {
                         continue;
                     }
 
-                    if old_val.is_none() {
-                        let new_count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if counted {
+                        let new_count = self.count.load(Ordering::Relaxed);
                         let current_capacity = table.capacity;
                         let load_factor = new_count as f64 / current_capacity as f64;
 
@@ -289,21 +299,27 @@ where
 
     /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
     ///
-    /// When multiple threads call this concurrently for the same key, all callers
-    /// are guaranteed to receive the same value (the one visible in the map).
+    /// When multiple threads call this concurrently for the same key (without
+    /// concurrent removes), all callers receive the same value.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
         // Fast path: key already exists — no clone, no insert.
         if let Some(v) = self.get(&key) {
             return v;
         }
-        // Slow path: try to insert, then read back for concurrent consistency.
-        // The hop_info update is non-atomic with the slot CAS, so two threads can
-        // both "win" the insert. Reading back ensures all callers agree on one value.
-        //
-        // Note: `expect` has zero overhead vs `unwrap` on the success path — the
-        // static string literal is only materialized in the panic (unreachable) path.
-        let _ = self.insert_impl(key.clone(), value, true);
-        self.get(&key).expect("key was just inserted")
+        // Slow path: insert_if_absent and use the return value directly.
+        // We must NOT do insert-then-get because a concurrent remove between
+        // the two operations would cause get to return None.
+        let key2 = key.clone();
+        match self.insert_impl(key, value.clone(), true) {
+            None => {
+                // We inserted, but concurrent inserts may have also placed
+                // the same key at a different offset (the CAS-then-hop-bit
+                // window allows duplicates). Re-get returns the canonical
+                // (lowest-offset) entry so every caller agrees on one value.
+                self.get(&key2).unwrap_or(value)
+            }
+            Some(existing) => existing, // Key already existed
+        }
     }
 
     /// Insert a key-value pair only if the key does not exist.
@@ -363,15 +379,25 @@ where
 
                                     unsafe { retire(entry_ptr.as_raw()) };
 
-                                    let new_count = self.count.fetch_sub(1, Ordering::Relaxed) - 1;
-                                    let current_capacity = table.capacity;
-                                    let load_factor = new_count as f64 / current_capacity as f64;
+                                    // Saturating decrement: prevent count from wrapping
+                                    // to usize::MAX which would trigger catastrophic
+                                    // cascading resizes.
+                                    if let Ok(prev) = self.count.fetch_update(
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                        |c| c.checked_sub(1),
+                                    ) {
+                                        let new_count = prev - 1;
+                                        let current_capacity = table.capacity;
+                                        let load_factor =
+                                            new_count as f64 / current_capacity as f64;
 
-                                    if load_factor < SHRINK_THRESHOLD
-                                        && current_capacity > MIN_CAPACITY
-                                    {
-                                        drop(guard);
-                                        self.try_resize(current_capacity / 2);
+                                        if load_factor < SHRINK_THRESHOLD
+                                            && current_capacity > MIN_CAPACITY
+                                        {
+                                            drop(guard);
+                                            self.try_resize(current_capacity / 2);
+                                        }
                                     }
 
                                     return Some(old_value);
@@ -957,6 +983,11 @@ impl<K, V, S> Drop for HopscotchMap<K, V, S> {
         unsafe {
             drop(Box::from_raw(table_ptr.as_raw()));
         }
+
+        // Flush nodes previously retired by concurrent operations (insert/remove/resize)
+        // to prevent use-after-free during process teardown.
+        drop(guard);
+        kovan::flush();
     }
 }
 
@@ -1075,6 +1106,44 @@ mod tests {
                     assert_eq!(val, key * 3);
                 }
             }
+        }
+    }
+
+    /// Regression: get_or_insert must not panic when a concurrent remove
+    /// deletes the key between the internal insert and the return.
+    #[test]
+    fn test_hopscotch_get_or_insert_concurrent_remove() {
+        use alloc::sync::Arc;
+        extern crate std;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let map = Arc::new(HopscotchMap::<u64, u64>::with_capacity(64));
+        let barrier = Arc::new(Barrier::new(8));
+
+        let handles: Vec<_> = (0..8u64)
+            .map(|tid| {
+                let map = map.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..5000u64 {
+                        let key = i % 32; // Small key space forces heavy contention
+                        if tid % 2 == 0 {
+                            // Half the threads do get_or_insert
+                            let _ = map.get_or_insert(key, tid * 1000 + i);
+                        } else {
+                            // Other half remove
+                            let _ = map.remove(&key);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join()
+                .expect("Thread panicked during get_or_insert/remove race");
         }
     }
 }

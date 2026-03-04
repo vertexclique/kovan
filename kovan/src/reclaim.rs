@@ -56,6 +56,13 @@ pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
 /// - Otherwise: follow batch_link to refs-node, fetch_sub(1)
 /// - If refs reaches 0: add refs-node to free list
 ///
+/// # Wait-free bound: O(T) where T = number of active threads
+///
+/// Each slot receives at most one node per `try_retire()` call. Between two
+/// `do_update()` calls on the same slot, at most T `try_retire()`
+/// calls can insert nodes (one per thread). The list length — and thus the
+/// number of loop iterations — is bounded by T.
+///
 /// # Safety
 ///
 /// `next` must be a valid RetiredNode pointer (not null, not INVPTR)

@@ -4,6 +4,7 @@ use crossbeam_utils::Backoff;
 use std::collections::LinkedList;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 struct Channel<T: 'static> {
     sender: unbounded::Sender<T>,
@@ -12,6 +13,10 @@ struct Channel<T: 'static> {
     len: AtomicUsize,
     senders: Mutex<LinkedList<Arc<dyn Notifier>>>,
     receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
+    /// Number of live bounded Sender handles.
+    sender_count: AtomicUsize,
+    /// Set when all bounded senders are dropped.
+    disconnected: std::sync::atomic::AtomicBool,
 }
 
 /// The sending half of a bounded channel.
@@ -21,8 +26,24 @@ pub struct Sender<T: 'static> {
 
 impl<T: 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
+        self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: 'static> Drop for Sender<T> {
+    fn drop(&mut self) {
+        if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.disconnected.store(true, Ordering::Release);
+            // Wake all blocked receivers
+            {
+                let mut receivers = self.inner.receivers.lock().unwrap();
+                while let Some(signal) = receivers.pop_front() {
+                    signal.notify();
+                }
+            }
         }
     }
 }
@@ -56,6 +77,8 @@ impl<T: 'static> Channel<T> {
             len: AtomicUsize::new(0),
             senders: Mutex::new(LinkedList::new()),
             receivers: Mutex::new(LinkedList::new()),
+            sender_count: AtomicUsize::new(1),
+            disconnected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -242,29 +265,58 @@ impl<T: 'static> Receiver<T> {
         }
     }
 
+    /// Returns `true` if all senders have been dropped.
+    pub fn is_disconnected(&self) -> bool {
+        self.inner.disconnected.load(Ordering::Acquire)
+    }
+
     /// Receives a message from the channel, blocking if empty.
+    ///
+    /// Returns `None` when the channel is empty **and** all senders have been dropped.
     pub fn recv(&self) -> Option<T> {
         if let Some(msg) = self.try_recv() {
             return Some(msg);
         }
 
+        if self.is_disconnected() {
+            return self.try_recv();
+        }
+
         loop {
             let signal = Arc::new(Signal::new());
-            // Register signal
             {
                 let mut receivers = self.inner.receivers.lock().unwrap();
                 receivers.push_back(signal.clone());
             }
 
-            // Re-check
             if let Some(msg) = self.try_recv() {
                 return Some(msg);
             }
 
-            signal.wait();
+            if self.is_disconnected() {
+                return self.try_recv();
+            }
+
+            // Wait, checking the queue on every wakeup.
+            loop {
+                if signal.is_notified() {
+                    break;
+                }
+                thread::park();
+                if let Some(msg) = self.try_recv() {
+                    return Some(msg);
+                }
+                if self.is_disconnected() {
+                    return self.try_recv();
+                }
+            }
 
             if let Some(msg) = self.try_recv() {
                 return Some(msg);
+            }
+
+            if self.is_disconnected() {
+                return None;
             }
         }
     }

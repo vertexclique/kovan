@@ -57,7 +57,7 @@ mod ttas;
 
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};
-pub use guard::{Guard, pin};
+pub use guard::{Guard, flush, pin};
 pub use reclaim::Reclaimable;
 pub use retired::RetiredNode;
 pub use robust::{BirthEra, current_era};

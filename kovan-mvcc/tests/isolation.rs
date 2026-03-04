@@ -1,4 +1,4 @@
-use kovan_mvcc::KovanMVCC;
+use kovan_mvcc::{IsolationLevel, KovanMVCC};
 use std::sync::Arc;
 use std::thread;
 
@@ -11,8 +11,8 @@ fn test_snapshot_isolation_readers_ignore_new_commits() {
     t0.write("x", b"initial".to_vec()).unwrap();
     t0.commit().unwrap();
 
-    // 2. Start Long-Running Reader (Snapshot T1)
-    let reader_txn = db.begin();
+    // 2. Start Long-Running Reader with RepeatableRead (Snapshot T1)
+    let reader_txn = db.begin_with_isolation(IsolationLevel::RepeatableRead);
     let val_start = reader_txn.read("x").unwrap();
     assert_eq!(val_start, b"initial");
 

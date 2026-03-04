@@ -1,4 +1,4 @@
-use kovan_mvcc::KovanMVCC;
+use kovan_mvcc::{KovanMVCC, MvccError};
 use std::sync::Arc;
 use std::thread;
 
@@ -43,10 +43,10 @@ fn test_simple_conflict() {
                 eprintln!("[T1] Commit result: {:?}", commit_result);
                 commit_result
             } else {
-                Err("write1 failed".to_string())
+                Err(MvccError::StorageError("write1 failed".to_string()))
             }
         } else {
-            Err("write0 failed".to_string())
+            Err(MvccError::StorageError("write0 failed".to_string()))
         }
     });
 
@@ -70,10 +70,10 @@ fn test_simple_conflict() {
                 eprintln!("[T2] Commit result: {:?}", commit_result);
                 commit_result
             } else {
-                Err("write1 failed".to_string())
+                Err(MvccError::StorageError("write1 failed".to_string()))
             }
         } else {
-            Err("write0 failed".to_string())
+            Err(MvccError::StorageError("write0 failed".to_string()))
         }
     });
 

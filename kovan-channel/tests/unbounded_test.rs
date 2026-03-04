@@ -79,6 +79,60 @@ fn test_receiver_clone() {
     assert_eq!(r2.recv(), Some(2));
 }
 
+/// Regression test for double-free in `try_recv`.
+///
+/// `try_recv` uses `ptr::read` (now `ptr::replace`) to extract data from the
+/// successor node. Without replacing the source with `None`, the node's
+/// `Option<T>` discriminant still says `Some` when kovan's reclamation later
+/// frees the node, causing `Node::drop` to double-free the inner value.
+///
+/// This test uses `String` (a heap-allocated, Drop type) to detect double-free.
+/// With Copy types like `i32`, the double-free silently corrupts the heap but
+/// rarely crashes; with String it reliably triggers "double free or corruption".
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_no_double_free_on_recv() {
+    // Run on a dedicated thread so Handle cleanup (which calls try_retire and
+    // free_batch_list) happens deterministically at thread exit.
+    let handle = thread::spawn(|| {
+        for _ in 0..200 {
+            let (tx, rx) = unbounded::<String>();
+            tx.send("hello".to_string());
+            tx.send("world".to_string());
+            let a = rx.try_recv().unwrap();
+            let b = rx.try_recv().unwrap();
+            assert_eq!(a, "hello");
+            assert_eq!(b, "world");
+            // Channel drop retires remaining nodes (sentinel).
+            // Consumed nodes are retired on next try_recv or drop.
+            // If ptr::read left stale Some(value), kovan's destructor
+            // would double-free the strings here.
+        }
+    });
+    handle.join().unwrap();
+}
+
+/// Test that dropping a channel with unconsumed heap-allocated messages
+/// doesn't double-free. Channel::drop retires all remaining nodes; consumed
+/// nodes must have their data cleared to None.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_no_double_free_on_drop_with_pending() {
+    let handle = thread::spawn(|| {
+        for _ in 0..200 {
+            let (tx, rx) = unbounded::<String>();
+            for i in 0..5 {
+                tx.send(format!("msg-{i}"));
+            }
+            // Consume only some messages — the rest are pending at drop time.
+            let _ = rx.try_recv();
+            let _ = rx.try_recv();
+            // Drop channel with 3 pending messages + 2 consumed sentinel nodes.
+        }
+    });
+    handle.join().unwrap();
+}
+
 /// Concurrent send/recv must not violate aliasing rules.
 ///
 /// Before the fix, `try_recv()` created `&mut (*next.as_raw()).data` — a mutable

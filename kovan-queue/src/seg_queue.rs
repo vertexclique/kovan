@@ -49,6 +49,7 @@ impl<T> Segment<T> {
 pub struct SegQueue<T> {
     head: CacheAligned<Atomic<Segment<T>>>,
     tail: CacheAligned<Atomic<Segment<T>>>,
+    len: AtomicUsize,
 }
 
 unsafe impl<T: Send> Send for SegQueue<T> {}
@@ -70,6 +71,7 @@ impl<T: 'static> SegQueue<T> {
         SegQueue {
             head: CacheAligned::new(head),
             tail: CacheAligned::new(tail),
+            len: AtomicUsize::new(0),
         }
     }
 
@@ -118,6 +120,7 @@ impl<T: 'static> SegQueue<T> {
                             slot.value.get().write(MaybeUninit::new(value));
                         }
                         slot.state.store(SLOT_WRITTEN, Ordering::Release);
+                        self.len.fetch_add(1, Ordering::Relaxed);
                         return;
                     }
                 } else if state == SLOT_WRITING {
@@ -185,6 +188,7 @@ impl<T: 'static> SegQueue<T> {
                         .is_ok()
                     {
                         let value = unsafe { slot.value.get().read().assume_init() };
+                        self.len.fetch_sub(1, Ordering::Relaxed);
                         return Some(value);
                     }
                 } else if state == SLOT_EMPTY {
@@ -224,6 +228,22 @@ impl<T: 'static> SegQueue<T> {
 
             backoff.snooze();
         }
+    }
+
+    /// Returns the number of elements in the queue.
+    ///
+    /// This is an approximation in concurrent scenarios: elements may be pushed
+    /// or popped by other threads between the moment the length is read and the
+    /// moment the caller acts on the returned value.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    /// Returns `true` if the queue is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

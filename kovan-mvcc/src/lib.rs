@@ -33,12 +33,17 @@
 //! assert_eq!(val, b"value1");
 //! ```
 
+pub mod backoff;
+pub mod error;
 mod lock_table;
 pub mod percolator;
 pub mod storage;
 mod timestamp_oracle;
 
 // Export KovanMVCC and Txn directly from percolator
+pub use crate::backoff::{BackoffAction, BackoffStrategy, DefaultBackoff};
+pub use crate::error::MvccError;
 pub use crate::lock_table::{LockInfo, LockTable, LockType};
-pub use crate::percolator::{KovanMVCC, Txn};
+pub use crate::percolator::{ActiveTxnRegistry, IsolationLevel, KovanMVCC, Txn};
+pub use crate::storage::{InMemoryStorage, Storage, Value, WriteInfo, WriteKind};
 pub use crate::timestamp_oracle::{LocalTimestampOracle, MockTimestampOracle, TimestampOracle};
