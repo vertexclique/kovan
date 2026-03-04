@@ -225,6 +225,10 @@ where
     /// Helper for get_or_insert logic.
     fn insert_impl(&self, key: K, value: V, only_if_absent: bool) -> Option<V> {
         let hash = self.hasher.hash_one(&key);
+        // Track whether we already incremented count for a new insert across
+        // retry iterations.  Prevents both under-count (which causes cascading
+        // resizes on Windows) and double-count.
+        let mut counted = false;
 
         loop {
             self.wait_for_resize();
@@ -249,18 +253,24 @@ where
                 &guard,
             ) {
                 InsertResult::Success(old_val) => {
-                    // CRITICAL FIX: If a resize started while we were inserting, our update
+                    // Count new inserts immediately so that concurrent removes
+                    // cannot decrement count below the true entry count.
+                    if old_val.is_none() && !counted {
+                        self.count.fetch_add(1, Ordering::Relaxed);
+                        counted = true;
+                    }
+
+                    // If a resize started while we were inserting, our update
                     // might have been missed by the migration.
                     // We must retry to ensure we write to the new table.
-                    // We check BOTH the resizing flag (active resize) AND the table pointer (completed resize).
                     if self.resizing.load(Ordering::SeqCst)
                         || self.table.load(Ordering::SeqCst, &guard) != table_ptr
                     {
                         continue;
                     }
 
-                    if old_val.is_none() {
-                        let new_count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if counted {
+                        let new_count = self.count.load(Ordering::Relaxed);
                         let current_capacity = table.capacity;
                         let load_factor = new_count as f64 / current_capacity as f64;
 
@@ -369,15 +379,25 @@ where
 
                                     unsafe { retire(entry_ptr.as_raw()) };
 
-                                    let new_count = self.count.fetch_sub(1, Ordering::Relaxed) - 1;
-                                    let current_capacity = table.capacity;
-                                    let load_factor = new_count as f64 / current_capacity as f64;
+                                    // Saturating decrement: prevent count from wrapping
+                                    // to usize::MAX which would trigger catastrophic
+                                    // cascading resizes.
+                                    if let Ok(prev) = self.count.fetch_update(
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                        |c| c.checked_sub(1),
+                                    ) {
+                                        let new_count = prev - 1;
+                                        let current_capacity = table.capacity;
+                                        let load_factor =
+                                            new_count as f64 / current_capacity as f64;
 
-                                    if load_factor < SHRINK_THRESHOLD
-                                        && current_capacity > MIN_CAPACITY
-                                    {
-                                        drop(guard);
-                                        self.try_resize(current_capacity / 2);
+                                        if load_factor < SHRINK_THRESHOLD
+                                            && current_capacity > MIN_CAPACITY
+                                        {
+                                            drop(guard);
+                                            self.try_resize(current_capacity / 2);
+                                        }
                                     }
 
                                     return Some(old_value);

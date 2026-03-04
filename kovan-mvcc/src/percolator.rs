@@ -559,21 +559,22 @@ impl Txn {
 
     fn rollback(&self) {
         for (key, _) in &self.writes {
-            // Only remove our own locks
+            // Only clean up keys where we actually hold the lock.
+            // A transaction that failed lock acquisition has no data to rollback
+            // and must not write rollback records that could poison concurrent prewrites.
             if let Some(lock) = self.storage.get_lock(&key)
                 && lock.txn_id == self.txn_id
             {
                 self.storage.delete_lock(&key);
-                // Also delete data we wrote
                 self.storage.delete_data(&key, self.start_ts);
-            }
 
-            // Write a Rollback record to CF_WRITE to prevent future prewrites at this start_ts
-            let rollback_info = WriteInfo {
-                start_ts: self.start_ts,
-                kind: WriteKind::Rollback,
-            };
-            self.storage.put_write(&key, self.start_ts, rollback_info);
+                // Write a Rollback record to prevent resurrection of this start_ts
+                let rollback_info = WriteInfo {
+                    start_ts: self.start_ts,
+                    kind: WriteKind::Rollback,
+                };
+                self.storage.put_write(&key, self.start_ts, rollback_info);
+            }
         }
     }
 }
