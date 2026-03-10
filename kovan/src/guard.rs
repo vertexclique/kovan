@@ -333,6 +333,9 @@ impl Handle {
     fn slow_path(&self, index: usize, tid: usize) {
         let global = self.global();
         let slots = global.thread_slots(tid);
+        // Prevent re-entrant flush() from destructors called during
+        // traverse_cache -> free_batch_list in the slow path.
+        self.in_reclaim.set(true);
 
         let mut prev_epoch = slots.epoch[index].load_lo();
         global.inc_slow();
@@ -365,6 +368,7 @@ impl Handle {
                     slots.epoch[index].store_hi(seqno + 2, Ordering::Release);
                     slots.first[index].store_hi(seqno + 2, Ordering::Release);
                     global.dec_slow();
+                    self.in_reclaim.set(false);
                     return;
                 }
             }
@@ -475,6 +479,7 @@ impl Handle {
 
                 global.dec_slow();
                 self.drain_free_list();
+                self.in_reclaim.set(false);
                 return;
             } else {
                 // Empty list transition
@@ -496,6 +501,7 @@ impl Handle {
         }
 
         self.drain_free_list();
+        self.in_reclaim.set(false);
     }
 
     /// Help other threads in the slow path (matches help_read).
