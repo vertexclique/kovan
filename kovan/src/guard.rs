@@ -81,6 +81,16 @@ struct Handle {
     /// 128-bit WordPair on every load. Updated on the rare (slow) path only
     /// (when global epoch has advanced since last check).
     cached_epoch: Cell<u64>,
+    /// Re-entrancy guard: set while executing `free_batch_list` or other
+    /// reclamation operations that call type-erased destructors. When set,
+    /// `flush()` becomes a no-op to prevent re-entrant free_list corruption.
+    ///
+    /// The scenario: `free_batch_list` calls a destructor which drops an
+    /// `Atom<T>`, whose `Drop` calls `flush()`. Without this guard, the
+    /// nested `flush()` reads stale `free_list` Cell pointers (still pointing
+    /// to nodes being freed by the outer `free_batch_list`), causing
+    /// use-after-free, double-free, and heap corruption.
+    in_reclaim: Cell<bool>,
 }
 
 impl Handle {
@@ -96,6 +106,7 @@ impl Handle {
             free_list: Cell::new(core::ptr::null_mut()),
             list_count: Cell::new(0),
             cached_epoch: Cell::new(0),
+            in_reclaim: Cell::new(false),
         }
     }
 
@@ -216,6 +227,12 @@ impl Handle {
             if first != 0 && first != INVPTR as u64 {
                 let mut free_list = self.free_list.get();
                 let mut list_count = self.list_count.get();
+                // Clear Cell before traverse_cache so re-entrant destructors
+                // (dropping Atoms -> flush()) see an empty list, not stale ptrs.
+                self.free_list.set(core::ptr::null_mut());
+                self.list_count.set(0);
+                let was_reclaiming = self.in_reclaim.get();
+                self.in_reclaim.set(true);
                 unsafe {
                     crate::reclaim::traverse_cache(
                         &mut free_list,
@@ -223,6 +240,7 @@ impl Handle {
                         first as *mut RetiredNode,
                     );
                 }
+                self.in_reclaim.set(was_reclaiming);
                 self.free_list.set(free_list);
                 self.list_count.set(list_count);
             }
@@ -772,7 +790,14 @@ impl Handle {
         self.alloc_counter.set(alloc_count);
         if alloc_count.is_multiple_of(EPOCH_FREQ) {
             let tid = self.tid();
+            // Set in_reclaim: help_read -> help_thread -> do_update ->
+            // traverse_cache -> free_batch_list can call destructors which
+            // drop Atoms triggering flush(). The flag prevents re-entrant
+            // flush from reading stale free_list Cell state.
+            let was_reclaiming = self.in_reclaim.get();
+            self.in_reclaim.set(true);
             self.help_read(tid);
+            self.in_reclaim.set(was_reclaiming);
             self.global().advance_epoch();
         }
 
@@ -786,7 +811,12 @@ impl Handle {
                     .store(rnode_mark(first), Ordering::SeqCst);
             }
 
+            // Set in_reclaim: try_retire -> free_batch_list can call
+            // destructors which drop Atoms triggering flush().
+            let was_reclaiming = self.in_reclaim.get();
+            self.in_reclaim.set(true);
             self.try_retire();
+            self.in_reclaim.set(was_reclaiming);
 
             // Reset batch
             self.batch_first.set(core::ptr::null_mut());
@@ -1013,16 +1043,28 @@ impl Handle {
         }
     }
 
-    /// Drain cached free list
+    /// Drain cached free list.
+    ///
+    /// Clears the Cell **before** calling `free_batch_list` so that any
+    /// re-entrant code (destructors calling `pin()` or `flush()`) sees an
+    /// empty free list instead of stale pointers to already-freed nodes.
+    /// Loops until truly empty in case re-entrant destructors enqueue new
+    /// refs-nodes during freeing.
     fn drain_free_list(&self) {
-        let free_list = self.free_list.get();
-        if !free_list.is_null() {
-            unsafe {
-                crate::reclaim::free_batch_list(free_list);
+        let was_reclaiming = self.in_reclaim.get();
+        self.in_reclaim.set(true);
+        loop {
+            let free_list = self.free_list.get();
+            if free_list.is_null() {
+                break;
             }
             self.free_list.set(core::ptr::null_mut());
             self.list_count.set(0);
+            unsafe {
+                crate::reclaim::free_batch_list(free_list);
+            }
         }
+        self.in_reclaim.set(was_reclaiming);
     }
 
     /// Flush: force all retired nodes on this thread to be reclaimed.
@@ -1040,6 +1082,23 @@ impl Handle {
         if self.tid.get().is_none() {
             return; // Thread never participated in reclamation
         }
+        // Skip if we're already inside a reclamation operation (e.g. a
+        // destructor from free_batch_list dropped an Atom which calls flush).
+        // The nodes will be reclaimed by the outer operation or the next
+        // flush/cleanup call. This prevents reading stale free_list Cell
+        // pointers that the outer operation is actively freeing.
+        if self.in_reclaim.get() {
+            return;
+        }
+        self.in_reclaim.set(true);
+
+        // Bump pin_count so that any destructor calling pin() during
+        // free_batch_list sees pin_count > 0 and returns a no-op Guard
+        // instead of triggering do_update (which would read stale
+        // free_list state from the Cell, causing use-after-free).
+        let saved_pin = self.pin_count.get();
+        self.pin_count.set(saved_pin + 1);
+
         let tid = self.tid();
         let global = self.global();
 
@@ -1078,6 +1137,8 @@ impl Handle {
             if first != 0 && first != INVPTR as u64 {
                 let mut free_list = self.free_list.get();
                 let mut list_count = self.list_count.get();
+                self.free_list.set(core::ptr::null_mut());
+                self.list_count.set(0);
                 unsafe {
                     crate::reclaim::traverse_cache(
                         &mut free_list,
@@ -1092,6 +1153,9 @@ impl Handle {
 
         // Drain the accumulated free list
         self.drain_free_list();
+
+        self.pin_count.set(saved_pin);
+        self.in_reclaim.set(false);
     }
 }
 
@@ -1100,14 +1164,28 @@ impl Handle {
     /// Extracted from Drop so it can also be called by the nightly sentinel.
     fn cleanup(&self) {
         if let Some(tid) = self.tid.get() {
+            // Prevent re-entrant flush() from destructors during cleanup.
+            self.in_reclaim.set(true);
+            // Bump pin_count so that any destructor calling pin() during
+            // free_batch_list sees pin_count > 0 and returns a no-op Guard
+            // instead of triggering do_update (which would read stale
+            // free_list state from the Cell, causing use-after-free).
+            let saved_pin = self.pin_count.get();
+            self.pin_count.set(saved_pin + 1);
+
             // Clear all reservation slots
             let global = self.global();
             for i in 0..HR_NUM {
                 let first =
                     global.thread_slots(tid).first[i].exchange_lo(INVPTR as u64, Ordering::AcqRel);
                 if first != INVPTR as u64 && first != 0 {
+                    // Take ownership of the Cell's free_list and clear it
+                    // before traverse_cache, so re-entrant destructors see
+                    // an empty list instead of stale pointers.
                     let mut free_list = self.free_list.get();
                     let mut list_count = self.list_count.get();
+                    self.free_list.set(core::ptr::null_mut());
+                    self.list_count.set(0);
                     unsafe {
                         crate::reclaim::traverse_cache(
                             &mut free_list,
@@ -1151,6 +1229,9 @@ impl Handle {
 
             // Drain any remaining free list
             self.drain_free_list();
+
+            self.pin_count.set(saved_pin);
+            self.in_reclaim.set(false);
 
             // Mark TID as unused so cleanup is idempotent
             self.tid.set(None);
