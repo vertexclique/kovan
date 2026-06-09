@@ -158,8 +158,8 @@ pub struct HopscotchMap<K: 'static, V: 'static, S = FixedState> {
 #[cfg(feature = "std")]
 impl<K, V> HopscotchMap<K, V, FixedState>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
 {
     /// Creates a new `HopscotchMap` with default capacity and hasher.
     pub fn new() -> Self {
@@ -174,8 +174,8 @@ where
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
     S: BuildHasher,
 {
     /// Creates a new `HopscotchMap` with the specified hasher and default capacity.
@@ -1013,8 +1013,8 @@ where
 
 impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
     S: BuildHasher,
 {
     type Item = (K, V);
@@ -1035,8 +1035,8 @@ enum InsertResult<V> {
 #[cfg(feature = "std")]
 impl<K, V> Default for HopscotchMap<K, V, FixedState>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
 {
     fn default() -> Self {
         Self::new()

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-struct Channel<T: Send + 'static> {
+struct Channel<T: 'static> {
     sender: unbounded::Sender<T>,
     receiver: unbounded::Receiver<T>,
     capacity: usize,
@@ -20,11 +20,11 @@ struct Channel<T: Send + 'static> {
 }
 
 /// The sending half of a bounded channel.
-pub struct Sender<T: Send + 'static> {
+pub struct Sender<T: 'static> {
     inner: Arc<Channel<T>>,
 }
 
-impl<T: Send + 'static> Clone for Sender<T> {
+impl<T: 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -33,7 +33,7 @@ impl<T: Send + 'static> Clone for Sender<T> {
     }
 }
 
-impl<T: Send + 'static> Drop for Sender<T> {
+impl<T: 'static> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.inner.disconnected.store(true, Ordering::Release);
@@ -48,15 +48,15 @@ impl<T: Send + 'static> Drop for Sender<T> {
     }
 }
 
-unsafe impl<T: Send + 'static + Send> Send for Sender<T> {}
-unsafe impl<T: Send + 'static + Send> Sync for Sender<T> {}
+unsafe impl<T: 'static + Send> Send for Sender<T> {}
+unsafe impl<T: 'static + Send> Sync for Sender<T> {}
 
 /// The receiving half of a bounded channel.
-pub struct Receiver<T: Send + 'static> {
+pub struct Receiver<T: 'static> {
     inner: Arc<Channel<T>>,
 }
 
-impl<T: Send + 'static> Clone for Receiver<T> {
+impl<T: 'static> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -64,10 +64,10 @@ impl<T: Send + 'static> Clone for Receiver<T> {
     }
 }
 
-unsafe impl<T: Send + 'static + Send> Send for Receiver<T> {}
-unsafe impl<T: Send + 'static + Send> Sync for Receiver<T> {}
+unsafe impl<T: 'static + Send> Send for Receiver<T> {}
+unsafe impl<T: 'static + Send> Sync for Receiver<T> {}
 
-impl<T: Send + 'static> Channel<T> {
+impl<T: 'static> Channel<T> {
     fn new(capacity: usize) -> Self {
         let (sender, receiver) = unbounded::channel();
         Self {
@@ -83,7 +83,7 @@ impl<T: Send + 'static> Channel<T> {
     }
 }
 
-impl<T: Send + 'static> Sender<T> {
+impl<T: 'static> Sender<T> {
     /// Sends a message into the channel, blocking if full.
     pub fn send(&self, t: T) {
         let backoff = Backoff::new();
@@ -146,15 +146,15 @@ impl<T: Send + 'static> Sender<T> {
         use std::pin::Pin;
         use std::task::{Context, Poll};
 
-        struct SendFuture<'a, T: Send + 'static> {
+        struct SendFuture<'a, T: 'static> {
             sender: &'a Sender<T>,
             t: Option<T>,
             signal: Arc<AsyncSignal>,
         }
 
-        impl<'a, T: Send + 'static> Unpin for SendFuture<'a, T> {}
+        impl<'a, T: 'static> Unpin for SendFuture<'a, T> {}
 
-        impl<'a, T: Send + 'static> Future for SendFuture<'a, T> {
+        impl<'a, T: 'static> Future for SendFuture<'a, T> {
             type Output = ();
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -230,7 +230,7 @@ impl<T: Send + 'static> Sender<T> {
     }
 }
 
-impl<T: Send + 'static> Receiver<T> {
+impl<T: 'static> Receiver<T> {
     /// Returns true if the channel is empty.
     pub fn is_empty(&self) -> bool {
         // This is approximate
@@ -327,14 +327,14 @@ impl<T: Send + 'static> Receiver<T> {
         use std::pin::Pin;
         use std::task::{Context, Poll};
 
-        struct RecvFuture<'a, T: Send + 'static> {
+        struct RecvFuture<'a, T: 'static> {
             receiver: &'a Receiver<T>,
             signal: Arc<AsyncSignal>,
         }
 
-        impl<'a, T: Send + 'static> Unpin for RecvFuture<'a, T> {}
+        impl<'a, T: 'static> Unpin for RecvFuture<'a, T> {}
 
-        impl<'a, T: Send + 'static> Future for RecvFuture<'a, T> {
+        impl<'a, T: 'static> Future for RecvFuture<'a, T> {
             type Output = T;
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -370,7 +370,7 @@ impl<T: Send + 'static> Receiver<T> {
 }
 
 /// Creates a channel of bounded capacity.
-pub fn channel<T: Send + 'static>(cap: usize) -> (Sender<T>, Receiver<T>) {
+pub fn channel<T: 'static>(cap: usize) -> (Sender<T>, Receiver<T>) {
     assert!(
         cap > 0,
         "bounded channel capacity must be greater than zero"

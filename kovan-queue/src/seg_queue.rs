@@ -30,16 +30,6 @@ struct Segment<T> {
     id: usize,
 }
 
-// SAFETY (kovan retirement rule): a retired Segment's destructor may run
-// on any thread, and segments (with any unconsumed T inside) move between
-// threads — hence `T: Send` for both impls. `Sync` does not require
-// `T: Sync` because no `&T` is ever produced from a shared `&Segment`:
-// each slot value is written by exactly one producer and consumed by
-// exactly one consumer (guarded by the slot-state CAS machine), and the
-// only fields touched through shared references are atomics.
-unsafe impl<T: Send> Send for Segment<T> {}
-unsafe impl<T: Send> Sync for Segment<T> {}
-
 impl<T> Segment<T> {
     fn new(id: usize) -> Segment<T> {
         // Use `core::array::from_fn` to construct each slot explicitly with known-good values.
@@ -65,13 +55,13 @@ pub struct SegQueue<T> {
 unsafe impl<T: Send> Send for SegQueue<T> {}
 unsafe impl<T: Send> Sync for SegQueue<T> {}
 
-impl<T: Send + 'static> Default for SegQueue<T> {
+impl<T: 'static> Default for SegQueue<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Send + 'static> SegQueue<T> {
+impl<T: 'static> SegQueue<T> {
     /// Creates a new unbounded queue.
     pub fn new() -> SegQueue<T> {
         let segment = Box::into_raw(Box::new(Segment::new(0)));

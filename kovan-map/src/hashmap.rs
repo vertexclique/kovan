@@ -301,8 +301,8 @@ pub struct HashMap<K: 'static, V: 'static, S = FixedState> {
 #[cfg(feature = "std")]
 impl<K, V> HashMap<K, V, FixedState>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
 {
     /// Creates a new empty hash map with FoldHash (FixedState).
     pub fn new() -> Self {
@@ -317,8 +317,8 @@ where
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
     S: BuildHasher,
 {
     /// Creates a new hash map with custom hasher.
@@ -1123,8 +1123,8 @@ where
 
 impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
     S: BuildHasher,
 {
     type Item = (K, V);
@@ -1138,8 +1138,8 @@ where
 #[cfg(feature = "std")]
 impl<K, V> Default for HashMap<K, V, FixedState>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
 {
     fn default() -> Self {
         Self::new()

@@ -105,6 +105,16 @@ struct Handle {
     /// 128-bit WordPair on every load. Updated on the rare (slow) path only
     /// (when global epoch has advanced since last check).
     cached_epoch: Cell<u64>,
+    /// Thread-cached global epoch for stamping `birth_epoch` on allocation,
+    /// avoiding a contended `Acquire` load of the global epoch counter on
+    /// every `RetiredNode::new`. Refreshed in `pin()` (which every
+    /// `Atom::new`/`store`/`swap` performs right after boxing the node, and
+    /// which read/CAS workloads perform constantly), seeded lazily on first
+    /// use. A stale value is always *low* — the global epoch is monotone —
+    /// which lowers a batch's `min_epoch`, making more slots eligible in
+    /// `try_retire` (strictly more conservative deferral). It can never
+    /// exceed the true epoch, so it can never cause premature reclamation.
+    cached_birth_epoch: Cell<u64>,
     /// Re-entrancy guard: set while executing `free_batch_list` or other
     /// reclamation operations that call type-erased destructors. When set,
     /// `flush()` becomes a no-op to prevent re-entrant free_list corruption.
@@ -130,8 +140,29 @@ impl Handle {
             free_list: Cell::new(core::ptr::null_mut()),
             list_count: Cell::new(0),
             cached_epoch: Cell::new(0),
+            cached_birth_epoch: Cell::new(0),
             in_reclaim: Cell::new(false),
         }
+    }
+
+    /// Current epoch to stamp on a freshly allocated node's `birth_epoch`.
+    ///
+    /// Returns the thread-cached global epoch (refreshed at every `pin()`),
+    /// seeding it from the global counter on first use. The returned value
+    /// is always ≤ the true global epoch (monotone counter + stale cache),
+    /// which is the safety requirement: a birth epoch that is too low only
+    /// defers a node's batch more conservatively; one that is too high
+    /// would risk premature reclamation, and that can never happen here.
+    #[inline]
+    fn current_birth_epoch(&self) -> u64 {
+        let cached = self.cached_birth_epoch.get();
+        if cached != 0 {
+            return cached;
+        }
+        // First use on this thread: seed from the global counter.
+        let e = self.global().get_epoch();
+        self.cached_birth_epoch.set(e);
+        e
     }
 
     #[inline]
@@ -397,6 +428,11 @@ impl Handle {
 
         loop {
             let curr_epoch = global.get_epoch();
+            // Refresh the birth-epoch cache for free: we already hold a
+            // fresh global epoch here, and every Atom::new/store/swap pins
+            // immediately after boxing its node, so the next allocation's
+            // birth stamp reads this without touching the global counter.
+            self.cached_birth_epoch.set(curr_epoch);
             if curr_epoch == prev_epoch {
                 return Guard {
                     _private: (),
@@ -978,13 +1014,11 @@ impl Handle {
     /// - `ptr` must not be retired more than once.
     /// - The caller must not access `*ptr` after this call (except through
     ///   the reclamation system).
-    ///
-    /// `T: Send` because the type-erased destructor runs on whichever thread
-    /// drives the batch's reference count to zero — almost never the
-    /// retiring thread.
+    /// - The destructor may run on **any** thread (see `retire`'s docs); the
+    ///   caller is responsible for that being sound for `T`.
     unsafe fn retire<T>(&self, ptr: *mut T)
     where
-        T: 'static + Send,
+        T: 'static,
     {
         let node_ptr = ptr as *mut RetiredNode;
 
@@ -1523,6 +1557,28 @@ thread_local! {
     static HANDLE: Handle = const { Handle::new() };
 }
 
+/// Current epoch for stamping a freshly allocated node's `birth_epoch`.
+///
+/// Called by `RetiredNode::new`. Returns the thread-cached global epoch
+/// (refreshed at every `pin()`), avoiding a contended atomic read of the
+/// global epoch counter on every allocation. The value is always ≤ the true
+/// global epoch, which is the safety requirement (see `Handle::current_birth_epoch`).
+#[inline]
+pub(crate) fn current_birth_epoch() -> u64 {
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.current_birth_epoch()
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        // During process teardown TLS may be destroyed. Fall back to the
+        // global counter (always correct, just not cached).
+        HANDLE
+            .try_with(|handle| handle.current_birth_epoch())
+            .unwrap_or_else(|_| slot::global().get_epoch())
+    }
+}
+
 /// Protect: era tracking for `Atomic::load()`.
 ///
 /// Called internally by `Atomic::load()`. Must NOT be called without a live Guard.
@@ -1600,14 +1656,24 @@ pub fn pin() -> Guard {
 /// - `ptr` must not be retired more than once.
 /// - The caller must not access `*ptr` after this call (except through
 ///   the reclamation system).
+/// - **Cross-thread drop:** `T`'s destructor runs whenever the containing
+///   batch's reference count reaches zero, which is driven by whichever
+///   thread happens to traverse the slot the batch landed in (or an orphan
+///   adopter) — typically **not** the retiring thread. The caller must
+///   ensure this is sound for `T`. For multi-threaded reclamation that
+///   effectively means `T: Send`; retiring a type with thread-affine
+///   contents (`Rc`, lock guards, thread-bound FFI handles) is only sound
+///   if reclamation is single-threaded (one thread ever pins/retires/flushes,
+///   so the destructor always runs on that thread).
 ///
-/// `T: Send` is required because the deferred destructor runs on whichever
-/// thread drives the containing batch's reference count to zero — typically
-/// **not** the retiring thread. Retiring a type with thread-affine contents
-/// (e.g. `Rc`, lock guards, thread-bound FFI handles) would drop it on a
-/// foreign thread.
+/// This is intentionally **not** a `T: Send` bound on the function: like the
+/// `RetiredNode`-at-offset-0 invariant above, it is a caller-upheld contract
+/// of this `unsafe fn`, which keeps the raw API usable for single-threaded
+/// `!Send` types. The safe wrappers ([`Atom`](crate::Atom),
+/// [`AtomOption`](crate::AtomOption)) require `T: Send + Sync` and so are
+/// unconditionally sound.
 #[inline]
-pub unsafe fn retire<T: 'static + Send>(ptr: *mut T) {
+pub unsafe fn retire<T: 'static>(ptr: *mut T) {
     #[cfg(feature = "nightly")]
     {
         // SAFETY: Caller upholds the safety contract.

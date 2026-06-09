@@ -114,6 +114,7 @@ mod kovan_bench {
     }
 }
 
+/* other reclamation libraries (crossbeam-epoch / seize / haphazard) — disabled with their dev-deps
 // Crossbeam-Epoch implementation
 mod crossbeam_bench {
     use super::*;
@@ -520,6 +521,7 @@ mod haphazard_bench {
     }
 }
 
+*/
 fn bench_treiber_stack_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("treiber_stack");
     group.sample_size(20);
@@ -538,35 +540,37 @@ fn bench_treiber_stack_comparison(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("crossbeam", threads),
-            threads,
-            |b, &num_threads| {
-                b.iter(|| {
-                    crossbeam_bench::bench_treiber_stack(num_threads, ops_per_thread);
-                });
-            },
-        );
+        /* other treiber-stack benches disabled with their dev-deps
+                group.bench_with_input(
+                    BenchmarkId::new("crossbeam", threads),
+                    threads,
+                    |b, &num_threads| {
+                        b.iter(|| {
+                            crossbeam_bench::bench_treiber_stack(num_threads, ops_per_thread);
+                        });
+                    },
+                );
 
-        group.bench_with_input(
-            BenchmarkId::new("seize", threads),
-            threads,
-            |b, &num_threads| {
-                b.iter(|| {
-                    seize_bench::bench_treiber_stack(num_threads, ops_per_thread);
-                });
-            },
-        );
+                group.bench_with_input(
+                    BenchmarkId::new("seize", threads),
+                    threads,
+                    |b, &num_threads| {
+                        b.iter(|| {
+                            seize_bench::bench_treiber_stack(num_threads, ops_per_thread);
+                        });
+                    },
+                );
 
-        group.bench_with_input(
-            BenchmarkId::new("haphazard", threads),
-            threads,
-            |b, &num_threads| {
-                b.iter(|| {
-                    haphazard_bench::bench_treiber_stack(num_threads, ops_per_thread);
-                });
-            },
-        );
+                group.bench_with_input(
+                    BenchmarkId::new("haphazard", threads),
+                    threads,
+                    |b, &num_threads| {
+                        b.iter(|| {
+                            haphazard_bench::bench_treiber_stack(num_threads, ops_per_thread);
+                        });
+                    },
+                );
+        */
     }
 
     group.finish();
@@ -582,6 +586,7 @@ fn bench_pin_overhead(c: &mut Criterion) {
         });
     });
 
+    /* other pin-overhead benches disabled with their dev-deps
     group.bench_function("crossbeam", |b| {
         b.iter(|| {
             let _guard = crossbeam_epoch::pin();
@@ -602,7 +607,7 @@ fn bench_pin_overhead(c: &mut Criterion) {
             let _hp = haphazard::HazardPointer::new();
             black_box(&_hp);
         });
-    });
+    });*/
 
     group.finish();
 }
@@ -674,68 +679,70 @@ fn bench_read_heavy_workload(c: &mut Criterion) {
             },
         );
 
-        // Crossbeam
-        group.bench_with_input(
-            BenchmarkId::new("crossbeam", threads),
-            threads,
-            |b, &num_threads| {
-                b.iter(|| {
-                    let atomic =
-                        Arc::new(crossbeam_epoch::Atomic::new(crossbeam_bench::Node::new(42)));
-                    let handles: Vec<_> = (0..num_threads)
-                        .map(|tid| {
-                            let atomic = atomic.clone();
-                            thread::spawn(move || {
-                                for i in 0..ops_per_thread {
-                                    if i % 20 == 0 {
-                                        // 5% writes
-                                        let new_node = crossbeam_epoch::Owned::new(
-                                            crossbeam_bench::Node::new(tid * ops_per_thread + i),
-                                        );
-                                        let guard = crossbeam_epoch::pin();
-                                        let old = atomic.swap(new_node, Ordering::Release, &guard);
-                                        unsafe {
-                                            guard.defer_destroy(old);
+        /* other read-heavy benches disabled with their dev-deps
+                // Crossbeam
+                group.bench_with_input(
+                    BenchmarkId::new("crossbeam", threads),
+                    threads,
+                    |b, &num_threads| {
+                        b.iter(|| {
+                            let atomic =
+                                Arc::new(crossbeam_epoch::Atomic::new(crossbeam_bench::Node::new(42)));
+                            let handles: Vec<_> = (0..num_threads)
+                                .map(|tid| {
+                                    let atomic = atomic.clone();
+                                    thread::spawn(move || {
+                                        for i in 0..ops_per_thread {
+                                            if i % 20 == 0 {
+                                                // 5% writes
+                                                let new_node = crossbeam_epoch::Owned::new(
+                                                    crossbeam_bench::Node::new(tid * ops_per_thread + i),
+                                                );
+                                                let guard = crossbeam_epoch::pin();
+                                                let old = atomic.swap(new_node, Ordering::Release, &guard);
+                                                unsafe {
+                                                    guard.defer_destroy(old);
+                                                }
+                                            } else {
+                                                // 95% reads
+                                                let guard = crossbeam_epoch::pin();
+                                                let ptr = atomic.load(Ordering::Acquire, &guard);
+                                                black_box(ptr);
+                                            }
                                         }
-                                    } else {
-                                        // 95% reads
-                                        let guard = crossbeam_epoch::pin();
-                                        let ptr = atomic.load(Ordering::Acquire, &guard);
-                                        black_box(ptr);
-                                    }
-                                }
-                            })
-                        })
-                        .collect();
+                                    })
+                                })
+                                .collect();
 
-                    for handle in handles {
-                        handle.join().unwrap();
-                    }
-                });
-            },
-        );
+                            for handle in handles {
+                                handle.join().unwrap();
+                            }
+                        });
+                    },
+                );
 
-        // Seize
-        group.bench_with_input(
-            BenchmarkId::new("seize", threads),
-            threads,
-            |b, &num_threads| {
-                b.iter(|| {
-                    seize_bench::bench_read_heavy(num_threads, ops_per_thread);
-                });
-            },
-        );
+                // Seize
+                group.bench_with_input(
+                    BenchmarkId::new("seize", threads),
+                    threads,
+                    |b, &num_threads| {
+                        b.iter(|| {
+                            seize_bench::bench_read_heavy(num_threads, ops_per_thread);
+                        });
+                    },
+                );
 
-        // Haphazard
-        group.bench_with_input(
-            BenchmarkId::new("haphazard", threads),
-            threads,
-            |b, &num_threads| {
-                b.iter(|| {
-                    haphazard_bench::bench_read_heavy(num_threads, ops_per_thread);
-                });
-            },
-        );
+                // Haphazard
+                group.bench_with_input(
+                    BenchmarkId::new("haphazard", threads),
+                    threads,
+                    |b, &num_threads| {
+                        b.iter(|| {
+                            haphazard_bench::bench_read_heavy(num_threads, ops_per_thread);
+                        });
+                    },
+                );
+        */
     }
 
     group.finish();

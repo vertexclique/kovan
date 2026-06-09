@@ -34,9 +34,12 @@ portable-atomic = { version = "1.11.1", default-features = false, features = [
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
-crossbeam-epoch = "0.9.18"
-seize = "0.5.1"
-haphazard = "0.1.8"
+# Other memory-reclamation crates, used only by the comparison benchmark
+# (`benches/comparison.rs`). Commented out together with that benchmark's
+# "other"-library code; uncomment both to re-enable the cross-library comparison.
+# crossbeam-epoch = "0.9.18"
+# seize = "0.5.1"
+# haphazard = "0.1.8"
 
 [[bench]]
 name = "comparison"

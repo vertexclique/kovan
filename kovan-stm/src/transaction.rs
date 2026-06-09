@@ -28,14 +28,6 @@ struct ReadEntry {
     _keep_alive: Arc<dyn Any + Send + Sync>,
 }
 
-// SAFETY: `lock_atomic` points to an `AtomicU64` (itself Send + Sync) owned
-// by the `TVarInner` that `_keep_alive` keeps alive, so the pointer remains
-// valid wherever the entry travels. Required because read-set map nodes are
-// reclaimed through kovan, whose deferred destructors may run (and drop the
-// Arc) on another thread.
-unsafe impl Send for ReadEntry {}
-unsafe impl Sync for ReadEntry {}
-
 /// Internal entry for the Write Set.
 /// Type erasure is needed to store heterogeneous TVar updates in one map.
 struct WriteEntry {
