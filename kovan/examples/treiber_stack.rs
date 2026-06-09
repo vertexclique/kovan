@@ -15,6 +15,15 @@ struct Node<T> {
     next: Atomic<Node<T>>,
 }
 
+// SAFETY (kovan retirement rule): a retired Node's destructor may run on
+// any thread, and nodes (with the T inside) move between threads — hence
+// `T: Send` for both impls. `Sync` does not require `T: Sync` because no
+// `&T` is ever produced from a shared `&Node`: `value` is taken exclusively
+// (ptr::read) by the single popper that won the head CAS, and the only
+// fields touched through shared references are atomics.
+unsafe impl<T: Send> Send for Node<T> {}
+unsafe impl<T: Send> Sync for Node<T> {}
+
 impl<T> Node<T> {
     fn new(value: T) -> *mut Self {
         Box::into_raw(Box::new(Self {
@@ -37,11 +46,11 @@ unsafe impl<T> Reclaimable for Node<T> {
 }
 
 /// Lock-free Treiber stack
-pub struct TreiberStack<T: 'static> {
+pub struct TreiberStack<T: Send + 'static> {
     head: Atomic<Node<T>>,
 }
 
-impl<T: 'static> TreiberStack<T> {
+impl<T: Send + 'static> TreiberStack<T> {
     pub fn new() -> Self {
         Self {
             head: Atomic::null(),
@@ -49,13 +58,13 @@ impl<T: 'static> TreiberStack<T> {
     }
 }
 
-impl<T: 'static> Default for TreiberStack<T> {
+impl<T: Send + 'static> Default for TreiberStack<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: 'static> TreiberStack<T> {
+impl<T: Send + 'static> TreiberStack<T> {
     pub fn push(&self, value: T, guard: &Guard) {
         let node = Node::new(value);
 
@@ -111,7 +120,7 @@ impl<T: 'static> TreiberStack<T> {
     }
 }
 
-impl<T: 'static> Drop for TreiberStack<T> {
+impl<T: Send + 'static> Drop for TreiberStack<T> {
     fn drop(&mut self) {
         // Drain the stack
         let guard = pin();

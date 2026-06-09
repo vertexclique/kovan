@@ -330,6 +330,23 @@ pub(crate) const RETIRE_FREQ: usize = 64;
 /// Epoch advancement frequency (in terms of retire calls per thread)
 pub(crate) const EPOCH_FREQ: usize = 128;
 
+/// Unconditional reservation marker for a slot's epoch word.
+///
+/// A slot publishing this value is eligible for **every** batch in
+/// `try_retire`'s scan (`epoch < min_epoch` is false for any `min_epoch`),
+/// so every subsequently retired batch inserts a node into the slot and is
+/// deferred until the slot's next traversal. This is the wait-free
+/// completion path for protected loads: when the global epoch keeps
+/// advancing during a load's bounded convergence attempts, the loader
+/// escalates to an unconditional reservation and finishes with one more
+/// pointer load — protected regardless of birth epochs.
+///
+/// The marker is cleared (replaced by the real current epoch, with the
+/// slot's list traversed) at the next `pin()` boundary or outermost guard
+/// drop. The global epoch counter is monotonically increasing from 1 and
+/// can never reach this value.
+pub(crate) const EPOCH_UNCONDITIONAL: u64 = u64::MAX;
+
 /// Helping state for the slow-path / wait-free mechanism
 pub(crate) struct HelpState {
     /// Result pair: (result_ptr, seqno). INVPTR64 in lo means "pending".
@@ -387,6 +404,12 @@ pub(crate) struct ASMRState {
     next_tid: AtomicUsize,
     /// Bitmap of free thread IDs for recycling
     free_tids: TTas<alloc::vec::Vec<usize>>,
+    /// Orphaned batches abandoned by exiting threads. Each entry is a
+    /// finalized refs-node (batch_link = RNODE(batch_first)) whose batch
+    /// could not be submitted via try_retire at thread exit. Stored as
+    /// usize because raw pointers are not Send. Adopted (merged into the
+    /// adopter's accumulating batch) by enqueue_node/flush.
+    orphans: TTas<alloc::vec::Vec<usize>>,
 }
 
 /// Null-initialized page table constant for use in array initialization.
@@ -395,12 +418,26 @@ const NULL_PAGE: AtomicPtr<SlotPage> = AtomicPtr::new(core::ptr::null_mut());
 
 impl ASMRState {
     fn new() -> Self {
+        // The DCAS protocol mixes sub-word AtomicU64 operations with
+        // AtomicU128 compare-exchange on the same 16 bytes. That is only
+        // coherent when the 128-bit atomics are genuine hardware atomics.
+        // If portable-atomic fell back to a lock-based emulation (e.g.
+        // x86_64 without cmpxchg16b), the sub-word stores would bypass the
+        // emulation lock and silently break the DCAS. Watch the "Harper" movie.
+        // https://open.spotify.com/track/2iG7MCJdoM4NfvsK2AVgqY
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x"))]
+        assert!(
+            portable_atomic::AtomicU128::is_lock_free(),
+            "kovan requires lock-free 128-bit atomics \
+             [x86_64: cmpxchg16b; aarch64: ldxp/stxp OR LSE; s390x: cdsg]"
+        );
         Self {
             pages: [NULL_PAGE; MAX_PAGES],
             epoch: AtomicU64::new(1),
             slow_counter: AtomicU64::new(0),
             next_tid: AtomicUsize::new(0),
             free_tids: TTas::new(alloc::vec::Vec::new()),
+            orphans: TTas::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -511,16 +548,49 @@ impl ASMRState {
         }
     }
 
-    /// Release a thread ID for recycling
-    pub(crate) fn free_tid(&self, tid: usize) {
-        // Mark all slots inactive (page is guaranteed to exist)
+    /// Release a thread ID for recycling.
+    ///
+    /// Deactivation must be race-aware: a concurrent `try_retire` may insert
+    /// a node into a slot at any time before the slot reads INVPTR. A blind
+    /// `store(INVPTR)` would obliterate such a node — its refs-decrement
+    /// would never happen and the whole batch would leak. So the list word
+    /// is *exchanged* to INVPTR and any captured list is returned to the
+    /// caller for traversal.
+    ///
+    /// Seqnos (the `hi` halves) are deliberately preserved: the slow-path
+    /// parity protocol relies on seqnos never repeating for a slot, even
+    /// across tid recycling. Only the epoch `lo` is cleared (lowering an
+    /// epoch is the safe direction — the slot merely stops being eligible).
+    ///
+    /// Returns up to SLOTS_PER_THREAD captured list heads that the caller
+    /// must traverse (entries are null when there was nothing to capture).
+    pub(crate) fn free_tid(&self, tid: usize) -> [u64; SLOTS_PER_THREAD] {
         let slots = self.thread_slots(tid);
-        for j in 0..SLOTS_PER_THREAD {
-            slots.first[j].store(INVPTR as u64, 0, Ordering::Release);
-            slots.epoch[j].store(0, 0, Ordering::Release);
+        let mut captured = [0u64; SLOTS_PER_THREAD];
+        for (j, cap) in captured.iter_mut().enumerate() {
+            // Stop eligibility first so try_retire's insert-phase re-check
+            // (epoch < min_epoch) rejects the slot before we capture.
+            slots.epoch[j].store_lo(0, Ordering::SeqCst);
+            let first = slots.first[j].exchange_lo(INVPTR as u64, Ordering::AcqRel);
+            if first != INVPTR as u64 && first != 0 {
+                *cap = first;
+            }
         }
         let mut free = self.free_tids.lock();
         free.push(tid);
+        captured
+    }
+
+    /// Park an orphaned batch (finalized refs-node) for later adoption.
+    pub(crate) fn push_orphan(&self, refs_node: usize) {
+        let mut orphans = self.orphans.lock();
+        orphans.push(refs_node);
+    }
+
+    /// Take one orphaned batch for adoption, if any.
+    pub(crate) fn pop_orphan(&self) -> Option<usize> {
+        let mut orphans = self.orphans.lock();
+        orphans.pop()
     }
 
     /// HR_NUM getter

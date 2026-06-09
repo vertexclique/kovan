@@ -14,6 +14,16 @@ pub(crate) struct Node<T> {
     next: Atomic<Node<T>>,
 }
 
+// SAFETY (kovan retirement rule): a retired Node's destructor may run on
+// any thread, and nodes (with the T inside) move between threads — hence
+// `T: Send` for both impls. `Sync` does not require `T: Sync` because no
+// `&T` is ever produced from a shared `&Node`: `data` is taken exclusively
+// by the single receiver that won the head CAS (or dropped by the deferred
+// destructor), and the only fields touched through shared references are
+// atomics.
+unsafe impl<T: Send> Send for Node<T> {}
+unsafe impl<T: Send> Sync for Node<T> {}
+
 impl<T> Node<T> {
     fn new(data: Option<T>) -> *mut Self {
         Box::into_raw(Box::new(Self {
@@ -24,7 +34,7 @@ impl<T> Node<T> {
     }
 }
 
-pub(crate) struct Channel<T: 'static> {
+pub(crate) struct Channel<T: Send + 'static> {
     head: Atomic<Node<T>>,
     tail: Atomic<Node<T>>,
     receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
@@ -34,7 +44,7 @@ pub(crate) struct Channel<T: 'static> {
     disconnected: AtomicBool,
 }
 
-impl<T: 'static> Channel<T> {
+impl<T: Send + 'static> Channel<T> {
     pub(crate) fn new() -> Self {
         let sentinel = Node::new(None);
         Self {
@@ -55,7 +65,7 @@ impl<T: 'static> Channel<T> {
     }
 }
 
-impl<T: 'static> Drop for Channel<T> {
+impl<T: Send + 'static> Drop for Channel<T> {
     fn drop(&mut self) {
         // Sentinel node retirement logic
         //
@@ -89,11 +99,11 @@ impl<T: 'static> Drop for Channel<T> {
 }
 
 /// The sending half of an unbounded channel.
-pub struct Sender<T: 'static> {
+pub struct Sender<T: Send + 'static> {
     inner: Arc<Channel<T>>,
 }
 
-impl<T: 'static> Clone for Sender<T> {
+impl<T: Send + 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -102,7 +112,7 @@ impl<T: 'static> Clone for Sender<T> {
     }
 }
 
-impl<T: 'static> Drop for Sender<T> {
+impl<T: Send + 'static> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last sender dropped — mark channel as disconnected and wake all receivers.
@@ -112,15 +122,15 @@ impl<T: 'static> Drop for Sender<T> {
     }
 }
 
-unsafe impl<T: 'static + Send> Send for Sender<T> {}
-unsafe impl<T: 'static + Send> Sync for Sender<T> {}
+unsafe impl<T: Send + 'static + Send> Send for Sender<T> {}
+unsafe impl<T: Send + 'static + Send> Sync for Sender<T> {}
 
 /// The receiving half of an unbounded channel.
-pub struct Receiver<T: 'static> {
+pub struct Receiver<T: Send + 'static> {
     inner: Arc<Channel<T>>,
 }
 
-impl<T: 'static> Clone for Receiver<T> {
+impl<T: Send + 'static> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -128,11 +138,11 @@ impl<T: 'static> Clone for Receiver<T> {
     }
 }
 
-unsafe impl<T: 'static + Send> Send for Receiver<T> {}
-unsafe impl<T: 'static + Send> Sync for Receiver<T> {}
+unsafe impl<T: Send + 'static + Send> Send for Receiver<T> {}
+unsafe impl<T: Send + 'static + Send> Sync for Receiver<T> {}
 
 /// Creates a channel of unbounded capacity.
-pub fn channel<T: 'static>() -> (Sender<T>, Receiver<T>) {
+pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Channel::new());
     (
         Sender {
@@ -142,7 +152,7 @@ pub fn channel<T: 'static>() -> (Sender<T>, Receiver<T>) {
     )
 }
 
-impl<T: 'static> Sender<T> {
+impl<T: Send + 'static> Sender<T> {
     /// Sends a message into the channel.
     pub fn send(&self, t: T) {
         let node = Node::new(Some(t));
@@ -199,7 +209,7 @@ impl<T: 'static> Sender<T> {
     }
 }
 
-impl<T: 'static> Receiver<T> {
+impl<T: Send + 'static> Receiver<T> {
     /// Returns `true` if all senders have been dropped.
     pub fn is_disconnected(&self) -> bool {
         self.inner.disconnected.load(Ordering::Acquire)
@@ -337,14 +347,14 @@ impl<T: 'static> Receiver<T> {
         use std::pin::Pin;
         use std::task::{Context, Poll};
 
-        struct RecvFuture<'a, T: 'static> {
+        struct RecvFuture<'a, T: Send + 'static> {
             receiver: &'a Receiver<T>,
             signal: Arc<AsyncSignal>,
         }
 
-        impl<'a, T: 'static> Unpin for RecvFuture<'a, T> {}
+        impl<'a, T: Send + 'static> Unpin for RecvFuture<'a, T> {}
 
-        impl<'a, T: 'static> Future for RecvFuture<'a, T> {
+        impl<'a, T: Send + 'static> Future for RecvFuture<'a, T> {
             type Output = Option<T>;
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
