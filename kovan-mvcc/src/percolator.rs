@@ -256,8 +256,13 @@ impl Txn {
     /// - RepeatableRead: uses start_ts (standard SI)
     /// - Serializable: uses start_ts + tracks key in read_set
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
-        // 0. Check local write buffer first (read-your-own-writes, even before prewrite)
-        if let Some((lock_type, value_opt)) = self.writes.get(key) {
+        // 0. Check local write buffer first (read-your-own-writes, even before
+        // prewrite). Skip the guarded map lookup entirely when there are no
+        // buffered writes (the common case for read-only transactions) — the
+        // is_empty() check is a single relaxed atomic load, no kovan pin.
+        if !self.writes.is_empty()
+            && let Some((lock_type, value_opt)) = self.writes.get(key)
+        {
             // Track in read_set for Serializable even on local hits
             if let Some(ref read_set) = self.read_set {
                 read_set.insert(key.to_string(), ());
