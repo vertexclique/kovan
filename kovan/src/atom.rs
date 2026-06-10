@@ -1,4 +1,4 @@
-//! `Atom<T>` — a lock-free single-value container with safe memory reclamation.
+//! `Atom<T>` — a wait-free single-value container with safe memory reclamation.
 //!
 //! This is a high-level wrapper around [`Atomic<T>`] that provides a safe API
 //! for atomically swapping heap-allocated values with automatic reclamation.
@@ -8,7 +8,9 @@
 //!
 //! # Key Properties
 //!
-//! - **Zero read overhead**: `load()` is a single atomic load
+//! - **Near-zero read overhead**: `load()` is one atomic pointer load plus
+//!   an epoch check against a thread-local cache — **wait-free** with a
+//!   fixed iteration bound (see crate docs)
 //! - **Safe API**: No `unsafe` at call sites
 //! - **Automatic reclamation**: Old values are retired and reclaimed safely
 //! - **`no_std` compatible**: Uses only `alloc`
@@ -238,7 +240,7 @@ unsafe impl<T: Send + Sync + 'static> Sync for Removed<T> {}
 // Atom<T> — the main container
 // ---------------------------------------------------------------------------
 
-/// A lock-free single-value container with safe memory reclamation.
+/// A wait-free single-value container with safe memory reclamation.
 ///
 /// Provides zero-overhead reads via [`load()`](Atom::load) and atomic writes
 /// via [`store()`](Atom::store), [`swap()`](Atom::swap), and

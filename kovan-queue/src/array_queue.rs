@@ -68,7 +68,7 @@ impl<T> ArrayQueue<T> {
                 let next = tail + 1;
                 if self
                     .tail
-                    .compare_exchange(tail, next, Ordering::SeqCst, Ordering::Relaxed)
+                    .compare_exchange_weak(tail, next, Ordering::SeqCst, Ordering::Relaxed)
                     .is_ok()
                 {
                     unsafe {
@@ -104,7 +104,7 @@ impl<T> ArrayQueue<T> {
                 let next = head + 1;
                 if self
                     .head
-                    .compare_exchange(head, next, Ordering::SeqCst, Ordering::Relaxed)
+                    .compare_exchange_weak(head, next, Ordering::SeqCst, Ordering::Relaxed)
                     .is_ok()
                 {
                     let value = unsafe { slot.value.get().read().assume_init() };

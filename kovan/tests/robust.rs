@@ -1,10 +1,8 @@
-//! Tests for robustness features
-//!
-//! These tests verify the robust feature works correctly
+//! Robustness tests: stalled readers, contention, bounded memory
 
 #![allow(unused_unsafe)]
 
-use kovan::{Atomic, BirthEra, RetiredNode, current_era, pin, retire};
+use kovan::{Atomic, RetiredNode, pin, retire};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -23,44 +21,6 @@ impl RobustNode {
             value,
         }))
     }
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_era_advancement() {
-    // Test that era advances over time
-    let start_era = current_era();
-
-    // Trigger era advancement by creating many birth eras
-    for _ in 0..300 {
-        let _ = BirthEra::new();
-    }
-
-    let end_era = current_era();
-    assert!(end_era > start_era, "Era should advance");
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_birth_era_ordering() {
-    // Test that birth eras are ordered correctly
-    let era1 = BirthEra::new();
-
-    // Advance era
-    for _ in 0..300 {
-        let _ = BirthEra::new();
-    }
-
-    let era2 = BirthEra::new();
-
-    assert!(
-        era1.is_older_than(era2.value()),
-        "Earlier era should be older"
-    );
-    assert!(
-        !era2.is_older_than(era1.value()),
-        "Later era should not be older"
-    );
 }
 
 #[test]
@@ -281,45 +241,4 @@ fn test_bounded_memory_with_stalls() {
             retire(old.as_raw());
         }
     }
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn test_era_tracking_concurrent() {
-    // Test era tracking under concurrent load
-    const NUM_THREADS: usize = 8;
-    const ITERATIONS: usize = 1000;
-
-    let mut handles = vec![];
-    let eras = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    for _ in 0..NUM_THREADS {
-        let eras = eras.clone();
-
-        handles.push(thread::spawn(move || {
-            for _ in 0..ITERATIONS {
-                let era = BirthEra::new();
-                eras.lock().unwrap().push(era.value());
-
-                // Do some work
-                let _guard = pin();
-            }
-        }));
-    }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    let eras = eras.lock().unwrap();
-    println!("Era tracking: collected {} era values", eras.len());
-
-    // Verify eras are monotonically increasing (with some tolerance for concurrency)
-    let mut sorted = eras.clone();
-    sorted.sort();
-
-    let unique_eras: std::collections::HashSet<_> = eras.iter().collect();
-    println!("  Unique eras: {}", unique_eras.len());
-
-    assert!(unique_eras.len() > 1, "Should have multiple eras");
 }

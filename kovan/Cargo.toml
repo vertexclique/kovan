@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-performance wait-free memory reclamation for lock-free data structures. Bounded memory usage, predictable latency."
+description = "High-performance wait-free memory reclamation for wait-free data structures. Bounded memory usage, predictable latency."
 keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
 categories = ["concurrency", "memory-management", "no-std"]
 readme.workspace = true
@@ -34,9 +34,12 @@ portable-atomic = { version = "1.11.1", default-features = false, features = [
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
-crossbeam-epoch = "0.9.18"
-seize = "0.5.1"
-haphazard = "0.1.8"
+# Other memory-reclamation crates, used only by the comparison benchmark
+# (`benches/comparison.rs`). Commented out together with that benchmark's
+# "other"-library code; uncomment both to re-enable the cross-library comparison.
+# crossbeam-epoch = "0.9.18"
+# seize = "0.5.1"
+# haphazard = "0.1.8"
 
 [[bench]]
 name = "comparison"

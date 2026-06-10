@@ -85,12 +85,18 @@ impl RetiredNode {
     /// The birth_epoch must be set at allocation time (not retirement time)
     /// so that threads pinned before this allocation can be correctly identified
     /// as not needing protection for this node.
+    ///
+    /// The epoch comes from a thread-local cache (refreshed at every `pin()`)
+    /// rather than a direct read of the global counter, avoiding a contended
+    /// atomic load on every allocation. The cached value is always ≤ the true
+    /// global epoch, so it can only defer reclamation more conservatively,
+    /// never prematurely. See `guard::current_birth_epoch`.
     pub fn new() -> Self {
         Self {
             next: AtomicPtr::new(core::ptr::null_mut()),
             batch_link: AtomicPtr::new(core::ptr::null_mut()),
             refs_or_next: AtomicUsize::new(0),
-            birth_epoch: UnsafeCell::new(crate::slot::global().get_epoch()),
+            birth_epoch: UnsafeCell::new(crate::guard::current_birth_epoch()),
             destructor: UnsafeCell::new(None),
         }
     }

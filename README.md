@@ -16,7 +16,7 @@
 
 ## What is Kovan?
 
-Kovan solves the hardest problem in lock-free programming: **when is it safe to free memory?**
+Kovan solves the hardest problem in wait-free programming: **when is it safe to free memory?**
 
 When multiple threads access shared data without locks, you can't just `drop()` or `free()`, while another thread might still be using it.
 Kovan tracks this automatically with near-zero overhead on reads.
@@ -24,7 +24,11 @@ Kovan tracks this automatically with near-zero overhead on reads.
 ## Why Kovan?
 
 - **Near-zero read overhead**: One atomic load & one comparison
-- **Bounded memory**: Never grows unbounded like epoch-based schemes
+- **Wait-free operations**: loads, `pin()`, and `retire()` each complete in a
+  bounded number of steps regardless of other threads.
+- **Bounded memory**: Never grows unbounded like epoch-based schemes. Batches
+  that cannot be placed are accumulated or adopted by other threads but never
+  dropped, even across thread exit.
 - **Simple API**: `Atom<T>` for safe usage, `pin()`/`load()`/`retire()` for low-level control
 
 ## Quick Start

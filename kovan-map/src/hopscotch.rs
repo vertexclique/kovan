@@ -63,6 +63,15 @@ impl<K: Clone, V: Clone> Clone for Entry<K, V> {
     }
 }
 
+// SAFETY (kovan retirement rule): a retired Entry's destructor may run on
+// any thread, and entries (with K and V inside) move between threads —
+// hence `K: Send, V: Send` for Send. Lookups DO produce `&K`/`&V` from a
+// shared `&Entry` (get() clones V through &V under concurrent readers),
+// so Sync additionally requires `K: Sync, V: Sync` — the same bounds the
+// map-level Sync impl has always required for sharing the map.
+unsafe impl<K: Send, V: Send> Send for Entry<K, V> {}
+unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Entry<K, V> {}
+
 /// The hash table structure
 #[repr(C)]
 struct Table<K, V> {
@@ -71,6 +80,13 @@ struct Table<K, V> {
     capacity: usize,
     mask: usize,
 }
+
+// SAFETY (kovan retirement rule): same reasoning as Entry — a retired
+// Table's destructor may run on any thread (hence K, V: Send via the
+// contained entries); shared access to entries through a `&Table` carries
+// Entry's Sync requirements.
+unsafe impl<K: Send, V: Send> Send for Table<K, V> {}
+unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Table<K, V> {}
 
 impl<K, V> Table<K, V> {
     fn new(capacity: usize) -> Self {
@@ -104,6 +120,29 @@ impl<K, V> Table<K, V> {
         // SAFETY: Internal indices are calculated via mask or bounded offset loops.
         // The buckets array has padding to handle overflow up to NEIGHBORHOOD_SIZE.
         unsafe { self.buckets.get_unchecked(idx) }
+    }
+}
+
+impl<K, V> Drop for Table<K, V> {
+    fn drop(&mut self) {
+        // Exclusive at this point: either the map itself is being dropped,
+        // or kovan reclaimed the table after every guard that could observe
+        // it has been released. Slots hold exactly the entries that were
+        // never individually unlinked+retired (remove/clear null the slot
+        // before retiring), so each entry is freed exactly once. Without
+        // this, every resize leaked the old table's entries.
+        let guard = pin();
+        for i in 0..(self.capacity + NEIGHBORHOOD_SIZE) {
+            let entry_ptr = self.buckets[i]
+                .slot
+                .load(Ordering::Relaxed, &guard)
+                .as_raw();
+            if !entry_ptr.is_null() {
+                unsafe {
+                    drop(Box::from_raw(entry_ptr));
+                }
+            }
+        }
     }
 }
 
@@ -328,6 +367,41 @@ where
         self.insert_impl(key, value, true)
     }
 
+    /// Remove **all** nodes matching `key`, returning the most recent value
+    /// if the key was present.
+    ///
+    /// [`remove`](Self::remove) unlinks only the first matching entry.
+    /// Insert/remove races can transiently leave more than one entry for
+    /// the same key ("versions"); after a plain `remove()` an older version
+    /// would become visible again. This method keeps removing until a full
+    /// scan finds no match, so the key is guaranteed absent at the
+    /// linearization point of the final scan.
+    ///
+    /// Use `remove()` for single-version removal semantics and
+    /// `force_remove()` when the key must be fully evicted.
+    ///
+    /// Note: a concurrent `insert` of the same key can land after the final
+    /// scan, as with any removal under contention.
+    pub fn force_remove<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let mut newest = None;
+        loop {
+            match self.remove(key) {
+                Some(v) => {
+                    // The first removal unlinks the first match in scan
+                    // order — the live (most recent) version.
+                    if newest.is_none() {
+                        newest = Some(v);
+                    }
+                }
+                None => return newest,
+            }
+        }
+    }
+
     /// Removes a key from the map, returning the value at the key if the key was previously in the map.
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
@@ -335,13 +409,17 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let hash = self.hasher.hash_one(key);
+        // First successful removal's value is the linearized result;
+        // re-validation retries only evict migrated clones.
+        let mut result: Option<V> = None;
 
-        loop {
+        'outer: loop {
             self.wait_for_resize();
 
             let guard = pin();
             let table_ptr = self.table.load(Ordering::Acquire, &guard);
-            let table = unsafe { &*table_ptr.as_raw() };
+            let table_raw = table_ptr.as_raw();
+            let table = unsafe { &*table_raw };
 
             if self.resizing.load(Ordering::Acquire) {
                 continue;
@@ -352,7 +430,7 @@ where
 
             let hop_info = bucket.hop_info.load(Ordering::Acquire);
             if hop_info == 0 {
-                return None;
+                return result;
             }
 
             for offset in 0..NEIGHBORHOOD_SIZE {
@@ -378,11 +456,14 @@ where
                                     bucket.hop_info.fetch_and(mask, Ordering::Release);
 
                                     unsafe { retire(entry_ptr.as_raw()) };
+                                    if result.is_none() {
+                                        result = Some(old_value);
+                                    }
 
                                     // Saturating decrement: prevent count from wrapping
                                     // to usize::MAX which would trigger catastrophic
                                     // cascading resizes.
-                                    if let Ok(prev) = self.count.fetch_update(
+                                    let shrink_to = if let Ok(prev) = self.count.fetch_update(
                                         Ordering::Relaxed,
                                         Ordering::Relaxed,
                                         |c| c.checked_sub(1),
@@ -391,16 +472,30 @@ where
                                         let current_capacity = table.capacity;
                                         let load_factor =
                                             new_count as f64 / current_capacity as f64;
+                                        (load_factor < SHRINK_THRESHOLD
+                                            && current_capacity > MIN_CAPACITY)
+                                            .then_some(current_capacity / 2)
+                                    } else {
+                                        None
+                                    };
 
-                                        if load_factor < SHRINK_THRESHOLD
-                                            && current_capacity > MIN_CAPACITY
-                                        {
-                                            drop(guard);
-                                            self.try_resize(current_capacity / 2);
-                                        }
+                                    // Re-validate: a concurrent migration may
+                                    // have cloned this entry into a new table
+                                    // before we unlinked it here — redo the
+                                    // removal on the current table so the key
+                                    // does not resurrect.
+                                    if self.resizing.load(Ordering::SeqCst)
+                                        || self.table.load(Ordering::SeqCst, &guard).as_raw()
+                                            != table_raw
+                                    {
+                                        continue 'outer;
                                     }
 
-                                    return Some(old_value);
+                                    if let Some(cap) = shrink_to {
+                                        drop(guard);
+                                        self.try_resize(cap);
+                                    }
+                                    return result;
                                 }
                                 Err(_) => {
                                     break;
@@ -410,7 +505,7 @@ where
                     }
                 }
             }
-            return None;
+            return result;
         }
     }
 
@@ -836,15 +931,7 @@ where
         }
 
         if !success {
-            for i in 0..(new_table_ref.capacity + NEIGHBORHOOD_SIZE) {
-                let bucket = new_table_ref.get_bucket(i);
-                let entry_ptr = bucket.slot.load(Ordering::Relaxed, &guard);
-                if !entry_ptr.is_null() {
-                    unsafe {
-                        drop(Box::from_raw(entry_ptr.as_raw()));
-                    }
-                }
-            }
+            // The unpublished new table's destructor frees its cloned entries.
             unsafe {
                 drop(Box::from_raw(new_table));
             }
@@ -867,6 +954,27 @@ where
     /// Returns an iterator over the map keys.
     pub fn keys(&self) -> HopscotchKeys<'_, K, V, S> {
         HopscotchKeys { iter: self.iter() }
+    }
+
+    /// Returns an iterator over the map values (clones `V`).
+    pub fn values(&self) -> HopscotchValues<'_, K, V, S> {
+        HopscotchValues { iter: self.iter() }
+    }
+
+    /// Returns `true` if the key is present.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
+    /// Insert all `(K, V)` pairs from `iter`. Takes `&self` (concurrent map).
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
     }
 
     /// Get the underlying hasher.
@@ -924,6 +1032,105 @@ where
     }
 }
 
+/// Iterator over HopscotchMap values (clones `V`).
+pub struct HopscotchValues<'a, K: 'static, V: 'static, S> {
+    iter: HopscotchIter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for HopscotchValues<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = V;
+
+    #[inline]
+    fn next(&mut self) -> Option<V> {
+        self.iter.next().map(|(_, v)| v)
+    }
+}
+
+/// Owned iterator yielding `(K, V)` by value — moves out of the entries, no
+/// clone. Each drained slot is nulled so the table destructor stays a no-op.
+pub struct HopscotchIntoIter<K: 'static, V: 'static> {
+    table: *mut Table<K, V>,
+    bucket_idx: usize,
+    guard: kovan::Guard,
+}
+
+impl<K, V> Iterator for HopscotchIntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        let table = unsafe { &*self.table };
+        while self.bucket_idx < table.buckets.len() {
+            let bucket = table.get_bucket(self.bucket_idx);
+            self.bucket_idx += 1;
+            let entry = bucket.slot.load(Ordering::Acquire, &self.guard).as_raw();
+            if !entry.is_null() {
+                bucket.slot.store(
+                    unsafe { Shared::from_raw(core::ptr::null_mut()) },
+                    Ordering::Relaxed,
+                );
+                let k = unsafe { core::ptr::read(&(*entry).key) };
+                let v = unsafe { core::ptr::read(&(*entry).value) };
+                unsafe {
+                    alloc::alloc::dealloc(
+                        entry as *mut u8,
+                        core::alloc::Layout::new::<Entry<K, V>>(),
+                    );
+                }
+                return Some((k, v));
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> Drop for HopscotchIntoIter<K, V> {
+    fn drop(&mut self) {
+        while self.next().is_some() {}
+        // All slots nulled above; Table::drop frees only the bucket array.
+        unsafe { drop(Box::from_raw(self.table)) };
+    }
+}
+
+impl<K, V, S> IntoIterator for HopscotchMap<K, V, S>
+where
+    K: 'static,
+    V: 'static,
+{
+    type Item = (K, V);
+    type IntoIter = HopscotchIntoIter<K, V>;
+
+    fn into_iter(self) -> HopscotchIntoIter<K, V> {
+        let mut me = core::mem::ManuallyDrop::new(self);
+        let guard = pin();
+        let table = me.table.load(Ordering::Relaxed, &guard).as_raw();
+        unsafe { core::ptr::drop_in_place(&mut me.hasher) };
+        HopscotchIntoIter {
+            table,
+            bucket_idx: 0,
+            guard,
+        }
+    }
+}
+
+impl<K, V, S> core::iter::FromIterator<(K, V)> for HopscotchMap<K, V, S>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
+    S: BuildHasher + Default,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let map = Self::with_hasher(S::default());
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
+    }
+}
+
 impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>
 where
     K: Hash + Eq + Clone + 'static,
@@ -964,21 +1171,9 @@ unsafe impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> Sync for HopscotchMa
 impl<K, V, S> Drop for HopscotchMap<K, V, S> {
     fn drop(&mut self) {
         // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
-        // readers can exist. Free nodes immediately instead of deferring via `retire()`.
+        // readers can exist. The Table's destructor frees the remaining entries.
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
-        let table = unsafe { &*table_ptr.as_raw() };
-
-        for i in 0..(table.capacity + NEIGHBORHOOD_SIZE) {
-            let bucket = table.get_bucket(i);
-            let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
-
-            if !entry_ptr.is_null() {
-                unsafe {
-                    drop(Box::from_raw(entry_ptr.as_raw()));
-                }
-            }
-        }
 
         unsafe {
             drop(Box::from_raw(table_ptr.as_raw()));

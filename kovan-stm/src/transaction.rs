@@ -3,7 +3,6 @@ use super::{Stm, StmError, TVar};
 use alloc::boxed::Box;
 use kovan::Shared;
 use kovan::{Guard, retire};
-use kovan_map::HashMap;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -46,7 +45,7 @@ pub struct Transaction<'a> {
     /// Timestamp at the start of the transaction.
     read_version: u64,
     /// Map of TVar address -> Read Record.
-    read_set: HashMap<TVarId, ReadEntry>,
+    read_set: BTreeMap<TVarId, ReadEntry>,
     /// Map of TVar address -> Write Record.
     write_set: BTreeMap<TVarId, WriteEntry>, // BTreeMap for deterministic locking order
     /// Side effects to run only after a successful commit.
@@ -76,7 +75,7 @@ impl<'a> Transaction<'a> {
             stm,
             guard,
             read_version: stm.global_clock.load(Ordering::Acquire),
-            read_set: HashMap::new(),
+            read_set: BTreeMap::new(),
             write_set: BTreeMap::new(),
             post_commit_hooks: Vec::new(),
             post_rollback_hooks: Vec::new(),
@@ -325,7 +324,7 @@ impl<'a> Transaction<'a> {
         let mut valid = true;
         for (id, entry) in &self.read_set {
             // If writing to this var, we have lock, no need to check
-            if write_set.contains_key(&id) {
+            if write_set.contains_key(id) {
                 continue;
             }
 

@@ -56,12 +56,17 @@ pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
 /// - Otherwise: follow batch_link to refs-node, fetch_sub(1)
 /// - If refs reaches 0: add refs-node to free list
 ///
-/// # Wait-free bound: O(T) where T = number of active threads
+/// # Progress: wait-free; bound proportional to retirement history
 ///
-/// Each slot receives at most one node per `try_retire()` call. Between two
-/// `do_update()` calls on the same slot, at most T `try_retire()`
-/// calls can insert nodes (one per thread). The list length — and thus the
-/// number of loop iterations — is bounded by T.
+/// The list is captured atomically by the caller's exchange, so its length
+/// is fixed before traversal begins and the loop terminates in finitely
+/// many steps. The length is NOT bounded by the thread count: each
+/// `try_retire()` call system-wide may insert one node into this slot, and
+/// a slot is only traversed when its owner transitions it (next `pin()`
+/// after an epoch change, `flush()`, or exit). A thread returning from a
+/// long quiescence therefore owes a traversal proportional to the number
+/// of batches retired since its last transition. Long-idle threads should
+/// call `flush()` before idling.
 ///
 /// # Safety
 ///
