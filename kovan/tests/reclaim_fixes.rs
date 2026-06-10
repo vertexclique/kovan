@@ -76,6 +76,7 @@ fn run_pinned_scenario(n_pinned: usize) -> (usize, usize) {
 /// phase cannot place the batch. The batch must be kept (accumulated) and
 /// submitted later — never dropped.
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn no_batch_leak_with_many_pinned_threads() {
     let _l = test_lock();
     let (drops, expected) = run_pinned_scenario(80);
@@ -87,6 +88,7 @@ fn no_batch_leak_with_many_pinned_threads() {
 
 /// Control: the same scenario well under the slot threshold.
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn no_batch_leak_with_few_pinned_threads() {
     let _l = test_lock();
     let (drops, expected) = run_pinned_scenario(8);
@@ -97,6 +99,7 @@ fn no_batch_leak_with_few_pinned_threads() {
 /// eligible slots) must park the batch on the orphan list; a later retiring
 /// thread adopts and frees it. Nothing leaks across thread exit.
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn orphaned_partial_batch_is_adopted() {
     let _l = test_lock();
     DROPS.store(0, Ordering::SeqCst);
@@ -165,6 +168,7 @@ fn orphaned_partial_batch_is_adopted() {
 /// loaded in the current critical section (the slot list drain is deferred
 /// to the next pin boundary).
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn flush_under_live_guard_keeps_protection() {
     let _l = test_lock();
     static TARGET_DROPPED: AtomicBool = AtomicBool::new(false);
@@ -256,6 +260,7 @@ fn reentrant_destructor_chains_drop_exactly_once() {
 /// bounded convergence loop and the unconditional-reservation escalation
 /// under maximum epoch movement.
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn loads_remain_valid_under_epoch_churn() {
     let _l = test_lock();
     const READERS: usize = 4;
@@ -314,6 +319,7 @@ fn loads_remain_valid_under_epoch_churn() {
 /// flush()/epoch advances. Regression for the unhelped-advance starvation
 /// (flush used to advance max_threads+2 times without helping).
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn pin_completes_under_flush_storm() {
     let _l = test_lock();
     let stop = Arc::new(AtomicBool::new(false));
@@ -349,6 +355,7 @@ fn pin_completes_under_flush_storm() {
 /// pinned readers. Exercises free_tid's exchange-based deactivation and tid
 /// recycling; everything must be freed after the unwind.
 #[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn thread_churn_frees_everything() {
     let _l = test_lock();
     DROPS.store(0, Ordering::SeqCst);

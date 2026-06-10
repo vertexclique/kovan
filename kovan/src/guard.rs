@@ -971,9 +971,11 @@ impl Handle {
             let was_reclaiming = self.in_reclaim.get();
             self.in_reclaim.set(true);
 
-            // Adopt at most one orphaned batch from exited threads so
-            // orphans cannot accumulate indefinitely.
-            self.adopt_orphans();
+            // NB: orphan adoption is intentionally NOT done here. retire() must
+            // stay wait-free, and the orphan list is behind a spin lock; taking
+            // it on the retire path would make completion depend on another
+            // thread. Orphans (created only at thread exit) are drained by
+            // flush()/cleanup() instead.
 
             // Capture and detach the batch BEFORE try_retire: destructors
             // running inside try_retire (via free_batch_list) may re-enter
@@ -1365,54 +1367,17 @@ impl Handle {
         let tid = self.tid();
         let global = self.global();
 
-        // Phase 1: Adopt any orphaned batch, then finalize and submit the
-        // partial batch if any. On failure, keep accumulating (nothing was
-        // published) — the nodes are deferred, never leaked.
-        self.adopt_orphans();
-        let count = self.batch_count.get();
-        if count > 0 {
-            let first = self.batch_first.get();
-            let last = self.batch_last.get();
-            self.batch_first.set(core::ptr::null_mut());
-            self.batch_last.set(core::ptr::null_mut());
-            self.batch_count.set(0);
-            unsafe {
-                (*last)
-                    .batch_link
-                    .store(rnode_mark(first), Ordering::SeqCst);
-            }
-            let ok = self.try_retire(first, last);
-            if !ok {
-                self.merge_batch(first, last);
-            }
-        }
-
-        // Phase 2: Help pending slow-path threads, then advance the epoch
-        // once so other threads' next pin() transitions (and drains) their
-        // slots. A single advance suffices: batch eligibility compares slot
-        // epochs against batch birth epochs, which advancing does not change.
-        //
-        // Helping BEFORE advancing is load-bearing for wait-freedom: the
-        // slow-path bound for pin() relies on the invariant that every
-        // advance_epoch() is preceded by help_read() on the advancing
-        // thread. The previous max_threads+2 unhelped advances could starve
-        // a slow-path pinner indefinitely (e.g. via Atom::drop -> flush in
-        // a loop).
-        self.help_read(tid);
-        global.advance_epoch();
-
-        // Phase 3: Traverse own reservation slots to drain pending lists.
-        // This is the same logic as do_update but without storing a new epoch.
-        //
-        // Skipped while any Guard is live on this thread (saved_pin > 0):
-        // the slot list is what protects pointers loaded earlier in the
-        // current critical section, and draining it here would decrement
-        // their batches' refs and allow them to be freed under the guard.
-        // The list drains at the next pin() boundary instead.
+        // With no live Guard, deactivate and drain our own reservation slots
+        // before submitting the batch. Two effects: pending lists are
+        // reclaimed, and the batch below is not deferred to our own slot —
+        // otherwise a small batch (e.g. a lone refs-node from a single
+        // retire) could never be placed and would leak. Other threads' slots
+        // still gate concurrent safety; we restore ours below.
+        let hr_num = global.hr_num();
         if saved_pin == 0 {
-            let hr_num = global.hr_num();
             for i in 0..hr_num {
-                let first = global.thread_slots(tid).first[i].exchange_lo(0, Ordering::AcqRel);
+                let first =
+                    global.thread_slots(tid).first[i].exchange_lo(INVPTR as u64, Ordering::AcqRel);
                 if first != 0 && first != INVPTR as u64 {
                     let mut free_list = self.free_list.get();
                     let mut list_count = self.list_count.get();
@@ -1431,7 +1396,38 @@ impl Handle {
             }
         }
 
-        // Drain the accumulated free list
+        // Adopt any orphaned batch, then finalize and submit the partial
+        // batch. On failure, keep accumulating — never leaked.
+        self.adopt_orphans();
+        let count = self.batch_count.get();
+        if count > 0 {
+            let first = self.batch_first.get();
+            let last = self.batch_last.get();
+            self.batch_first.set(core::ptr::null_mut());
+            self.batch_last.set(core::ptr::null_mut());
+            self.batch_count.set(0);
+            unsafe {
+                (*last)
+                    .batch_link
+                    .store(rnode_mark(first), Ordering::SeqCst);
+            }
+            if !self.try_retire(first, last) {
+                self.merge_batch(first, last);
+            }
+        }
+
+        // Reactivate our reservation slots (active-empty) for future pins.
+        if saved_pin == 0 {
+            for i in 0..hr_num {
+                global.thread_slots(tid).first[i].store_lo(0, Ordering::Release);
+            }
+        }
+
+        // Help pending slow-path threads before advancing the epoch (the
+        // wait-free pin() bound requires every advance to be helped first).
+        self.help_read(tid);
+        global.advance_epoch();
+
         self.drain_free_list();
 
         self.pin_count.set(saved_pin);

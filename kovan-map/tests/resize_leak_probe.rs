@@ -28,10 +28,26 @@ impl Drop for Counted {
 }
 
 fn check(label: &str) {
-    // flush() adopts at most one orphaned batch per call; threads exiting
-    // under load can park several. Repeat until quiescent.
-    for _ in 0..16 {
+    // Reclamation is eventually-consistent (deferred, slot-based; flush()
+    // adopts one orphan per call). Drain to a fixed point: flush until the
+    // drop count stops moving, then assert. A real leak converges *below*
+    // `created` (and fails); merely in-flight nodes converge up to it. This
+    // is robust to scheduling, unlike asserting exact equality at one instant
+    // (which is racy on weakly-ordered targets such as aarch64).
+    let mut last = DROPS.load(Ordering::SeqCst);
+    let mut stable = 0u32;
+    for _ in 0..2000 {
         kovan::flush();
+        let d = DROPS.load(Ordering::SeqCst);
+        if d == last {
+            stable += 1;
+            if stable >= 16 {
+                break;
+            }
+        } else {
+            stable = 0;
+            last = d;
+        }
     }
     let c = CREATES.load(Ordering::SeqCst);
     let d = DROPS.load(Ordering::SeqCst);

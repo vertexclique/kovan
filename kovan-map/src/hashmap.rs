@@ -200,6 +200,17 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
     /// Free remaining chains (skipping tagged nodes — already retired by
     /// their tag owners) and the allocation itself.
     ///
+    /// Free only the table allocation, not the chains (caller already drained
+    /// the live nodes, e.g. `IntoIter`). Tagged nodes remain kovan-owned.
+    ///
+    /// # Safety
+    /// Exclusive access; the chains must already be drained.
+    unsafe fn free_array_only(self) {
+        let capacity = unsafe { (*self.header).capacity };
+        let (layout, _) = Self::layout(capacity);
+        unsafe { alloc::alloc::dealloc(self.header as *mut u8, layout) };
+    }
+
     /// # Safety
     /// Caller must have exclusive access (map drop, or proxy reclamation
     /// after guard quiescence).
@@ -1047,6 +1058,18 @@ where
         Keys { iter: self.iter() }
     }
 
+    /// Returns an iterator over the map values (clones `V`).
+    pub fn values(&self) -> Values<'_, K, V, S> {
+        Values { iter: self.iter() }
+    }
+
+    /// Insert all `(K, V)` pairs from `iter`. Takes `&self` (concurrent map).
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+
     /// Get the underlying hasher itself.
     pub fn hasher(&self) -> &S {
         &self.hasher
@@ -1132,6 +1155,113 @@ where
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// Iterator over HashMap values (clones `V`).
+pub struct Values<'a, K: 'static, V: 'static, S> {
+    iter: Iter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for Values<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = V;
+
+    #[inline]
+    fn next(&mut self) -> Option<V> {
+        self.iter.next().map(|(_, v)| v)
+    }
+}
+
+/// Owned iterator yielding `(K, V)` by value — moves out of the nodes, no
+/// clone. Consuming the map gives exclusive access, so no guard protection of
+/// the yielded values is needed.
+pub struct IntoIter<K: 'static, V: 'static> {
+    table: TableRef<K, V>,
+    bucket_idx: usize,
+    current: *mut Node<K, V>,
+    guard: kovan::Guard,
+}
+
+impl<K, V> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        loop {
+            if !self.current.is_null() {
+                let node = self.current;
+                let next = unsafe { (*node).next.load(Ordering::Acquire, &self.guard).as_raw() };
+                self.current = untag(next);
+                if is_tagged(next) {
+                    continue; // logically deleted, owned by kovan
+                }
+                // Move K and V out, then free the shell without running drop.
+                let k = unsafe { core::ptr::read(&(*node).key) };
+                let v = unsafe { core::ptr::read(&(*node).value) };
+                unsafe {
+                    alloc::alloc::dealloc(
+                        node as *mut u8,
+                        core::alloc::Layout::new::<Node<K, V>>(),
+                    );
+                }
+                return Some((k, v));
+            }
+            if self.bucket_idx >= self.table.capacity() {
+                return None;
+            }
+            let bucket = self.table.bucket(self.bucket_idx);
+            self.bucket_idx += 1;
+            self.current = bucket.load(Ordering::Acquire, &self.guard).as_raw();
+        }
+    }
+}
+
+impl<K, V> Drop for IntoIter<K, V> {
+    fn drop(&mut self) {
+        while self.next().is_some() {} // drop remaining live K/V + free shells
+        unsafe { self.table.free_array_only() };
+    }
+}
+
+impl<K, V, S> IntoIterator for HashMap<K, V, S>
+where
+    K: 'static,
+    V: 'static,
+{
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    fn into_iter(self) -> IntoIter<K, V> {
+        let mut me = core::mem::ManuallyDrop::new(self);
+        let guard = pin();
+        let table = TableRef::<K, V>::from_raw(me.table.load(Ordering::Relaxed, &guard).as_raw());
+        // Suppress HashMap::drop (we own the table now); drop only the hasher —
+        // the remaining fields are atomics / usize / ZST marker.
+        unsafe { core::ptr::drop_in_place(&mut me.hasher) };
+        IntoIter {
+            table,
+            bucket_idx: 0,
+            current: core::ptr::null_mut(),
+            guard,
+        }
+    }
+}
+
+impl<K, V, S> core::iter::FromIterator<(K, V)> for HashMap<K, V, S>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
+    S: BuildHasher + Default,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let map = Self::with_capacity_and_hasher(MIN_CAPACITY, S::default());
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
     }
 }
 

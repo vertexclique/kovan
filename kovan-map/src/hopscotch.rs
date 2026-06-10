@@ -956,6 +956,27 @@ where
         HopscotchKeys { iter: self.iter() }
     }
 
+    /// Returns an iterator over the map values (clones `V`).
+    pub fn values(&self) -> HopscotchValues<'_, K, V, S> {
+        HopscotchValues { iter: self.iter() }
+    }
+
+    /// Returns `true` if the key is present.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
+    /// Insert all `(K, V)` pairs from `iter`. Takes `&self` (concurrent map).
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+
     /// Get the underlying hasher.
     pub fn hasher(&self) -> &S {
         &self.hasher
@@ -1008,6 +1029,105 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|(k, _)| k)
+    }
+}
+
+/// Iterator over HopscotchMap values (clones `V`).
+pub struct HopscotchValues<'a, K: 'static, V: 'static, S> {
+    iter: HopscotchIter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for HopscotchValues<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = V;
+
+    #[inline]
+    fn next(&mut self) -> Option<V> {
+        self.iter.next().map(|(_, v)| v)
+    }
+}
+
+/// Owned iterator yielding `(K, V)` by value — moves out of the entries, no
+/// clone. Each drained slot is nulled so the table destructor stays a no-op.
+pub struct HopscotchIntoIter<K: 'static, V: 'static> {
+    table: *mut Table<K, V>,
+    bucket_idx: usize,
+    guard: kovan::Guard,
+}
+
+impl<K, V> Iterator for HopscotchIntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        let table = unsafe { &*self.table };
+        while self.bucket_idx < table.buckets.len() {
+            let bucket = table.get_bucket(self.bucket_idx);
+            self.bucket_idx += 1;
+            let entry = bucket.slot.load(Ordering::Acquire, &self.guard).as_raw();
+            if !entry.is_null() {
+                bucket.slot.store(
+                    unsafe { Shared::from_raw(core::ptr::null_mut()) },
+                    Ordering::Relaxed,
+                );
+                let k = unsafe { core::ptr::read(&(*entry).key) };
+                let v = unsafe { core::ptr::read(&(*entry).value) };
+                unsafe {
+                    alloc::alloc::dealloc(
+                        entry as *mut u8,
+                        core::alloc::Layout::new::<Entry<K, V>>(),
+                    );
+                }
+                return Some((k, v));
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> Drop for HopscotchIntoIter<K, V> {
+    fn drop(&mut self) {
+        while self.next().is_some() {}
+        // All slots nulled above; Table::drop frees only the bucket array.
+        unsafe { drop(Box::from_raw(self.table)) };
+    }
+}
+
+impl<K, V, S> IntoIterator for HopscotchMap<K, V, S>
+where
+    K: 'static,
+    V: 'static,
+{
+    type Item = (K, V);
+    type IntoIter = HopscotchIntoIter<K, V>;
+
+    fn into_iter(self) -> HopscotchIntoIter<K, V> {
+        let mut me = core::mem::ManuallyDrop::new(self);
+        let guard = pin();
+        let table = me.table.load(Ordering::Relaxed, &guard).as_raw();
+        unsafe { core::ptr::drop_in_place(&mut me.hasher) };
+        HopscotchIntoIter {
+            table,
+            bucket_idx: 0,
+            guard,
+        }
+    }
+}
+
+impl<K, V, S> core::iter::FromIterator<(K, V)> for HopscotchMap<K, V, S>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
+    S: BuildHasher + Default,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let map = Self::with_hasher(S::default());
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
     }
 }
 
