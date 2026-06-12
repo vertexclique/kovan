@@ -590,7 +590,6 @@ where
         let hash = self.hasher.hash_one(&key);
         let mut backoff = Backoff::new();
         let mut counted = false;
-        let mut inserted = false;
 
         'outer: loop {
             self.wait_for_resize();
@@ -632,11 +631,17 @@ where
                     }
 
                     if node.hash == hash && node.key == key {
-                        // If WE inserted this entry on a previous
-                        // (pre-migration) attempt, the op already succeeded.
-                        if inserted {
-                            return None;
-                        }
+                        // Found on a retry. This may be our own migrated
+                        // clone OR another caller's entry that landed while
+                        // the table swapped - the two are indistinguishable
+                        // here, and reporting None for someone else's entry
+                        // would admit a second winner. Return the canonical
+                        // value either way (for our own clone that is a
+                        // clone of the value we just inserted), matching
+                        // HopscotchMap's retry semantics: under a concurrent
+                        // resize a successful insert may report
+                        // Some(its own value); callers must treat the
+                        // returned value as canonical.
                         return Some(node.value.clone());
                     }
                     prev_link = &node.next;
@@ -663,7 +668,6 @@ where
                 &guard,
             ) {
                 Ok(_) => {
-                    inserted = true;
                     if !counted {
                         counted = true;
                         self.count.fetch_add(1, Ordering::Relaxed);
@@ -692,10 +696,11 @@ where
                         if !is_tagged(appended_ptr) && !appended_ptr.is_null() {
                             let appended = &*appended_ptr;
                             if appended.hash == hash && appended.key == key {
-                                // Race lost, key exists now.
-                                if inserted {
-                                    return None;
-                                }
+                                // Race lost, key exists now. Same canonical-
+                                // value rule as the retry-found path above:
+                                // even if a pre-migration attempt of ours
+                                // inserted, the surviving entry is what
+                                // every caller must converge on.
                                 return Some(appended.value.clone());
                             }
                         }
