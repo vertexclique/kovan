@@ -41,6 +41,32 @@ struct Bucket<K, V> {
     hop_info: AtomicU32,
     /// The actual key-value slot at this position
     slot: Atomic<Entry<K, V>>,
+    /// Per-home-bucket writer guard (Herlihy-style hopscotch): held only
+    /// across `try_insert`'s existence-scan + slot-claim so two same-key
+    /// inserters can never both claim a slot. Readers never touch it -
+    /// `get`/iteration stay lock-free. Without it, phase-1 (scan hop bits
+    /// for the key) and phase-2 (CAS any empty neighborhood slot, THEN set
+    /// the hop bit) are not atomic: two `insert_if_absent` callers could
+    /// both be told "absent", leaving two live versions of one key with
+    /// `get` only ever returning one of them.
+    write_guard: AtomicBool,
+}
+
+/// Releases a bucket's writer guard on drop, so every exit path out of the
+/// guarded section (success, retry, resize, early return) unlocks exactly
+/// once.
+struct WriteGuardRelease<'t, K: 'static, V: 'static> {
+    table: &'t Table<K, V>,
+    idx: usize,
+}
+
+impl<K, V> Drop for WriteGuardRelease<'_, K, V> {
+    fn drop(&mut self) {
+        self.table
+            .get_bucket(self.idx)
+            .write_guard
+            .store(false, Ordering::Release);
+    }
 }
 
 /// An entry in the hash table
@@ -99,6 +125,7 @@ impl<K, V> Table<K, V> {
             buckets.push(Bucket {
                 hop_info: AtomicU32::new(0),
                 slot: Atomic::null(),
+                write_guard: AtomicBool::new(false),
             });
         }
 
@@ -280,17 +307,40 @@ where
                 continue;
             }
 
+            // Home-bucket writer guard: serialize same-bucket inserts so the
+            // existence scan and the slot claim inside try_insert are one
+            // atomic step. Contended -> spin via the outer loop, which keeps
+            // re-checking `resizing` (the resizer never takes this guard, so
+            // there is no lock-order deadlock; an insert that lands in the
+            // old table during a swap is caught by the re-validation below).
+            if self.acquire_write_guard(table, hash).is_none() {
+                core::hint::spin_loop();
+                continue;
+            }
+
             // Note: We pass clones to try_insert if we loop here, but try_insert consumes them.
             // Since `insert_impl` owns `key` and `value`, we must clone them for the call
             // because `try_insert` might return `Retry` (looping again).
-            match self.try_insert(
-                table,
-                hash,
-                key.clone(),
-                value.clone(),
-                only_if_absent,
-                &guard,
-            ) {
+            //
+            // The writer guard is scoped to the try_insert call alone: it
+            // must release BEFORE the resize arms below drop the pin and
+            // migrate (the release touches this table's bucket, which is
+            // only safe while the pin keeps the table alive).
+            let insert_result = {
+                let _wg = WriteGuardRelease {
+                    table,
+                    idx: table.bucket_index(hash),
+                };
+                self.try_insert(
+                    table,
+                    hash,
+                    key.clone(),
+                    value.clone(),
+                    only_if_absent,
+                    &guard,
+                )
+            };
+            match insert_result {
                 InsertResult::Success(old_val) => {
                     // Count new inserts immediately so that concurrent removes
                     // cannot decrement count below the true entry count.
@@ -550,6 +600,18 @@ where
 
         self.count.store(0, Ordering::Release);
         self.resizing.store(false, Ordering::Release);
+    }
+
+    /// Try to take the home bucket's writer guard. `Some(())` on success;
+    /// `None` when another writer holds it (caller re-loops, staying
+    /// responsive to resize).
+    fn acquire_write_guard(&self, table: &Table<K, V>, hash: u64) -> Option<()> {
+        let bucket = table.get_bucket(table.bucket_index(hash));
+        if bucket.write_guard.swap(true, Ordering::Acquire) {
+            None
+        } else {
+            Some(())
+        }
     }
 
     fn try_insert(
