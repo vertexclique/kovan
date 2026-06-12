@@ -45,7 +45,10 @@ fn concurrent_insert_if_absent_loses_no_increments() {
         for h in handles {
             h.join().unwrap();
         }
-        let total = map.get("hits").expect("key present").load(Ordering::Acquire);
+        let total = map
+            .get("hits")
+            .expect("key present")
+            .load(Ordering::Acquire);
         assert_eq!(
             total,
             (THREADS * INCREMENTS) as i64,
