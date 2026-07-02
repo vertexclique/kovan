@@ -85,6 +85,7 @@ extern crate alloc;
 
 mod atom;
 mod atomic;
+mod cache_padded;
 mod guard;
 mod reclaim;
 mod retired;
@@ -93,6 +94,7 @@ mod ttas;
 
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};
+pub use cache_padded::CachePadded;
 pub use guard::{Guard, flush, pin};
 pub use reclaim::Reclaimable;
 pub use retired::RetiredNode;

@@ -16,9 +16,29 @@ readme.workspace = true
 name = "kovan_channel"
 path = "src/lib.rs"
 
+[lints.rust]
+
 [dependencies]
 crossbeam-utils = "0.8.21"
 kovan = { workspace = true }
+kovan-queue = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "bounded_spsc"
+harness = false
+
+[[bench]]
+name = "bounded_mpmc"
+harness = false
+
+[[bench]]
+name = "unbounded_mpmc"
+harness = false
+
+[[bench]]
+name = "async_wake_latency"
+harness = false
