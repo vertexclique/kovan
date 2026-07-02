@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::signal::{AsyncSignal, Notifier, Signal};
-use std::collections::LinkedList;
-use std::sync::Mutex;
+use crate::waitlist::{WaitList, wakeup_fence};
 
 #[repr(C)]
 pub(crate) struct Node<T> {
@@ -27,7 +26,7 @@ impl<T> Node<T> {
 pub(crate) struct Channel<T: 'static> {
     head: Atomic<Node<T>>,
     tail: Atomic<Node<T>>,
-    receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
+    receivers: WaitList,
     /// Number of live Sender handles. When this reaches 0, the channel is disconnected.
     sender_count: AtomicUsize,
     /// Set to true when all senders have been dropped.
@@ -40,7 +39,7 @@ impl<T: 'static> Channel<T> {
         Self {
             head: Atomic::new(sentinel),
             tail: Atomic::new(sentinel),
-            receivers: Mutex::new(LinkedList::new()),
+            receivers: WaitList::new(),
             sender_count: AtomicUsize::new(1), // Starts at 1 for the initial Sender
             disconnected: AtomicBool::new(false),
         }
@@ -48,10 +47,10 @@ impl<T: 'static> Channel<T> {
 
     /// Wake all blocked receivers (used when senders disconnect).
     fn wake_all_receivers(&self) {
-        let mut receivers = self.receivers.lock().unwrap();
-        while let Some(signal) = receivers.pop_front() {
-            signal.notify();
-        }
+        // Loss-free wakeup: pairs with every receiver's
+        // register-then-recheck. See `crate::waitlist` module docs.
+        wakeup_fence();
+        self.receivers.notify_all();
     }
 }
 
@@ -176,10 +175,8 @@ impl<T: 'static> Sender<T> {
                         );
 
                         // Notify one receiver
-                        let mut receivers = self.inner.receivers.lock().unwrap();
-                        if let Some(signal) = receivers.pop_front() {
-                            signal.notify();
-                        }
+                        wakeup_fence();
+                        self.inner.receivers.notify_one();
 
                         return;
                     }
@@ -281,20 +278,22 @@ impl<T: 'static> Receiver<T> {
         }
 
         loop {
+            // Register unconditionally, then recheck -- the loss-free
+            // wakeup protocol documented in `crate::waitlist`.
             let signal = Arc::new(Signal::new());
-            // Register signal
-            {
-                let mut receivers = self.inner.receivers.lock().unwrap();
-                receivers.push_back(signal.clone());
-            }
+            self.inner.receivers.register(signal.clone());
+            wakeup_fence();
 
-            // Re-check to avoid race
             if let Some(msg) = self.try_recv() {
+                // We registered but found a message already: not going to
+                // wait, so mark our own entry stale (see `waitlist` docs).
+                signal.notify();
                 return Some(msg);
             }
 
             // Check disconnection after registering signal but before parking
             if self.is_disconnected() {
+                signal.notify();
                 return self.try_recv(); // Drain remaining
             }
 
@@ -325,8 +324,7 @@ impl<T: 'static> Receiver<T> {
     ///
     /// This is used for `select!` implementation.
     pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
-        let mut receivers = self.inner.receivers.lock().unwrap();
-        receivers.push_back(signal);
+        self.inner.receivers.register(signal);
     }
 
     /// Receives a message from the channel asynchronously.
@@ -363,19 +361,17 @@ impl<T: 'static> Receiver<T> {
                 }
 
                 this.signal.register(cx.waker());
-
-                // Register signal
-                {
-                    let mut receivers = this.receiver.inner.receivers.lock().unwrap();
-                    receivers.push_back(this.signal.clone());
-                }
+                this.receiver.inner.receivers.register(this.signal.clone());
+                wakeup_fence();
 
                 // Re-check
                 if let Some(msg) = this.receiver.try_recv() {
+                    this.signal.notify();
                     return Poll::Ready(Some(msg));
                 }
 
                 if this.receiver.is_disconnected() {
+                    this.signal.notify();
                     return Poll::Ready(None);
                 }
 

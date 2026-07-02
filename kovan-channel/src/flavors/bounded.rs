@@ -1,18 +1,17 @@
 use crate::flavors::unbounded;
 use crate::signal::{AsyncSignal, Notifier, Signal};
+use crate::waitlist::{WaitList, wakeup_fence};
 use crossbeam_utils::Backoff;
-use std::collections::LinkedList;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 struct Channel<T: 'static> {
     sender: unbounded::Sender<T>,
     receiver: unbounded::Receiver<T>,
     capacity: usize,
     len: AtomicUsize,
-    senders: Mutex<LinkedList<Arc<dyn Notifier>>>,
-    receivers: Mutex<LinkedList<Arc<dyn Notifier>>>,
+    senders: WaitList,
+    receivers: WaitList,
     /// Number of live bounded Sender handles.
     sender_count: AtomicUsize,
     /// Set when all bounded senders are dropped.
@@ -37,13 +36,10 @@ impl<T: 'static> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.inner.disconnected.store(true, Ordering::Release);
-            // Wake all blocked receivers
-            {
-                let mut receivers = self.inner.receivers.lock().unwrap();
-                while let Some(signal) = receivers.pop_front() {
-                    signal.notify();
-                }
-            }
+            // Loss-free wakeup: pairs with every receiver's
+            // register-then-recheck. See `crate::waitlist` module docs.
+            wakeup_fence();
+            self.inner.receivers.notify_all();
         }
     }
 }
@@ -75,8 +71,8 @@ impl<T: 'static> Channel<T> {
             receiver,
             capacity,
             len: AtomicUsize::new(0),
-            senders: Mutex::new(LinkedList::new()),
-            receivers: Mutex::new(LinkedList::new()),
+            senders: WaitList::new(),
+            receivers: WaitList::new(),
             sender_count: AtomicUsize::new(1),
             disconnected: std::sync::atomic::AtomicBool::new(false),
         }
@@ -90,17 +86,20 @@ impl<T: 'static> Sender<T> {
         loop {
             let len = self.inner.len.load(Ordering::Relaxed);
             if len >= self.inner.capacity {
-                // Blocking path
+                // Register unconditionally, then recheck -- the loss-free
+                // wakeup protocol documented in `crate::waitlist`.
                 let signal = Arc::new(Signal::new());
-                {
-                    let mut senders = self.inner.senders.lock().unwrap();
-                    if self.inner.len.load(Ordering::Relaxed) >= self.inner.capacity {
-                        senders.push_back(signal.clone());
-                    } else {
-                        // Capacity available, retry loop
-                        continue;
-                    }
+                self.inner.senders.register(signal.clone());
+                wakeup_fence();
+
+                if self.inner.len.load(Ordering::Acquire) < self.inner.capacity {
+                    // Capacity freed up between our first check and
+                    // registering: we won't actually wait, so mark our
+                    // own entry stale (see `waitlist` docs) and retry.
+                    signal.notify();
+                    continue;
                 }
+
                 signal.wait();
                 continue;
             }
@@ -116,10 +115,8 @@ impl<T: 'static> Sender<T> {
                 self.inner.sender.send(t);
 
                 // Notify one receiver
-                let mut receivers = self.inner.receivers.lock().unwrap();
-                if let Some(signal) = receivers.pop_front() {
-                    signal.notify();
-                }
+                wakeup_fence();
+                self.inner.receivers.notify_one();
 
                 return;
             }
@@ -136,8 +133,7 @@ impl<T: 'static> Sender<T> {
     ///
     /// This is used for `select!` implementation.
     pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
-        let mut senders = self.inner.senders.lock().unwrap();
-        senders.push_back(signal);
+        self.inner.senders.register(signal);
     }
 
     /// Sends a message into the channel asynchronously.
@@ -173,10 +169,8 @@ impl<T: 'static> Sender<T> {
                     this.sender.inner.sender.send(t);
 
                     // Notify one receiver
-                    let mut receivers = this.sender.inner.receivers.lock().unwrap();
-                    if let Some(signal) = receivers.pop_front() {
-                        signal.notify();
-                    }
+                    wakeup_fence();
+                    this.sender.inner.receivers.notify_one();
 
                     return Poll::Ready(());
                 }
@@ -185,17 +179,12 @@ impl<T: 'static> Sender<T> {
                     this.signal = Arc::new(AsyncSignal::new());
                 }
                 this.signal.register(cx.waker());
+                this.sender.inner.senders.register(this.signal.clone());
+                wakeup_fence();
 
-                {
-                    let mut senders = this.sender.inner.senders.lock().unwrap();
-                    // Only push if full
-                    if this.sender.inner.len.load(Ordering::Relaxed) >= this.sender.inner.capacity {
-                        senders.push_back(this.signal.clone());
-                    }
-                }
-
-                // Re-check
-                let len = this.sender.inner.len.load(Ordering::Relaxed);
+                // Re-check: capacity may have freed up since the fast-path
+                // attempt above.
+                let len = this.sender.inner.len.load(Ordering::Acquire);
                 if len < this.sender.inner.capacity
                     && this
                         .sender
@@ -209,10 +198,12 @@ impl<T: 'static> Sender<T> {
                     this.sender.inner.sender.send(t);
 
                     // Notify one receiver
-                    let mut receivers = this.sender.inner.receivers.lock().unwrap();
-                    if let Some(signal) = receivers.pop_front() {
-                        signal.notify();
-                    }
+                    wakeup_fence();
+                    this.sender.inner.receivers.notify_one();
+
+                    // We registered but are not going to wait after all:
+                    // mark our own entry stale (see `waitlist` docs).
+                    this.signal.notify();
 
                     return Poll::Ready(());
                 }
@@ -241,8 +232,7 @@ impl<T: 'static> Receiver<T> {
     ///
     /// This is used for `select!` implementation.
     pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
-        let mut receivers = self.inner.receivers.lock().unwrap();
-        receivers.push_back(signal);
+        self.inner.receivers.register(signal);
     }
     /// Attempts to receive a message from the channel without blocking.
     pub fn try_recv(&self) -> Option<T> {
@@ -254,10 +244,8 @@ impl<T: 'static> Receiver<T> {
                 self.inner.len.fetch_sub(1, Ordering::Release);
 
                 // Notify one sender
-                let mut senders = self.inner.senders.lock().unwrap();
-                if let Some(signal) = senders.pop_front() {
-                    signal.notify();
-                }
+                wakeup_fence();
+                self.inner.senders.notify_one();
 
                 Some(msg)
             }
@@ -283,33 +271,25 @@ impl<T: 'static> Receiver<T> {
         }
 
         loop {
+            // Register unconditionally, then recheck -- the loss-free
+            // wakeup protocol documented in `crate::waitlist`.
             let signal = Arc::new(Signal::new());
-            {
-                let mut receivers = self.inner.receivers.lock().unwrap();
-                receivers.push_back(signal.clone());
-            }
+            self.inner.receivers.register(signal.clone());
+            wakeup_fence();
 
             if let Some(msg) = self.try_recv() {
+                // We registered but found a message already: not going to
+                // wait, so mark our own entry stale (see `waitlist` docs).
+                signal.notify();
                 return Some(msg);
             }
 
             if self.is_disconnected() {
+                signal.notify();
                 return self.try_recv();
             }
 
-            // Wait, checking the queue on every wakeup.
-            loop {
-                if signal.is_notified() {
-                    break;
-                }
-                thread::park();
-                if let Some(msg) = self.try_recv() {
-                    return Some(msg);
-                }
-                if self.is_disconnected() {
-                    return self.try_recv();
-                }
-            }
+            signal.wait();
 
             if let Some(msg) = self.try_recv() {
                 return Some(msg);
@@ -322,7 +302,9 @@ impl<T: 'static> Receiver<T> {
     }
 
     /// Receives a message from the channel asynchronously.
-    pub async fn recv_async(&self) -> T {
+    ///
+    /// Returns `None` when the channel is empty and all senders have been dropped.
+    pub async fn recv_async(&self) -> Option<T> {
         use std::future::Future;
         use std::pin::Pin;
         use std::task::{Context, Poll};
@@ -335,26 +317,36 @@ impl<T: 'static> Receiver<T> {
         impl<'a, T: 'static> Unpin for RecvFuture<'a, T> {}
 
         impl<'a, T: 'static> Future for RecvFuture<'a, T> {
-            type Output = T;
+            type Output = Option<T>;
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
                 if let Some(msg) = this.receiver.try_recv() {
-                    return Poll::Ready(msg);
+                    return Poll::Ready(Some(msg));
+                }
+
+                // Disconnected and empty: done (drain any remaining buffered messages).
+                if this.receiver.is_disconnected() {
+                    return Poll::Ready(this.receiver.try_recv());
                 }
 
                 if this.signal.is_notified() {
                     this.signal = Arc::new(AsyncSignal::new());
                 }
                 this.signal.register(cx.waker());
+                this.receiver.inner.receivers.register(this.signal.clone());
+                wakeup_fence();
 
-                {
-                    let mut receivers = this.receiver.inner.receivers.lock().unwrap();
-                    receivers.push_back(this.signal.clone());
+                // Re-check: a send or disconnect may have landed between the first
+                // check and signal registration.
+                if let Some(msg) = this.receiver.try_recv() {
+                    this.signal.notify();
+                    return Poll::Ready(Some(msg));
                 }
 
-                if let Some(msg) = this.receiver.try_recv() {
-                    return Poll::Ready(msg);
+                if this.receiver.is_disconnected() {
+                    this.signal.notify();
+                    return Poll::Ready(None);
                 }
 
                 Poll::Pending
