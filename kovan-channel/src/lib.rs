@@ -57,6 +57,8 @@ pub mod flavors;
 pub mod select;
 /// Signal mechanism for thread synchronization.
 pub mod signal;
+/// Lock-free registration queues for parked senders/receivers.
+mod waitlist;
 
 pub use flavors::bounded;
 pub use flavors::unbounded;

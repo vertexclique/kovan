@@ -59,6 +59,7 @@ macro_rules! select {
     ) => {
         {
             use std::sync::Arc;
+            use std::sync::atomic::{Ordering, fence};
             use $crate::signal::Signal;
 
             let signal = Arc::new(Signal::new());
@@ -75,6 +76,12 @@ macro_rules! select {
                 $(
                     $rx.register_signal(signal.clone());
                 )*
+
+                // Loss-free wakeup: pairs registration with the recheck
+                // below (a sender that publishes after we start step 1
+                // must still see this registration). See the
+                // `crate::waitlist` module docs for the full proof.
+                fence(Ordering::SeqCst);
 
                 // 3. Re-check all
                 let mut ready = false;
