@@ -6,8 +6,15 @@ use kovan::{Guard, retire};
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+
+// See `var.rs`: must resolve to the identical concrete type as
+// `TVarInner::version_lock`, since `lock_atomic` below is a raw pointer to
+// that same field.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicU64;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicU64;
 
 /// Unique ID for a TVar (memory address) to sort locks.
 type TVarId = usize;

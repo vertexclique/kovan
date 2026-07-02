@@ -91,12 +91,34 @@ impl Stm {
                     if tx.commit() {
                         return result;
                     }
-                    // Commit failed (conflict), retry loop
+                    // Commit failed (conflict): retry loop.
+                    //
+                    // vertexia: under shuttle, an explicit yield here (not
+                    // just the instrumented `version_lock` reads/CASes the
+                    // next attempt performs) is required for the scheduler
+                    // to guarantee the *other* side of the conflict a turn.
+                    // Without it, PCT/random can keep re-selecting this
+                    // thread's retries indefinitely under an unlucky
+                    // priority draw -- both sides livelocking each other
+                    // out until shuttle's step budget is exhausted
+                    // ("exceeded max_steps bound", an unfair schedule, not
+                    // a real bug -- see `kovan-map`'s `resize_spin_hint` for
+                    // the identical failure mode and full reasoning).
+                    #[cfg(feature = "shuttle")]
+                    shuttle::hint::spin_loop();
                 }
                 Err(e) => {
                     // User explicitly aborted or raised error
                     if let StmError::Retry = e {
-                        // In a real scheduler, we might backoff/park here
+                        // In a real scheduler, we might backoff/park here.
+                        // Under shuttle this yield must be the scheduler's
+                        // own (see the fairness note above); a real
+                        // `std::thread::yield_now()` is a no-op for
+                        // shuttle's cooperative scheduler (every other task
+                        // is genuinely parked, not merely de-prioritized).
+                        #[cfg(feature = "shuttle")]
+                        shuttle::hint::spin_loop();
+                        #[cfg(not(feature = "shuttle"))]
                         std::thread::yield_now();
                         continue;
                     }
