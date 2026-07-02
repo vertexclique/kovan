@@ -33,6 +33,48 @@ use core::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use foldhash::fast::FixedState;
 use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 
+// vertexia: `resizing` gates `try_resize` (CAS to claim the resize) and is
+// spun on by every other writer via `wait_for_resize`/`clear`'s CAS-retry
+// while a resize is in flight. That spin has no *other* yield point in it,
+// which is a problem under shuttle two levels deep:
+//
+// 1. Without any instrumented op in the loop, shuttle can't preempt out of
+//    it at all -- a genuine hang once a writer observes `resizing == true`.
+// 2. Instrumenting the field itself (an earlier version of this fix swapped
+//    `AtomicBool` for shuttle's) fixes (1) but isn't enough for *fairness*:
+//    PCT keeps a thread's priority fixed except at a handful of preselected
+//    "change points" or an explicit yield, so a plain instrumented `.load()`
+//    in a spin loop can still be rescheduled indefinitely if it happens to
+//    hold the higher priority, starving the resizer and running out
+//    shuttle's step budget ("exceeded max_steps bound", an unfair schedule,
+//    not a real bug).
+//
+// The fix needs a *yield*, not an instrumented load: `resize_spin_hint`
+// (below) calls `shuttle::hint::spin_loop`, which also calls
+// `shuttle::thread::yield_now`, which PCT treats as an explicit change
+// point, demoting the spinner's priority so the resizer is guaranteed a
+// turn -- independent of whether the *condition* it's spinning on is
+// instrumented. So `resizing` itself stays a plain `AtomicBool` under every
+// build, shuttle included: swapping its type is unnecessary for either
+// correctness or fairness here, and empirically, doing so anyway
+// introduced its own unrelated shuttle-only heap corruption in this crate's
+// shuttle test (reproduced independent of any resize ever triggering,
+// isolated by bisection, still unexplained -- plausibly a layout hazard
+// from shuttle's `AtomicBool` being a much larger `RefCell`-based type
+// instead of a 1-byte one; not chased further since the type swap was
+// never actually required).
+#[inline(always)]
+fn resize_spin_hint() {
+    #[cfg(feature = "shuttle")]
+    {
+        shuttle::hint::spin_loop();
+    }
+    #[cfg(not(feature = "shuttle"))]
+    {
+        core::hint::spin_loop();
+    }
+}
+
 /// Default number of buckets for `new()`. Matches the previous fixed-table
 /// sizing (zero collisions for ~100k items, fits in L3); maps created with
 /// `new()` keep exactly the old memory/performance profile and additionally
@@ -432,7 +474,7 @@ where
     #[inline]
     fn wait_for_resize(&self) {
         while self.resizing.load(Ordering::Acquire) {
-            core::hint::spin_loop();
+            resize_spin_hint();
         }
     }
 
@@ -961,7 +1003,7 @@ where
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            resize_spin_hint();
         }
 
         let guard = pin();
