@@ -123,3 +123,40 @@ fn hashmap_concurrent_resize_accounting() {
     }
     check("hashmap concurrent grow");
 }
+
+/// HopscotchMap analog of `hashmap_concurrent_resize_accounting`: same
+/// thread/key/insert-remove shape, driving concurrent grow on the other map
+/// implementation. `HopscotchMap::try_resize` retires its table directly
+/// (RetiredNode embedded at construction, in `Table::new`), so it does not
+/// have the late-birth-epoch proxy gap `HashMap` had; this guards against
+/// a regression there too.
+#[test]
+fn hopscotch_concurrent_resize_accounting() {
+    use std::sync::Arc;
+    let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    CREATES.store(0, Ordering::SeqCst);
+    DROPS.store(0, Ordering::SeqCst);
+    {
+        let map = Arc::new(kovan_map::HopscotchMap::with_capacity(64));
+        let handles: Vec<_> = (0..8u64)
+            .map(|t| {
+                let map = Arc::clone(&map);
+                std::thread::spawn(move || {
+                    for i in 0..1000u64 {
+                        let key = t * 10_000 + i;
+                        map.insert(key, Counted::new(key));
+                        if i % 3 == 0 {
+                            map.remove(&key);
+                        }
+                    }
+                    kovan::flush();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        drop(map);
+    }
+    check("hopscotch concurrent grow");
+}

@@ -146,11 +146,20 @@ fn is_tagged<K, V>(p: *const Node<K, V>) -> bool {
 // 0, as `retire()` requires): retiring the proxy defers until every guard
 // that could observe the old table has been released; the proxy's destructor
 // then frees the table's remaining chains and the allocation itself.
+//
+// The proxy is built eagerly, in `TableRef::alloc`, at the SAME time as the
+// table it guards, not lazily when the table is finally retired. See the
+// long comment on `alloc` for why: a proxy built at retire time stamps its
+// birth_epoch too late, and kovan can then judge a straggler writer as not
+// needing protection for a table it is still actively CASing into.
 
 #[repr(C)]
 struct TableHeader {
     mask: usize,
     capacity: usize,
+    /// Type-erased `*mut TableProxy<K, V>` for this table's eventual
+    /// retirement (see `TableRef::alloc`). Zero means already taken/freed.
+    proxy: usize,
 }
 
 /// Borrowed view of a table allocation.
@@ -183,7 +192,27 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         (layout.pad_to_align(), offset)
     }
 
-    /// Allocate a zero-initialized table (`Atomic` buckets zero == null).
+    /// Allocate a zero-initialized table (`Atomic` buckets zero == null) and
+    /// eagerly build its retirement proxy.
+    ///
+    /// The proxy is built *here*, at the table's own birth, not lazily at
+    /// `try_resize` time. `RetiredNode::new()` stamps `birth_epoch` from the
+    /// calling thread's cached epoch at construction time (kovan's
+    /// contract: "birth_epoch must be set at allocation time, not
+    /// retirement time" (see `kovan::RetiredNode::new`). A table can live
+    /// through many other threads' operations before it is ever resized
+    /// away; if its proxy were only constructed when the resizer finally
+    /// retires it, the proxy's birth_epoch would be the *resizer's* current
+    /// epoch, which can be arbitrarily newer than the epoch a straggler
+    /// writer published the last time it observed this table via
+    /// `self.table.load()`. kovan's eligibility check
+    /// (`slot.epoch >= min_epoch`) would then wrongly judge that straggler
+    /// as not needing protection, and its `TableProxy` could be reclaimed
+    /// while the straggler is still mid-CAS on the table's own memory.
+    /// Stamping the proxy at the table's own allocation predates every
+    /// straggler that could ever see this table, closing the gap: the
+    /// same guarantee `HopscotchMap::try_resize` gets for free by retiring
+    /// its table struct directly (`RetiredNode` embedded at construction).
     fn alloc(capacity: usize) -> Self {
         let capacity = capacity.next_power_of_two().max(MIN_CAPACITY);
         let (layout, _) = Self::layout(capacity);
@@ -194,7 +223,43 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
             (*header).mask = capacity - 1;
             (*header).capacity = capacity;
         }
-        Self::from_raw(header)
+        let table = Self::from_raw(header);
+        let proxy = Box::into_raw(Box::new(TableProxy {
+            retired: RetiredNode::new(),
+            table,
+        }));
+        unsafe { (*header).proxy = proxy as usize };
+        table
+    }
+
+    /// Take this table's pre-built retirement proxy, for a single upcoming
+    /// `retire()` call. Must be called at most once per table.
+    #[inline(always)]
+    fn take_proxy(self) -> *mut TableProxy<K, V> {
+        let proxy = unsafe { (*self.header).proxy };
+        assert_ne!(proxy, 0, "kovan-map: table proxy already taken");
+        unsafe { (*self.header).proxy = 0 };
+        proxy as *mut TableProxy<K, V>
+    }
+
+    /// Free this table's proxy directly (without running its `Drop`, which
+    /// would call back into `free`/`free_array_only` on this same table) if
+    /// it was never retired. Used on every path where a table dies without
+    /// ever being resized away: `HashMap::drop`, `IntoIter`, and a
+    /// discarded, never-published resize target. No-op if `take_proxy` was
+    /// already called (the normal resize-retirement path).
+    #[inline(always)]
+    unsafe fn drop_unused_proxy(self) {
+        let proxy = unsafe { (*self.header).proxy };
+        if proxy != 0 {
+            unsafe {
+                (*self.header).proxy = 0;
+                alloc::alloc::dealloc(
+                    proxy as *mut u8,
+                    core::alloc::Layout::new::<TableProxy<K, V>>(),
+                );
+            }
+        }
     }
 
     /// Free remaining chains (skipping tagged nodes — already retired by
@@ -206,6 +271,7 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
     /// # Safety
     /// Exclusive access; the chains must already be drained.
     unsafe fn free_array_only(self) {
+        unsafe { self.drop_unused_proxy() };
         let capacity = unsafe { (*self.header).capacity };
         let (layout, _) = Self::layout(capacity);
         unsafe { alloc::alloc::dealloc(self.header as *mut u8, layout) };
@@ -215,6 +281,7 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
     /// Caller must have exclusive access (map drop, or proxy reclamation
     /// after guard quiescence).
     unsafe fn free(self) {
+        unsafe { self.drop_unused_proxy() };
         let capacity = unsafe { (*self.header).capacity };
         let guard = pin();
         for i in 0..capacity {
@@ -1022,13 +1089,13 @@ where
             &guard,
         ) {
             Ok(_) => {
-                // Retire the old table through a proxy: reclamation (which
-                // frees the remaining chains and the allocation) is deferred
-                // until every guard that could observe it is gone.
-                let proxy = Box::into_raw(Box::new(TableProxy {
-                    retired: RetiredNode::new(),
-                    table: old_table,
-                }));
+                // Retire the old table through its proxy (built eagerly
+                // back when this table was allocated, see `TableRef::alloc`,
+                // so its birth_epoch predates every straggler that could
+                // have observed this table): reclamation (which frees the
+                // remaining chains and the allocation) is deferred until
+                // every guard that could observe it is gone.
+                let proxy = old_table.take_proxy();
                 // SAFETY: TableProxy is #[repr(C)] with RetiredNode at
                 // offset 0, allocated via Box::into_raw.
                 unsafe { retire(proxy) };
