@@ -18,13 +18,21 @@ path = "src/lib.rs"
 [features]
 default = ["std"]
 std = []
+# See `kovan`'s `shuttle` feature doc. Cascades so `Atomic<T>` (the table and
+# node pointers) is shuttle-instrumented; also swaps this crate's own
+# `resizing` flag (see `hashmap.rs`), whose spin-wait would otherwise busy
+# loop forever under shuttle's cooperative scheduler (no yield point inside
+# it to let the resizing thread finish and clear the flag).
+shuttle = ["kovan/shuttle", "dep:shuttle"]
 
 [dependencies]
 kovan = { workspace = true }
 foldhash = { version = "0.2" }
+shuttle = { version = "0.9.1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+shuttle = "0.9.1"
 
 [[bench]]
 name = "perf"

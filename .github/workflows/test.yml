@@ -73,3 +73,25 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  shuttle:
+    name: Shuttle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # One model-checked scenario per crate (kovan-channel covers three).
+      # Each opts in via its own `shuttle` feature, kept off by default so
+      # it costs nothing outside this job. Release mode: shuttle's own
+      # scheduling overhead dwarfs the workload either way, but release
+      # keeps the per-iteration cost (and so the total run) down.
+      - name: Run shuttle tests
+        run: |
+          cargo test -p kovan --features shuttle --test shuttle_reclaim --release
+          cargo test -p kovan-map --features shuttle --test shuttle_resize --release
+          cargo test -p kovan-channel --features shuttle --test shuttle_channel --release
+          cargo test -p kovan-queue --features shuttle --test shuttle_array_queue --release
+          cargo test -p kovan-stm --features shuttle --test shuttle_stm --release
+          cargo test -p kovan-mvcc --features shuttle --test shuttle_lock_table --release

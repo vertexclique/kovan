@@ -15,6 +15,14 @@ readme.workspace = true
 name = "kovan_mvcc"
 path = "src/lib.rs"
 
+[features]
+# See `kovan`'s `shuttle` feature doc. `LockTable` has no atomics of its
+# own (it's built entirely on `kovan_map::HashMap`), so this crate needs no
+# type-swap plumbing of its own -- just the cascade so `HashMap`'s
+# `insert_if_absent` (the lock-acquire primitive `LockTable::try_lock`
+# calls) is shuttle-instrumented.
+shuttle = ["kovan-map/shuttle"]
+
 [dependencies]
 uuid = { version = "1.18", features = ["v4"] }
 kovan = { workspace = true }
@@ -23,3 +31,4 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 rand = "0.9"
+shuttle = "0.9.1"

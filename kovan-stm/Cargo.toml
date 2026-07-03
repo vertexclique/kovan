@@ -15,6 +15,17 @@ readme.workspace = true
 name = "kovan_stm"
 path = "src/lib.rs"
 
+[features]
+# See `kovan`'s `shuttle` feature doc. Cascades so `TVarInner::data`
+# (`kovan::Atomic<StmNode<T>>`) is shuttle-instrumented; also swaps this
+# crate's own `version_lock`/`lock_atomic` (see `var.rs`, `transaction.rs`),
+# the commit-time lock CAS these tests target.
+shuttle = ["kovan/shuttle", "kovan-map/shuttle", "dep:shuttle"]
+
 [dependencies]
 kovan = { workspace = true }
 kovan-map = { workspace = true }
+shuttle = { version = "0.9.1", optional = true }
+
+[dev-dependencies]
+shuttle = "0.9.1"

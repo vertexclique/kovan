@@ -103,7 +103,20 @@ mod atomic_waker {
     use core::cell::UnsafeCell;
     use kovan::CachePadded;
 
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::Ordering;
+
+    // vertexia: this is the state machine the shuttle register-vs-wake test
+    // targets. `register`'s CAS-in/write-cell/CAS-back and `wake`'s
+    // fetch_or/read-cell/fetch_and race by design (that's the whole point
+    // of a lock-free waker); shuttle can only explore that race if these
+    // operations are its own scheduling points. `shuttle::sync::atomic`'s
+    // `AtomicUsize` under the `shuttle` feature does that; every other type
+    // here (the `UnsafeCell<Option<Waker>>`, the CachePadded wrapper) is
+    // untouched.
+    #[cfg(not(feature = "shuttle"))]
+    use core::sync::atomic::AtomicUsize;
+    #[cfg(feature = "shuttle")]
+    use shuttle::sync::atomic::AtomicUsize;
 
     /// No registration or wake in flight; the `waker` cell is either empty
     /// or holds a valid, previously-registered waker. Either side may start

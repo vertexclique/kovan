@@ -2,7 +2,20 @@ use super::node::StmNode;
 use alloc::boxed::Box;
 use kovan::Atomic;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
+
+// vertexia: `version_lock` is the commit protocol's whole concurrency
+// surface for a single TVar (lock bit in bit 0, version in the rest) --
+// `Transaction::commit`'s lock-acquire CAS and `load_version_lock`'s reads
+// race directly on it. `transaction.rs` also reads this same field through
+// a raw `*const AtomicU64` (`ReadEntry`/`WriteEntry::lock_atomic`, cast from
+// `&tvar.0.version_lock`), so it re-imports this identical conditional
+// alias rather than assuming `core`'s type -- the pointer is dereferenced
+// as whichever concrete type is in scope there, and the two must agree.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicU64;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicU64;
 
 /// Heap-allocated interior of a [`TVar`].
 ///

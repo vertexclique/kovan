@@ -6,13 +6,31 @@
 //! - Retire: batch construction, try_retire with epoch-based slot scanning
 //! - Helping: help_read/help_thread for wait-free progress
 
+use crate::atomic::AtomicUsize;
 use crate::retired::{INVPTR, REFC_PROTECT, RetiredNode, rnode_mark};
 use crate::slot::{self, ASMRState, EPOCH_FREQ, EPOCH_UNCONDITIONAL, RETIRE_FREQ};
 use alloc::boxed::Box;
 use core::cell::Cell;
 use core::marker::PhantomData as marker;
+use core::sync::atomic::Ordering;
 use core::sync::atomic::fence;
-use core::sync::atomic::{AtomicUsize, Ordering};
+
+// vertexia: shuttle's `thread::spawn` schedules cooperative, stackful
+// coroutines that all run on one real OS thread ("Shuttle tests are single
+// threaded" -- shuttle's own `runtime::thread::continuation` doc). A plain
+// `std::thread_local!` `HANDLE` (below) is scoped to that one OS thread, so
+// every kovan-based "thread" a shuttle test spawns would silently share the
+// same `Handle` -- same `tid`, same epoch cache, same batch -- collapsing
+// every per-thread slot the reclamation protocol depends on into one and
+// making any interleaving-dependent bug in it unreachable (confirmed
+// empirically: the map resize/reclaim shuttle test could not reproduce the
+// proxy-birth-epoch UAF this crate has a real regression test for, with
+// std's `thread_local!`, at any iteration budget, until this shadow import
+// was added). `shuttle::thread_local!` builds a `shuttle::thread::LocalKey`
+// instead, which is keyed per-task the way this algorithm needs. Only
+// shadows the macro name used below; every other type stays untouched.
+#[cfg(feature = "shuttle")]
+use shuttle::thread_local;
 
 /// Bounded convergence attempts in `protect_load` before escalating to the
 /// unconditional reservation (mirrors the reference algorithm's 16-attempt

@@ -24,6 +24,12 @@ path = "src/lib.rs"
 default = ["std"]
 std = []          # Enable std-dependent features.
 nightly = []      # Enable nightly-only optimizations.
+# Swaps the pointer-word atomic backing `Atomic<T>` and the reclamation
+# guard's protect-load path for shuttle's instrumented equivalent, so
+# shuttle's scheduler gets a yield point at every pointer load/store/CAS.
+# Dev/test only (`shuttle` is an optional dependency): zero cost unless a
+# crate explicitly opts in for its shuttle test binary.
+shuttle = ["dep:shuttle"]
 
 [dependencies]
 once_cell = { version = "1.21", default-features = false, features = ["alloc"] }
@@ -31,9 +37,11 @@ portable-atomic = { version = "1.11.1", default-features = false, features = [
     "require-cas",
     "fallback",
 ] }
+shuttle = { version = "0.9.1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
+shuttle = "0.9.1"
 # Other memory-reclamation crates, used only by the comparison benchmark
 # (`benches/comparison.rs`). Commented out together with that benchmark's
 # "other"-library code; uncomment both to re-enable the cross-library comparison.

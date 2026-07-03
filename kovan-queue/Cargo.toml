@@ -11,6 +11,17 @@ keywords = ["concurrency", "queue", "disruptor", "lock-free"]
 categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
 
+[features]
+# See `kovan`'s `shuttle` feature doc. Cascades so `SegQueue`'s segment
+# pointers (`kovan::Atomic<T>`) are shuttle-instrumented; also swaps this
+# crate's own `ArrayQueue` head/tail/stamp atomics (see `array_queue.rs`),
+# which are self-contained (no kovan dependency) and need their own swap.
+shuttle = ["kovan/shuttle", "dep:shuttle"]
+
 [dependencies]
 crossbeam-utils = "0.8"
 kovan = { workspace = true }
+shuttle = { version = "0.9.1", optional = true }
+
+[dev-dependencies]
+shuttle = "0.9.1"
