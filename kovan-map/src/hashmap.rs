@@ -29,7 +29,7 @@ extern crate std;
 use alloc::boxed::Box;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
-use core::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicIsize, Ordering, fence};
 use foldhash::fast::FixedState;
 use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 
@@ -621,6 +621,26 @@ where
                             backoff.spin();
                             continue 'outer;
                         }
+                        // Dekker/SB fence: pairs with the matching fence in
+                        // `try_resize`, placed right after it claims
+                        // `resizing`. Without both fences, the swing-CAS
+                        // above (a store) and the resizing/table loads just
+                        // below are this thread's store-then-load half of a
+                        // race against the resizer's own store-then-load
+                        // half (claim `resizing`, then read this bucket
+                        // during the sweep): plain AcqRel/Acquire lets both
+                        // sides observe the pre-update value of the other's
+                        // write (the classic store-buffering litmus test),
+                        // so the sweep could miss this mutation while we
+                        // simultaneously miss that a resize is in flight,
+                        // silently orphaning the update in the table being
+                        // retired. The fence forces this CAS and the
+                        // resizer's `resizing` claim into the same SeqCst
+                        // total order, so at least one side is guaranteed to
+                        // observe the other. x86 TSO hides the gap (every
+                        // CAS there is already a full fence); ARM's AcqRel
+                        // is not.
+                        fence(Ordering::SeqCst);
                         // Re-validate: if a resize started (or completed)
                         // since we loaded the table, the migration may have
                         // cloned the entry before our update — redo the op
@@ -664,6 +684,11 @@ where
                     if result.is_none() {
                         result = Some(None);
                     }
+                    // Dekker/SB fence pairing with try_resize's claim-side
+                    // fence (full justification on the replace path above):
+                    // the tail-append CAS above is this thread's store-side
+                    // of the same store-load race.
+                    fence(Ordering::SeqCst);
                     // Re-validate against a concurrent migration (see above).
                     if self.resizing.load(Ordering::SeqCst)
                         || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
@@ -781,6 +806,11 @@ where
                         counted = true;
                         self.count.fetch_add(1, Ordering::Relaxed);
                     }
+                    // Dekker/SB fence pairing with try_resize's claim-side
+                    // fence (full justification in HashMap::insert's replace
+                    // path): the tail-append CAS above is this thread's
+                    // store-side of the same store-load race.
+                    fence(Ordering::SeqCst);
                     // Re-validate against a concurrent migration.
                     if self.resizing.load(Ordering::SeqCst)
                         || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
@@ -932,6 +962,15 @@ where
                             && table.capacity() > self.floor)
                             .then_some(table.capacity() / 2);
 
+                        // Dekker/SB fence pairing with try_resize's
+                        // claim-side fence (full justification in
+                        // HashMap::insert's replace path): the tag-CAS above
+                        // is this thread's store-side of the same
+                        // store-load race, so the same "sweep misses the
+                        // mutation and we miss the resize" window applies
+                        // here, and the resurrection this re-validation
+                        // exists to catch would otherwise go undetected.
+                        fence(Ordering::SeqCst);
                         // Re-validate: a concurrent migration may have cloned
                         // this entry into the new table before we deleted it
                         // here — redo the removal on the current table so the
@@ -1082,6 +1121,20 @@ where
         {
             return;
         }
+
+        // Dekker/SB fence: pairs with the matching fence every writer
+        // (insert/insert_if_absent/remove) executes right before its
+        // resizing/table re-validation check. This claim-CAS and the
+        // migration sweep's bucket reads below are this thread's
+        // store-then-load half of the same store-load race a writer's
+        // data-mutating CAS and its own re-validation load form the other
+        // half of; without a fence on both sides, AcqRel/Acquire permits
+        // both this sweep and that writer's check to observe the pre-update
+        // value of the other's write (the classic store-buffering litmus
+        // test), silently losing the writer's update to the table being
+        // retired. x86 TSO hides the gap (every CAS there is already a full
+        // fence); ARM's AcqRel is not.
+        fence(Ordering::SeqCst);
 
         let new_capacity = new_capacity
             .next_power_of_two()

@@ -4,6 +4,29 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// vertexia: miri (especially with -Zmiri-weak-memory-emulation, used to
+// falsify resize/migration ordering) is orders of magnitude slower than
+// native execution. These counts keep the interleaving space small enough
+// to finish in practical time while still exercising a grow, a shrink, and
+// (for the concurrent tests) a resize racing with several writers on
+// different keys, which is the shape that matters for this file's purpose.
+// The native (non-miri) counts are unchanged from before this scaling was
+// added.
+#[cfg(miri)]
+const SEQUENTIAL_ITERS: u64 = 24;
+#[cfg(not(miri))]
+const SEQUENTIAL_ITERS: u64 = 300;
+
+#[cfg(miri)]
+const CONCURRENT_THREADS: u64 = 3;
+#[cfg(not(miri))]
+const CONCURRENT_THREADS: u64 = 8;
+
+#[cfg(miri)]
+const CONCURRENT_ITERS: u64 = 16;
+#[cfg(not(miri))]
+const CONCURRENT_ITERS: u64 = 1000;
+
 static CREATES: AtomicUsize = AtomicUsize::new(0);
 static DROPS: AtomicUsize = AtomicUsize::new(0);
 static LOCK: Mutex<()> = Mutex::new(());
@@ -64,10 +87,10 @@ fn hopscotch_resize_frees_old_entries() {
     DROPS.store(0, Ordering::SeqCst);
     {
         let map = kovan_map::HopscotchMap::with_capacity(64);
-        for i in 0..300u64 {
+        for i in 0..SEQUENTIAL_ITERS {
             map.insert(i, Counted::new(i)); // forces several grows
         }
-        for i in 0..300u64 {
+        for i in 0..SEQUENTIAL_ITERS {
             map.remove(&i); // forces shrinks
         }
         drop(map);
@@ -82,10 +105,10 @@ fn hashmap_resize_frees_old_entries() {
     DROPS.store(0, Ordering::SeqCst);
     {
         let map = kovan_map::HashMap::with_capacity(64);
-        for i in 0..300u64 {
+        for i in 0..SEQUENTIAL_ITERS {
             map.insert(i, Counted::new(i));
         }
-        for i in 0..300u64 {
+        for i in 0..SEQUENTIAL_ITERS {
             map.remove(&i);
         }
         drop(map);
@@ -101,11 +124,11 @@ fn hashmap_concurrent_resize_accounting() {
     DROPS.store(0, Ordering::SeqCst);
     {
         let map = Arc::new(kovan_map::HashMap::with_capacity(64));
-        let handles: Vec<_> = (0..8u64)
+        let handles: Vec<_> = (0..CONCURRENT_THREADS)
             .map(|t| {
                 let map = Arc::clone(&map);
                 std::thread::spawn(move || {
-                    for i in 0..1000u64 {
+                    for i in 0..CONCURRENT_ITERS {
                         let key = t * 10_000 + i;
                         map.insert(key, Counted::new(key));
                         if i % 3 == 0 {
@@ -138,11 +161,11 @@ fn hopscotch_concurrent_resize_accounting() {
     DROPS.store(0, Ordering::SeqCst);
     {
         let map = Arc::new(kovan_map::HopscotchMap::with_capacity(64));
-        let handles: Vec<_> = (0..8u64)
+        let handles: Vec<_> = (0..CONCURRENT_THREADS)
             .map(|t| {
                 let map = Arc::clone(&map);
                 std::thread::spawn(move || {
-                    for i in 0..1000u64 {
+                    for i in 0..CONCURRENT_ITERS {
                         let key = t * 10_000 + i;
                         map.insert(key, Counted::new(key));
                         if i % 3 == 0 {
