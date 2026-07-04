@@ -47,8 +47,8 @@ const ITEMS_PER_PRODUCER: u64 = 6;
 const PRODUCERS: u64 = 2;
 const CONSUMERS: u64 = 2;
 
-fn mpmc_no_loss_no_duplication() {
-    let queue = Arc::new(ArrayQueue::<u64>::new(CAPACITY));
+fn mpmc_no_loss_no_duplication(capacity: usize) {
+    let queue = Arc::new(ArrayQueue::<u64>::new(capacity));
 
     let producers: Vec<_> = (0..PRODUCERS)
         .map(|p| {
@@ -122,5 +122,15 @@ fn mpmc_no_loss_no_duplication() {
 
 #[test]
 fn shuttle_array_queue_mpmc_no_loss_no_duplication() {
-    shuttle::check_pct(mpmc_no_loss_no_duplication, 5000, 5);
+    shuttle::check_pct(|| mpmc_no_loss_no_duplication(CAPACITY), 5000, 5);
+}
+
+/// Capacity 1 is the degenerate ring where the pre-fix stamp arithmetic
+/// collided (a push past capacity was accepted, then pop/Drop livelocked);
+/// model-check the same no-loss/no-duplication contract on it. Every
+/// push/pop crosses the lap boundary, so this maximizes contention on the
+/// lap-jump head/tail arithmetic.
+#[test]
+fn shuttle_array_queue_capacity_one_no_loss_no_duplication() {
+    shuttle::check_pct(|| mpmc_no_loss_no_duplication(1), 5000, 5);
 }
