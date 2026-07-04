@@ -41,6 +41,17 @@ fn backoff_hint(backoff: &crossbeam_utils::Backoff) {
     }
 }
 
+/// SeqCst fence ordering the head/tail re-check after a stamp load in
+/// `push`'s full test and `pop`'s empty test, so a stale counter cannot
+/// misreport full/empty. Under `shuttle` this is a no-op: shuttle explores
+/// schedules over sequentially consistent atomics, so the fence adds no
+/// behavior there.
+#[inline(always)]
+fn full_fence() {
+    #[cfg(not(feature = "shuttle"))]
+    std::sync::atomic::fence(Ordering::SeqCst);
+}
+
 /// A slot in a queue.
 struct Slot<T> {
     /// The current stamp.
@@ -63,6 +74,18 @@ pub struct ArrayQueue<T> {
 
     /// A mask for indices.
     mask: usize,
+
+    /// One full lap of head/tail sequence space: `2 * capacity`.
+    ///
+    /// Head and tail advance `+1` within a lap and jump to the next lap
+    /// boundary at the ring's end, so the stamp `pop` leaves for the next
+    /// lap (`head + one_lap`) can never equal the stamp `push` stores when
+    /// occupying a slot (`tail + 1`). With the previous `+1`-everywhere
+    /// scheme those collided when `capacity == 1` ("occupied" `x + 1` ==
+    /// next lap's "free" `x + capacity`), so a second push saw a full slot
+    /// as free, overwrote the unpopped value, and desynced the stamps -
+    /// after which `pop` (and `Drop`'s drain loop) spun forever.
+    one_lap: usize,
 }
 
 unsafe impl<T: Send> Send for ArrayQueue<T> {}
@@ -86,9 +109,17 @@ impl<T> ArrayQueue<T> {
         ArrayQueue {
             buffer: buffer.into_boxed_slice(),
             mask: capacity - 1,
+            one_lap: capacity * 2,
             head: CacheAligned::new(AtomicUsize::new(0)),
             tail: CacheAligned::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The head/tail value that starts the lap after the one containing
+    /// `pos`: advance `+1` within a lap, jump here at the ring's end.
+    #[inline(always)]
+    fn next_lap(&self, pos: usize) -> usize {
+        (pos & !(self.one_lap - 1)).wrapping_add(self.one_lap)
     }
 
     /// Pushes an element into the queue.
@@ -102,7 +133,11 @@ impl<T> ArrayQueue<T> {
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             if tail == stamp {
-                let next = tail + 1;
+                let next = if index + 1 < self.buffer.len() {
+                    tail + 1
+                } else {
+                    self.next_lap(tail)
+                };
                 if self
                     .tail
                     .compare_exchange_weak(tail, next, Ordering::SeqCst, Ordering::Relaxed)
@@ -114,9 +149,14 @@ impl<T> ArrayQueue<T> {
                     slot.stamp.store(tail + 1, Ordering::Release);
                     return Ok(());
                 }
-            } else if tail + 1 > stamp {
+            } else if stamp.wrapping_add(self.one_lap) == tail + 1 {
+                // The slot still holds the value pushed one lap back. Full
+                // unless a pop has advanced head since; the fence orders the
+                // head load after the stamp load so a stale head cannot
+                // report full when the slot was already drained.
+                full_fence();
                 let head = self.head.load(Ordering::Relaxed);
-                if tail >= head + self.buffer.len() {
+                if head.wrapping_add(self.one_lap) == tail {
                     return Err(value);
                 }
                 backoff_hint(&backoff);
@@ -138,18 +178,27 @@ impl<T> ArrayQueue<T> {
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             if head + 1 == stamp {
-                let next = head + 1;
+                let next = if index + 1 < self.buffer.len() {
+                    head + 1
+                } else {
+                    self.next_lap(head)
+                };
                 if self
                     .head
                     .compare_exchange_weak(head, next, Ordering::SeqCst, Ordering::Relaxed)
                     .is_ok()
                 {
                     let value = unsafe { slot.value.get().read().assume_init() };
+                    // Free the slot for the push one lap ahead, whose tail
+                    // will equal exactly `head + one_lap`.
                     slot.stamp
-                        .store(head + self.buffer.len(), Ordering::Release);
+                        .store(head.wrapping_add(self.one_lap), Ordering::Release);
                     return Some(value);
                 }
             } else if head == stamp {
+                // Slot not yet pushed this lap: empty unless a push has
+                // advanced tail since; fence for the same reason as `push`.
+                full_fence();
                 let tail = self.tail.load(Ordering::Relaxed);
                 if tail == head {
                     return None;
@@ -178,7 +227,8 @@ impl<T> ArrayQueue<T> {
     pub fn is_full(&self) -> bool {
         let head = self.head.load(Ordering::SeqCst);
         let tail = self.tail.load(Ordering::SeqCst);
-        tail == head + self.buffer.len()
+        // Full when tail is exactly one lap ahead of head.
+        tail == head.wrapping_add(self.one_lap)
     }
 }
 
