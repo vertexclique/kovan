@@ -20,7 +20,10 @@ fn kovan_native_writer_never_registers() {
     db.set_external_apply(true);
     let mut tx = db.begin();
     tx.write("k", b"v".to_vec()).unwrap();
-    assert!(db.inflight_writes().is_empty(), "kovan never auto-registers");
+    assert!(
+        db.inflight_writes().is_empty(),
+        "kovan never auto-registers"
+    );
     let ct = tx.commit().expect("commit");
     assert!(db.inflight_writes().is_empty());
     assert_eq!(db.safe_read_ts(ct + 5), ct + 5);
@@ -132,7 +135,10 @@ fn ttas_bounded_returns_promptly_under_persistent_writer() {
     let rt = db.safe_read_ts(ws + 50);
     let elapsed = start.elapsed();
     assert_eq!(rt, ws - 1, "pinned below the stuck writer");
-    assert!(elapsed.as_millis() < 50, "TTAS must be bounded, took {elapsed:?}");
+    assert!(
+        elapsed.as_millis() < 50,
+        "TTAS must be bounded, took {elapsed:?}"
+    );
 }
 
 #[test]
@@ -161,7 +167,7 @@ fn min_ts_never_misses_a_live_writer_under_register_churn() {
             while !stop.load(Ordering::Relaxed) {
                 let id = 1000 + t * 1_000_000 + u128::from(i % 512);
                 reg.register(id, 100 + (i % 97));
-                if i % 3 == 0 {
+                if i.is_multiple_of(3) {
                     reg.unregister(id);
                 }
                 i += 1;
