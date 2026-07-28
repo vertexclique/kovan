@@ -317,10 +317,13 @@ impl KovanMVCC {
     ///   switches and priority inversion harmless: the worst case is a
     ///   slightly older (still consistent) snapshot, never a stall.
     pub fn safe_read_ts(&self, oracle_now: u64) -> u64 {
-        // Fast path: no writers in flight (every OLAP scan) - one check.
-        if self.inflight_writes.is_empty() {
-            return oracle_now;
-        }
+        // NO is_empty fast path: the map's emptiness check races hopscotch
+        // relocations exactly like an unvalidated iteration did (a live
+        // writer mid-relocation reads as absent - the silent-unpin torn
+        // read). `min_ts` below IS the validated check; an empty registry
+        // returns None on its first epoch-stable pass, which for the OLAP
+        // case costs one empty iteration + two epoch loads - no lock, no
+        // syscall, and correct under churn.
         // TTAS spin: test with a cheap load, back off with PAUSE, re-test.
         // Cap chosen so total spin is bounded to a few microseconds (short
         // OLTP apply latency); past it, pin-below-and-proceed.
