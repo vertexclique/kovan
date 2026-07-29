@@ -5,6 +5,7 @@ use crate::storage::{InMemoryStorage, Storage, Value, WriteInfo, WriteKind};
 use crate::timestamp_oracle::{LocalTimestampOracle, TimestampOracle};
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Registry of active transactions, used for GC watermark computation.
 pub struct ActiveTxnRegistry {
@@ -76,6 +77,107 @@ impl Default for ActiveTxnRegistry {
     }
 }
 
+/// Registry of IN-FLIGHT WRITE transactions, by `txn_id -> start_ts`.
+///
+/// Registration is the EMBEDDER'S contract, not this crate's: an embedder
+/// whose physical apply happens outside kovan (external-apply mode) registers
+/// each writer at its first write INTENT - start_ts known, strictly BEFORE
+/// any commit_ts is allocated, so there is no allocate-then-register gap a
+/// concurrent reader could slip through - and unregisters when the writer's
+/// effects are durably visible (`KovanMVCC::mark_txn_applied` after its
+/// physical apply, or its rollback/drop path). kovan itself never registers:
+/// a kovan-native `Txn` whose `commit` IS the visibility point needs no
+/// entry, and auto-registering it would leak a permanent pin in
+/// external-apply mode (only the embedder knows which commits get an
+/// external apply). `commit`/`rollback` still unregister defensively
+/// (idempotent no-ops for never-registered txns). While registered, a reader
+/// must exclude the writer from its snapshot: `safe_read_ts` pins reads
+/// strictly below the minimum in-flight write start_ts. Wait-free
+/// (kovan_map), no lock on the read path.
+pub struct InflightWriteRegistry {
+    writers: HopscotchMap<u128, u64>,
+    /// Bumped on EVERY `register` (Release). `min_ts` iterates the map and a
+    /// hopscotch INSERT can relocate existing entries mid-iteration, so a
+    /// racing scan could MISS a registered writer entirely - the one failure
+    /// mode that silently unpins a reader (a torn read under churn, never
+    /// reproducible quiet). An epoch-stable pass proves no insert overlapped
+    /// the scan; removals need no bump (missing a just-unregistered writer is
+    /// safe - its effects are already durably visible).
+    insert_epoch: AtomicU64,
+}
+
+impl InflightWriteRegistry {
+    pub fn new() -> Self {
+        Self {
+            writers: HopscotchMap::new(),
+            insert_epoch: AtomicU64::new(0),
+        }
+    }
+
+    /// Register a write txn as in-flight (idempotent; keeps first start_ts).
+    pub fn register(&self, txn_id: u128, start_ts: u64) {
+        self.writers.insert(txn_id, start_ts);
+        // AFTER the insert: a min_ts pass that read the epoch before this
+        // bump and again after sees the change and retries, so the insert's
+        // relocations can never hide an entry from a "stable" pass.
+        self.insert_epoch.fetch_add(1, Ordering::Release);
+    }
+
+    /// Unregister a write txn (effects durably visible, or aborted).
+    pub fn unregister(&self, txn_id: u128) {
+        self.writers.remove(&txn_id);
+    }
+
+    /// Minimum start_ts across in-flight writers, or None if none.
+    ///
+    /// Epoch-validated: retries until one pass overlaps NO concurrent
+    /// `register` (hopscotch inserts relocate entries; an unvalidated racing
+    /// scan can miss a live writer - the silent-unpin torn-read class).
+    /// Bounded: under a persistent register storm it returns the SMALLEST
+    /// value seen across every attempt (conservative - may over-pin a
+    /// reader by one storm-window, never under-pin it).
+    pub fn min_ts(&self) -> Option<u64> {
+        const SCAN_RETRIES: u32 = 64;
+        let mut conservative: Option<u64> = None;
+        for _ in 0..SCAN_RETRIES {
+            let before = self.insert_epoch.load(Ordering::Acquire);
+            let mut min = None;
+            for (_, ts) in self.writers.iter() {
+                match min {
+                    None => min = Some(ts),
+                    Some(c) if ts < c => min = Some(ts),
+                    _ => {}
+                }
+            }
+            if self.insert_epoch.load(Ordering::Acquire) == before {
+                return min;
+            }
+            conservative = match (conservative, min) {
+                (None, m) => m,
+                (c, None) => c,
+                (Some(c), Some(m)) => Some(c.min(m)),
+            };
+            core::hint::spin_loop();
+        }
+        conservative
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.writers.is_empty()
+    }
+
+    /// Number of in-flight writers (test/introspection surface).
+    pub fn len(&self) -> usize {
+        self.writers.iter().count()
+    }
+}
+
+impl Default for InflightWriteRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Transaction isolation level.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
@@ -95,6 +197,15 @@ pub struct KovanMVCC {
     ts_oracle: Arc<dyn TimestampOracle>,
     backoff: Arc<dyn BackoffStrategy>,
     active_txns: Arc<ActiveTxnRegistry>,
+    /// In-flight write transactions (see `InflightWriteRegistry`). A writer
+    /// is registered at its first buffered write and unregistered when its
+    /// effects are durably visible (at `commit` standalone, or via
+    /// `mark_txn_applied` in external-apply mode).
+    inflight_writes: Arc<InflightWriteRegistry>,
+    /// When true, `commit` leaves the writer registered for the embedder to
+    /// `mark_txn_applied` after its external physical apply; when false
+    /// (default) commit unregisters immediately (standalone contract).
+    external_apply: bool,
     /// Serializes SSI validation + commit for Serializable transactions.
     /// Ensures that when one Serializable txn commits, the next one sees it.
     ssi_commit_lock: Arc<parking_lot::Mutex<()>>,
@@ -127,6 +238,8 @@ impl KovanMVCC {
             ts_oracle,
             backoff: Arc::new(DefaultBackoff),
             active_txns: Arc::new(ActiveTxnRegistry::new()),
+            inflight_writes: Arc::new(InflightWriteRegistry::new()),
+            external_apply: false,
             ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
@@ -137,6 +250,8 @@ impl KovanMVCC {
             ts_oracle: Arc::new(LocalTimestampOracle::new()),
             backoff: Arc::new(DefaultBackoff),
             active_txns: Arc::new(ActiveTxnRegistry::new()),
+            inflight_writes: Arc::new(InflightWriteRegistry::new()),
+            external_apply: false,
             ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
@@ -150,6 +265,8 @@ impl KovanMVCC {
             ts_oracle,
             backoff: Arc::new(DefaultBackoff),
             active_txns: Arc::new(ActiveTxnRegistry::new()),
+            inflight_writes: Arc::new(InflightWriteRegistry::new()),
+            external_apply: false,
             ssi_commit_lock: Arc::new(parking_lot::Mutex::new(())),
         }
     }
@@ -162,6 +279,78 @@ impl KovanMVCC {
     /// Get a reference to the active transaction registry.
     pub fn active_txns(&self) -> &Arc<ActiveTxnRegistry> {
         &self.active_txns
+    }
+
+    /// Get a reference to the in-flight write registry.
+    pub fn inflight_writes(&self) -> &Arc<InflightWriteRegistry> {
+        &self.inflight_writes
+    }
+
+    /// Enable external-apply mode: `commit` leaves each commit_ts pending for
+    /// the embedder to `mark_commit_applied` after its own physical apply is
+    /// durably visible. Off by default (commit self-completes). Set once at
+    /// construction time by an embedder that applies effects outside kovan.
+    pub fn set_external_apply(&mut self, enabled: bool) {
+        self.external_apply = enabled;
+    }
+
+    /// Signal that write txn `txn_id`'s external physical effects are now
+    /// durably visible to readers. No-op unless `external_apply`. Idempotent.
+    pub fn mark_txn_applied(&self, txn_id: u128) {
+        self.inflight_writes.unregister(txn_id);
+    }
+
+    /// The read horizon a snapshot read pins to: `oracle_now`, bounded
+    /// strictly below any in-flight writer, resolved via a BOUNDED TTAS
+    /// spin. Semantics:
+    /// - No in-flight writer (OLAP / quiesced): returns `oracle_now` after a
+    ///   single wait-free `is_empty` check. Zero spin, zero syscall.
+    /// - An in-flight writer started at/below `oracle_now` (it might commit
+    ///   into this snapshot but its apply may be mid-flight): spin briefly
+    ///   with exponential PAUSE backoff to let short OLTP writers land, so
+    ///   the reader stays fresh. If the writer drains, return `oracle_now`.
+    /// - If a writer persists past the spin cap (a long writer, or a
+    ///   descheduled one - priority inversion): STOP spinning and pin the
+    ///   read strictly below it (`min_ts - 1`), returning a consistent
+    ///   snapshot just before it. NEVER blocks, never holds a lock, always
+    ///   makes progress, no syscall on the hot path. This makes context
+    ///   switches and priority inversion harmless: the worst case is a
+    ///   slightly older (still consistent) snapshot, never a stall.
+    pub fn safe_read_ts(&self, oracle_now: u64) -> u64 {
+        // NO is_empty fast path: the map's emptiness check races hopscotch
+        // relocations exactly like an unvalidated iteration did (a live
+        // writer mid-relocation reads as absent - the silent-unpin torn
+        // read). `min_ts` below IS the validated check; an empty registry
+        // returns None on its first epoch-stable pass, which for the OLAP
+        // case costs one empty iteration + two epoch loads - no lock, no
+        // syscall, and correct under churn.
+        // TTAS spin: test with a cheap load, back off with PAUSE, re-test.
+        // Cap chosen so total spin is bounded to a few microseconds (short
+        // OLTP apply latency); past it, pin-below-and-proceed.
+        const SPIN_CAP: u32 = 40;
+        let mut attempt: u32 = 0;
+        loop {
+            match self.inflight_writes.min_ts() {
+                // All in-flight writers started AFTER this snapshot: their
+                // commit_ts will exceed oracle_now, invisible - safe as-is.
+                None => return oracle_now,
+                Some(m) if m > oracle_now => return oracle_now,
+                Some(m) => {
+                    if attempt >= SPIN_CAP {
+                        // Bounded: stop spinning, pin strictly below the
+                        // oldest in-flight writer, proceed. No block.
+                        return oracle_now.min(m.saturating_sub(1));
+                    }
+                    attempt += 1;
+                    // Exponential PAUSE backoff (capped), TTAS style: no
+                    // atomic write, no syscall, no lock held.
+                    let spins = 1u32 << attempt.min(6);
+                    for _ in 0..spins {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+        }
     }
 
     /// Get a reference to the timestamp oracle.
@@ -202,6 +391,8 @@ impl KovanMVCC {
             ts_oracle: self.ts_oracle.clone(),
             backoff: self.backoff.clone(),
             active_txns: self.active_txns.clone(),
+            inflight_writes: self.inflight_writes.clone(),
+            external_apply: self.external_apply,
             writes: HopscotchMap::new(),
             primary_key: None,
             committed: false,
@@ -219,6 +410,10 @@ pub struct Txn {
     ts_oracle: Arc<dyn TimestampOracle>,
     backoff: Arc<dyn BackoffStrategy>,
     active_txns: Arc<ActiveTxnRegistry>,
+    /// In-flight write registry shared with KovanMVCC.
+    inflight_writes: Arc<InflightWriteRegistry>,
+    /// Whether commit leaves the writer registered for external apply.
+    external_apply: bool,
     /// Buffered writes: key -> (lock_type, value)
     writes: HopscotchMap<String, (LockType, Option<Value>)>,
     /// Primary key for 2PC
@@ -416,16 +611,29 @@ impl Txn {
             }
         }
 
-        // Get commit timestamp
+        // Get commit timestamp. An external-apply embedder registered this
+        // writer in-flight at its first write intent (before this ts
+        // existed - no gap), so a concurrent reader's `safe_read_ts`
+        // already excludes it; a kovan-native txn has no entry and needs
+        // none (this commit IS its visibility point).
         let commit_ts = self.ts_oracle.get_timestamp();
 
         // Phase 2: Commit
         if let Err(e) = self.commit_primary(&primary_key, commit_ts) {
+            // Failed commit: no visible effects; stop excluding this writer.
+            self.inflight_writes.unregister(self.txn_id);
             self.rollback();
             return Err(e);
         }
 
         self.commit_secondaries(&primary_key, commit_ts);
+        // Standalone: kovan's own storage is applied now, so the writer is
+        // done - unregister. External-apply: the embedder applies to its own
+        // storage AFTER this returns, so keep the writer in-flight until it
+        // calls `mark_txn_applied(txn_id)`.
+        if !self.external_apply {
+            self.inflight_writes.unregister(self.txn_id);
+        }
         // _ssi_guard dropped here, releasing the lock
         Ok(commit_ts)
     }
@@ -563,6 +771,8 @@ impl Txn {
     }
 
     fn rollback(&self) {
+        // A rolled-back writer has no visible effects: stop excluding it.
+        self.inflight_writes.unregister(self.txn_id);
         for (key, _) in &self.writes {
             // Only clean up keys where we actually hold the lock.
             // A transaction that failed lock acquisition has no data to rollback

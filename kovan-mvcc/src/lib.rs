@@ -44,6 +44,8 @@ mod timestamp_oracle;
 pub use crate::backoff::{BackoffAction, BackoffStrategy, DefaultBackoff};
 pub use crate::error::MvccError;
 pub use crate::lock_table::{LockInfo, LockTable, LockType};
-pub use crate::percolator::{ActiveTxnRegistry, IsolationLevel, KovanMVCC, Txn};
+pub use crate::percolator::{
+    ActiveTxnRegistry, InflightWriteRegistry, IsolationLevel, KovanMVCC, Txn,
+};
 pub use crate::storage::{InMemoryStorage, Storage, Value, WriteInfo, WriteKind};
 pub use crate::timestamp_oracle::{LocalTimestampOracle, MockTimestampOracle, TimestampOracle};
