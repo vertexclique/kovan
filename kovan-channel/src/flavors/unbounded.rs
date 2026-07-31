@@ -1,8 +1,19 @@
 use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
+// Shuttle-instrumented so `sender_count`/`disconnected` -- raced by a
+// blocking `recv`'s register/recheck against `Sender::drop`'s
+// disconnect-then-wake, see `crate::waitlist` -- are checker scheduling
+// points, matching `signal.rs`'s `Signal` swap.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicBool, AtomicUsize};
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+use crate::flavors::RecvDeadline;
 use crate::signal::{AsyncSignal, Notifier, Signal};
 use crate::waitlist::{WaitList, wakeup_fence};
 
@@ -304,10 +315,106 @@ impl<T: 'static> Receiver<T> {
                 return Some(msg);
             }
 
-            // Woken by disconnect with empty queue
+            // Woken by disconnect with empty queue. Drain once more rather
+            // than trusting the try_recv immediately above: that try_recv
+            // and this is_disconnected read are independent atomics with
+            // no ordering link forcing them to agree with each other, so
+            // observing disconnected here does not by itself prove that
+            // same-thread, immediately-prior try_recv already saw every
+            // message a sender published before disconnecting -- the
+            // exact independent-location gap `crate::waitlist`'s fence
+            // exists to close for registration vs. the condition it
+            // guards, reopened here because nothing fences try_recv
+            // against is_disconnected. Found by shuttle once the blocking
+            // path's own atomics became checker scheduling points.
             if self.is_disconnected() {
-                return None;
+                return self.try_recv(); // Drain remaining
             }
+        }
+    }
+
+    /// Receives a message from the channel, blocking until either a
+    /// message arrives or `deadline` passes.
+    ///
+    /// Mirrors [`recv`](Self::recv)'s register -> fence -> recheck -> park
+    /// loop (see `crate::waitlist` for the loss-free wakeup contract),
+    /// swapping the unbounded park for [`Signal::wait_deadline`] so a
+    /// caller never blocks past its budget. `Timeout` and `Disconnected`
+    /// are kept distinct (see [`RecvDeadline`]) because a caller bounding
+    /// an internal wait wants to treat them differently: a timeout is
+    /// worth retrying or escalating, a disconnect never will be.
+    pub fn recv_deadline(&self, deadline: Instant) -> RecvDeadline<T> {
+        if let Some(msg) = self.try_recv() {
+            return RecvDeadline::Msg(msg);
+        }
+
+        if self.is_disconnected() {
+            return match self.try_recv() {
+                Some(msg) => RecvDeadline::Msg(msg),
+                None => RecvDeadline::Disconnected,
+            };
+        }
+
+        loop {
+            // Register unconditionally, then recheck -- the loss-free
+            // wakeup protocol documented in `crate::waitlist`.
+            let signal = Arc::new(Signal::new());
+            self.inner.receivers.register(signal.clone());
+            wakeup_fence();
+
+            if let Some(msg) = self.try_recv() {
+                // We registered but found a message already: not going to
+                // wait, so mark our own entry stale (see `waitlist` docs).
+                signal.notify();
+                return RecvDeadline::Msg(msg);
+            }
+
+            if self.is_disconnected() {
+                signal.notify();
+                return match self.try_recv() {
+                    Some(msg) => RecvDeadline::Msg(msg),
+                    None => RecvDeadline::Disconnected,
+                };
+            }
+
+            if !signal.wait_deadline(deadline) {
+                // Timed out: mark our own entry stale (see `waitlist`
+                // docs) and do one last recheck -- a message or disconnect
+                // may have landed in the instant the deadline passed.
+                signal.notify();
+                if let Some(msg) = self.try_recv() {
+                    return RecvDeadline::Msg(msg);
+                }
+                if !self.is_disconnected() {
+                    return RecvDeadline::Timeout;
+                }
+                // Disconnected: drain once more rather than trusting the
+                // try_recv just above (see `recv`'s final check for why
+                // that try_recv and this is_disconnected read can
+                // legitimately disagree).
+                return match self.try_recv() {
+                    Some(msg) => RecvDeadline::Msg(msg),
+                    None => RecvDeadline::Disconnected,
+                };
+            }
+
+            // Woken -- either a message arrived or senders disconnected.
+            if let Some(msg) = self.try_recv() {
+                return RecvDeadline::Msg(msg);
+            }
+
+            if self.is_disconnected() {
+                return match self.try_recv() {
+                    Some(msg) => RecvDeadline::Msg(msg),
+                    None => RecvDeadline::Disconnected,
+                };
+            }
+
+            // Spurious wake with nothing to show: loop back and
+            // re-register. `wait_deadline` re-derives "has `deadline`
+            // passed" from the clock on every call, so this cannot
+            // overrun its budget no matter how many spurious iterations
+            // happen first.
         }
     }
 
@@ -322,8 +429,29 @@ impl<T: 'static> Receiver<T> {
 
     /// Registers a signal for notification when a message arrives.
     ///
-    /// This is used for `select!` implementation.
+    /// This is the primitive `select!` builds on to wait across multiple
+    /// channels with a single `Signal`. It exposes step 1 of the crate's
+    /// register -> fence -> recheck -> park loss-free wakeup protocol (see
+    /// the `crate::waitlist` module docs) without the other three steps:
+    /// the caller owns the rest of the contract -- after registering on
+    /// every channel it cares about, it MUST call
+    /// `crate::waitlist::wakeup_fence` (or an equivalent `SeqCst` fence)
+    /// and then recheck every channel's condition *before*
+    /// parking/awaiting on `signal`. Skipping the fence or the recheck
+    /// reopens the exact store-buffering race the protocol exists to
+    /// close, and a real wakeup can be silently lost.
+    ///
+    /// `signal` must be a fresh registration, not a `Notifier` that was
+    /// already notified (for example, reused across loop iterations
+    /// without resetting): an already-notified entry is indistinguishable
+    /// from a stale one, and `notify_one` will pop and discard it unread,
+    /// silently starving this registration forever.
     pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
+        debug_assert!(
+            !signal.is_notified(),
+            "register_signal: registering an already-notified Notifier; it will be treated as \
+             a stale entry and skipped by notify_one, silently losing this registration's wakeup"
+        );
         self.inner.receivers.register(signal);
     }
 
@@ -372,7 +500,11 @@ impl<T: 'static> Receiver<T> {
 
                 if this.receiver.is_disconnected() {
                     this.signal.notify();
-                    return Poll::Ready(None);
+                    // Drain once more rather than trusting the try_recv
+                    // just above (see `Receiver::recv`'s final check for
+                    // why that try_recv and this is_disconnected read can
+                    // legitimately disagree).
+                    return Poll::Ready(this.receiver.try_recv());
                 }
 
                 Poll::Pending

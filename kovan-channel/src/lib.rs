@@ -60,6 +60,7 @@ pub mod signal;
 /// Lock-free registration queues for parked senders/receivers.
 mod waitlist;
 
+pub use flavors::RecvDeadline;
 pub use flavors::bounded;
 pub use flavors::unbounded;
 

@@ -1,10 +1,23 @@
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-use crate::utils::CacheAligned;
+use crate::utils::{CacheAligned, backoff_hint};
 use kovan::{Atomic, RetiredNode, Shared, pin};
+
+// `head`/`tail` (below) and each `Segment::next` are `kovan::Atomic<T>`,
+// already shuttle-instrumented by this crate's `shuttle` feature cascading
+// into `kovan/shuttle` (see this crate's Cargo.toml). `Slot::state` and
+// `len` are this queue's own plain atomics, on top of that -- swapped here
+// the same way `array_queue.rs` swaps its self-contained head/tail/stamp,
+// so a consumer's slot-state scan and a producer's slot claim are checker
+// scheduling points too, matching `kovan-channel`'s `Signal`/`WaitList`
+// swap.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicUsize;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicUsize;
 
 const SEGMENT_SIZE: usize = 32;
 
@@ -157,7 +170,7 @@ impl<T: 'static> SegQueue<T> {
             } else {
                 unsafe { drop(Box::from_raw(new_segment)) };
             }
-            backoff.snooze();
+            backoff_hint(&backoff);
         }
     }
 
@@ -226,7 +239,7 @@ impl<T: 'static> SegQueue<T> {
                 return None;
             }
 
-            backoff.snooze();
+            backoff_hint(&backoff);
         }
     }
 
