@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
 
-use crate::utils::CacheAligned;
+use crate::utils::{CacheAligned, backoff_hint};
 
 // vertexia: head/tail/stamp are this queue's entire concurrency surface
 // (push/pop is a closed CAS protocol over just these three, no kovan
@@ -14,32 +14,6 @@ use crate::utils::CacheAligned;
 use shuttle::sync::atomic::AtomicUsize;
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::AtomicUsize;
-
-/// Contention backoff for `push`/`pop`'s retry loops. Under a normal build,
-/// `crossbeam_utils::Backoff`'s usual exponential spin-then-yield. Under
-/// `shuttle`, `crossbeam_utils::Backoff::snooze`'s eventual
-/// `std::thread::yield_now` is a no-op for shuttle's cooperative scheduler
-/// (every other task is genuinely parked, not merely de-prioritized) and,
-/// worse, doesn't tell the scheduler this thread yielded -- a plain
-/// instrumented `.load()` in the loop is a valid scheduling point but not a
-/// *fair* one, so an unlucky priority draw can re-select the same spinning
-/// thread until shuttle's step budget is exhausted ("exceeded max_steps
-/// bound", an unfair schedule, not a real bug -- see the identical failure
-/// mode and full reasoning on `kovan-map`'s `resize_spin_hint`).
-/// `shuttle::hint::spin_loop` (which calls `shuttle::thread::yield_now`) is
-/// the explicit signal PCT/random need to guarantee the other side a turn.
-#[inline(always)]
-fn backoff_hint(backoff: &crossbeam_utils::Backoff) {
-    #[cfg(feature = "shuttle")]
-    {
-        let _ = backoff;
-        shuttle::hint::spin_loop();
-    }
-    #[cfg(not(feature = "shuttle"))]
-    {
-        backoff.snooze();
-    }
-}
 
 /// SeqCst fence ordering the head/tail re-check after a stamp load in
 /// `push`'s full test and `pop`'s empty test, so a stale counter cannot
