@@ -1,10 +1,6 @@
 [package]
 name = "kovan-channel"
-# Overrides the workspace version (0.1.17): this crate alone carries the P0
-# resilience fixes (blocking-path shuttle instrumentation, the disconnect-
-# drain fix, recv_deadline). No other kovan crate changed, so no other
-# crate bumps with it.
-version = "0.1.18"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
