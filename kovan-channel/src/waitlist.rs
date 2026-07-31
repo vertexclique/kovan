@@ -71,7 +71,19 @@
 use crate::signal::Notifier;
 use kovan_queue::seg_queue::SegQueue;
 use std::sync::Arc;
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::Ordering;
+
+// Shuttle's own `fence` is (as of shuttle 0.9) a documented no-op under the
+// checker -- shuttle already treats every atomic operation as `SeqCst`, so
+// this call adds no scheduling point either way, unlike the `AtomicUsize`/
+// `AtomicBool` swaps in `signal.rs`/`flavors::unbounded`/`flavors::bounded`,
+// which are what actually make the register/publish race explorable.
+// Swapped anyway so this module consistently reaches for shuttle's atomic
+// API under the feature, matching every other call site.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::fence;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::fence;
 
 /// The `SeqCst` fence pairing registration with recheck, and publish with
 /// notify. Named (rather than inlined at each call site) so every use sites

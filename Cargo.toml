@@ -21,7 +21,7 @@ exclude = ["model_chk"]
 
 [workspace.dependencies]
 kovan = { version = "0.1.17", path = "kovan" }
-kovan-channel = { version = "0.1.17", path = "kovan-channel" }
+kovan-channel = { version = "0.1.18", path = "kovan-channel" }
 kovan-map = { version = "0.1.17", path = "kovan-map" }
 kovan-mvcc = { version = "0.1.17", path = "kovan-mvcc" }
 kovan-stm = { version = "0.1.17", path = "kovan-stm" }

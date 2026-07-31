@@ -36,7 +36,9 @@
 
 #![cfg(feature = "shuttle")]
 
+use kovan_channel::signal::Signal;
 use kovan_channel::{bounded, unbounded};
+use std::sync::Arc;
 
 /// (a) AtomicWaker-equivalent register-vs-wake through the public async
 /// recv path: one thread completes a send while another concurrently polls
@@ -130,4 +132,163 @@ fn waitlist_notify_one_skips_stale_entries() {
 #[test]
 fn shuttle_channel_waitlist_notify_one_skips_stale_entries() {
     shuttle::check_pct(waitlist_notify_one_skips_stale_entries, 8000, 5);
+}
+
+/// (d) The BLOCKING equivalent of (a): the exact F-16 shape. Three
+/// senders racing one *blocking* `recv()` (`thread::park`/`unpark` via
+/// `Signal`, not the async `AtomicWaker`) -- every sent message must be
+/// received, never lost to the register/fence/recheck/park race. Before
+/// `signal.rs`'s blocking path was shuttle-instrumented, this loop ran as
+/// one uninterruptible step from the checker's point of view (nothing
+/// inside it was a scheduling point), so it could not have caught the
+/// F-16 wedge even if run for years of iterations.
+fn blocking_recv_no_lost_wake_n_senders() {
+    let (tx1, rx) = unbounded::<u64>();
+    let tx2 = tx1.clone();
+    let tx3 = tx1.clone();
+
+    let receiver = shuttle::thread::spawn(move || {
+        let mut got = Vec::with_capacity(3);
+        for _ in 0..3 {
+            got.push(
+                rx.recv()
+                    .expect("a sender is still alive for all 3 messages"),
+            );
+        }
+        got
+    });
+    let s1 = shuttle::thread::spawn(move || tx1.send(1u64));
+    let s2 = shuttle::thread::spawn(move || tx2.send(2u64));
+    let s3 = shuttle::thread::spawn(move || tx3.send(3u64));
+
+    s1.join().unwrap();
+    s2.join().unwrap();
+    s3.join().unwrap();
+    let mut got = receiver.join().unwrap();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![1, 2, 3],
+        "blocking recv lost a wake: did not receive all 3 concurrently-sent messages"
+    );
+}
+
+#[test]
+fn shuttle_channel_blocking_recv_no_lost_wake_n_senders() {
+    shuttle::check_pct(blocking_recv_no_lost_wake_n_senders, 8000, 5);
+}
+
+/// (e) Two blocking receivers on one channel, one message sent: whichever
+/// receiver's `notify_one`-delivered wakeup corresponds to a message that
+/// the *other* receiver's own recheck steals first must re-park (loop
+/// back to register + recheck) rather than return `None` or spin/hang.
+/// `recv()`'s loop already falls through to its next iteration whenever
+/// a wakeup wasn't backed by an actual message (see `flavors::unbounded`
+/// module), so this is a shuttle proof of that path under the blocking
+/// primitives, not a new code path. Sending only after both receivers
+/// have joined guarantees the channel disconnects once the one message is
+/// claimed, so the loser's `recv()` always returns and this cannot hang.
+fn blocking_recv_steals_notified_message_reparks() {
+    let (tx, rx1) = unbounded::<u64>();
+    let rx2 = rx1.clone();
+
+    let recv1 = shuttle::thread::spawn(move || rx1.recv());
+    let recv2 = shuttle::thread::spawn(move || rx2.recv());
+    let sender = shuttle::thread::spawn(move || tx.send(7u64));
+
+    sender.join().unwrap();
+    let r1 = recv1.join().unwrap();
+    let r2 = recv2.join().unwrap();
+    let got: Vec<u64> = [r1, r2].into_iter().flatten().collect();
+    assert_eq!(
+        got,
+        vec![7u64],
+        "the message was lost or duplicated across two racing blocking receivers"
+    );
+}
+
+#[test]
+fn shuttle_channel_blocking_recv_steals_notified_message_reparks() {
+    shuttle::check_pct(blocking_recv_steals_notified_message_reparks, 8000, 5);
+}
+
+/// (f) `notify_one` racing a fresh registration with a *stale* entry
+/// sitting ahead of it in the same `WaitList` -- the store-buffering
+/// (Dekker) interleaving `wakeup_fence` exists to exclude (see the module
+/// docs on `crate::waitlist`, and 02_wakeloss_and_watchdogs.md section
+/// 1.1): thread A's register-then-recheck racing thread B's
+/// publish-then-notify, where naive Acquire/Release on the two
+/// independent locations (the registration queue, the message) could let
+/// both sides observe stale state and the wakeup vanish.
+///
+/// The stale entry (registered and immediately self-notified, exactly
+/// what a `recv()` does when its own post-register recheck finds a
+/// message and never parks -- see "why registration can go stale" in the
+/// `waitlist` module docs) sits in the queue *ahead* of the fresh one by
+/// construction (`SegQueue` is FIFO), so `notify_one` must pop through it
+/// and land on the live, concurrently-registered receiver instead of
+/// discarding the wakeup on the stale head.
+fn notify_one_reaches_fresh_registration_past_stale_entry() {
+    let (tx, rx) = unbounded::<u64>();
+
+    let stale = Arc::new(Signal::new());
+    rx.register_signal(stale.clone());
+    stale.notify();
+
+    let receiver = shuttle::thread::spawn(move || rx.recv());
+    let sender = shuttle::thread::spawn(move || tx.send(99u64));
+
+    sender.join().unwrap();
+    assert_eq!(
+        receiver.join().unwrap(),
+        Some(99),
+        "notify_one was absorbed by the stale entry instead of reaching the live registration"
+    );
+}
+
+#[test]
+fn shuttle_channel_notify_one_reaches_fresh_registration_past_stale_entry() {
+    shuttle::check_pct(
+        notify_one_reaches_fresh_registration_past_stale_entry,
+        8000,
+        5,
+    );
+}
+
+/// (g) The bug PCT actually found while extending shuttle coverage to the
+/// blocking path (a real, pre-existing gap, not the shape (d)-(f) above
+/// were written to target -- see `flavors::unbounded::Receiver::recv`'s
+/// final disconnect check for the fix and the full argument): a
+/// receiver's *final* "give up" check, reached after being woken or timing
+/// out, read `is_disconnected()` with no ordering link back to the
+/// `try_recv()` read immediately before it. They are independent atomics
+/// -- seeing disconnected there does not by itself prove that
+/// same-thread, earlier try_recv already observed every message a sender
+/// published before disconnecting. A single send immediately followed by
+/// that sender's own drop (the common shape: the last clone sends then
+/// goes out of scope) must still be received, never reported as
+/// `None` just because the disconnect became visible one step "earlier"
+/// than the message in the interleaving the checker chose.
+fn blocking_recv_sees_message_published_just_before_disconnect() {
+    let (tx, rx) = unbounded::<u64>();
+
+    let receiver = shuttle::thread::spawn(move || rx.recv());
+    let sender = shuttle::thread::spawn(move || tx.send(5u64)); // tx drops here too
+
+    sender.join().unwrap();
+    assert_eq!(
+        receiver.join().unwrap(),
+        Some(5),
+        "recv() reported the channel disconnected-and-empty despite a message published \
+         immediately before the disconnecting sender dropped"
+    );
+}
+
+#[test]
+fn shuttle_channel_blocking_recv_sees_message_published_just_before_disconnect() {
+    shuttle::check_pct(
+        blocking_recv_sees_message_published_just_before_disconnect,
+        8000,
+        5,
+    );
 }

@@ -8,8 +8,25 @@
 //! registration queue (see the crate's `waitlist` module) can hold a mix
 //! of blocking and async waiters.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 use std::task::Waker;
+use std::time::Instant;
+
+// The blocking path's own shuttle target (mirrors the `AtomicWaker` swap
+// below it): `Signal::state` and the thread park/unpark pair must be
+// checker scheduling points for the register/fence/recheck/park race
+// (`crate::waitlist`) to be explorable at all -- an uninstrumented op
+// inside a shuttle-spawned task is an invisible, uninterruptible step from
+// the scheduler's point of view (see the `atomic_waker` module doc below
+// for the same argument in more detail).
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicUsize;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicUsize;
+
+#[cfg(feature = "shuttle")]
+use shuttle::thread::{self, Thread};
+#[cfg(not(feature = "shuttle"))]
 use std::thread::{self, Thread};
 
 /// A mechanism for thread synchronization and notification.
@@ -74,6 +91,33 @@ impl Signal {
     pub fn wait(&self) {
         while self.state.load(Ordering::Acquire) == 0 {
             thread::park();
+        }
+    }
+
+    /// Waits for the signal to be notified, or until `deadline` passes.
+    ///
+    /// Returns `true` if notified, `false` if `deadline` elapsed first.
+    /// Mirrors [`wait`](Self::wait)'s loop: every pass re-checks `state`
+    /// *before* it looks at the clock, so a notification landing in the
+    /// instant before the deadline is never missed in favor of reporting
+    /// a timeout -- the deadline is only trusted once `state` has already
+    /// been observed at 0.
+    ///
+    /// Under the `shuttle` feature, `park_timeout` cannot actually observe
+    /// wall-clock time (shuttle does not model time) and behaves exactly
+    /// like `park`, so a shuttle run only ever exercises this loop's wake
+    /// path; the timeout path is covered by the plain (non-shuttle) unit
+    /// tests in `tests/recv_deadline_test.rs` instead.
+    pub fn wait_deadline(&self, deadline: Instant) -> bool {
+        loop {
+            if self.state.load(Ordering::Acquire) != 0 {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            thread::park_timeout(deadline - now);
         }
     }
 

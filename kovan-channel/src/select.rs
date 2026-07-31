@@ -62,7 +62,6 @@ macro_rules! select {
             use std::sync::atomic::{Ordering, fence};
             use $crate::signal::Signal;
 
-            let signal = Arc::new(Signal::new());
             loop {
                 // 1. Try all
                 $(
@@ -72,7 +71,14 @@ macro_rules! select {
                     }
                 )*
 
-                // 2. Register all
+                // 2. Register all. A fresh `Signal` every iteration:
+                // `Signal` has no reset, so reusing one across loop passes
+                // would leave `state` stuck at "notified" after the first
+                // wakeup -- every later `wait()` on it then returns
+                // immediately (hot-spinning step 1..4 instead of actually
+                // parking) and every later registration is a stale entry
+                // piling up, unbounded, in each channel's `WaitList`.
+                let signal = Arc::new(Signal::new());
                 $(
                     $rx.register_signal(signal.clone());
                 )*
