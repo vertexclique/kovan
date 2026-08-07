@@ -2,6 +2,7 @@ use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 // Shuttle-instrumented so `sender_count`/`disconnected` -- raced by a
@@ -13,8 +14,11 @@ use shuttle::sync::atomic::{AtomicBool, AtomicUsize};
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::flavors::RecvDeadline;
-use crate::signal::{AsyncSignal, Notifier, Signal};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::signal::Signal;
+use crate::signal::{AsyncSignal, Notifier};
 use crate::waitlist::{WaitList, wakeup_fence};
 
 #[repr(C)]
@@ -278,6 +282,7 @@ impl<T: 'static> Receiver<T> {
     /// Receives a message from the channel, blocking if empty.
     ///
     /// Returns `None` when the channel is empty **and** all senders have been dropped.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recv(&self) -> Option<T> {
         if let Some(msg) = self.try_recv() {
             return Some(msg);
@@ -343,6 +348,7 @@ impl<T: 'static> Receiver<T> {
     /// are kept distinct (see [`RecvDeadline`]) because a caller bounding
     /// an internal wait wants to treat them differently: a timeout is
     /// worth retrying or escalating, a disconnect never will be.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recv_deadline(&self, deadline: Instant) -> RecvDeadline<T> {
         if let Some(msg) = self.try_recv() {
             return RecvDeadline::Msg(msg);

@@ -179,11 +179,81 @@ Supported list:
   - `s390` and `riscv64gc`: Supported natively. I am not testing it on CI (cross glibc issues).
 - Lock-Based Fallback (via `portable-atomic`):
   - Other 64-bit architectures without 128-bit atomic instructions (e.g., `riscv64`, `mips64`).
+  - 32-bit architectures: `wasm32-unknown-unknown`, `wasm32-wasip1`, `i686`.
   - On these platforms, 128-bit operations fall back to spinlocks.
   - **IMPORTANT**: Also on these platforms data structures function correctly but drop their **wait-free guarantees**.
 
-Not supported list:
-  - Not supported on 32-bit architectures. high and low nibbles for WORD split won't be sufficient. That's why.
+### 32-bit targets
+
+Supported, under the same lock-based-fallback caveat as any platform without
+native 128-bit atomics. The DCAS slot protocol is width-agnostic: the pointer
+half of each `(pointer, seqno)` word pair is zero-extended, and the batch
+reference-counter bias comes from `usize::BITS`.
+
+Two consequences worth stating plainly:
+
+- **No wait-free guarantee.** A 32-bit target never selects the `native`
+  `WordPair`, so `portable-atomic` emulates the 128-bit atomic with a lock.
+  Reclamation stays correct; it stops being lock-free, and so stops being
+  wait-free.
+- **Thread-ID headroom shrinks.** `RetiredNode::set_slot_info` packs
+  `(tid, slot_index)` into one `usize`, so the `tid` field is 16 bits wide
+  rather than 48. `MAX_PAGES * SLOTS_PER_PAGE` is 65,536, which fits exactly.
+  Static assertions in `slot.rs` fail the build rather than truncate a `tid`
+  should those constants ever grow.
+
+On `wasm32` the runtime is single-threaded unless the build opts into threads,
+so there is no contention to remove and lock-free machinery buys nothing there.
+The reason to support the target is portability: one code path that compiles
+everywhere, instead of a second implementation to keep in step.
+
+### Per-crate wasm support
+
+There is **no `wasm` feature**. Everything is selected by
+`cfg(target_arch = "wasm32")`, so building for wasm gives you the right code
+automatically — there is no flag to forget, and no way to get a build that
+compiles and then panics.
+
+| Crate | wasm32 | API difference on wasm |
+| --- | --- | --- |
+| `kovan` | yes | none |
+| `kovan-map` | yes | none |
+| `kovan-stm` | yes | none (the retry loop spins instead of yielding) |
+| `kovan-mvcc` | yes | none; `DefaultBackoff` spins instead of sleeping |
+| `kovan-queue` | partial | `disruptor` absent (it spawns a thread per processor). `ArrayQueue`, `SegQueue`, `utils` unchanged |
+| `kovan-channel` | partial | Blocking half absent: `Signal`, `recv`, `recv_deadline`, `RecvDeadline`, `bounded::send`, `after`, `tick`. Present: `try_recv`, `send_async`, `recv_async`, `unbounded::send`, `select!`, `never` |
+
+### Test coverage
+
+Each crate keeps its original `tests/*.rs` untouched — those stay the real
+concurrency coverage and are native-only. Single-threaded adaptations live in
+`<crate>/tests/wasm/` and run on every target. Where a test's entire value was
+the race, it is **not** ported; each file's header records what was dropped and
+why, rather than shipping a test that asserts nothing.
+
+| Target | What CI runs | Result |
+| --- | --- | --- |
+| `x86_64` | Full workspace suite (native DCAS path) | 544 |
+| `i686` | Full workspace suite at 32-bit — real threads on the seqlock fallback | 544 |
+| `wasm32-unknown-unknown` | Build (incl. `--no-default-features`), clippy, **and runs** the wasm suites via `wasm-bindgen-test` | 213 |
+| `wasm32-wasip1` | Build, clippy, **and runs** the wasm suites under `wasmtime` | 212 |
+
+The `i686` job is the strongest evidence for the width logic: it is the only
+target combining 32-bit pointers with real concurrency.
+
+`wasm32-unknown-unknown` is the load-bearing wasm job, not `wasip1`. `std`
+routes `target_os = "wasi"` to its unix implementation, so `Instant::now()`,
+`SystemTime::now()` and `thread::sleep` all work there — while on
+`wasm32-unknown-unknown` they hit the `unsupported` arm and **panic at
+runtime despite compiling**. Only the unknown-unknown job catches that class.
+(The 212 vs 213 difference is one `#[should_panic]` case; wasip1's harness has
+no `catch_unwind`.)
+
+Test targets are discovered from `cargo metadata` by
+`.github/workflows/wasm-test.sh` — any `[[test]]` named `wasm_*` is picked up
+automatically, so adding a suite needs no CI change. That script also fails the
+build if any test binary registers **zero** tests, since a binary that runs
+nothing still exits 0 and would otherwise read as a pass.
 
 ## License
 

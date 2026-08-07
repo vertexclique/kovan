@@ -27,5 +27,22 @@ kovan = { workspace = true }
 kovan-map = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
 
-[dev-dependencies]
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 shuttle = "0.9.1"
+
+# Single-threaded adaptations of the tests/*.rs integration tests, kept
+# under tests/wasm/ so they also run on 32-bit wasm (wasm32-wasip1 has no
+# working std::thread::spawn). Cargo's autodiscovery only picks up
+# top-level tests/*.rs files, not subdirectories, so each target below is
+# registered explicitly. The tests/*.rs originals are untouched and remain
+# the real concurrency coverage on native.
+[[test]]
+name = "wasm_integration"
+path = "tests/wasm/integration.rs"
+
+[[test]]
+name = "wasm_stress"
+path = "tests/wasm/stress.rs"

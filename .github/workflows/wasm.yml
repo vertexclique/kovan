@@ -1,0 +1,145 @@
+name: WASM / 32-bit
+
+# kovan's DCAS slot protocol is width-agnostic, but 32-bit targets take a
+# different code path: they never select the `native` WordPair, so
+# portable-atomic emulates the 128-bit atomic with a spin-based seqlock
+# (correct, but no longer lock-free). Nothing in the x86_64 matrix exercises
+# that path, so it needs its own workflow or it silently rots.
+#
+# Coverage split, and why each one exists:
+#   - wasm32-unknown-unknown: builds AND RUNS the wasm suites. This is the only
+#     job that catches the `std` `unsupported`-arm panics: Instant::now(),
+#     SystemTime::now() and thread::sleep all COMPILE here and then panic at
+#     runtime. A build-only job would report green over a guaranteed panic.
+#   - wasm32-wasip1: builds and runs under wasmtime. NOT a substitute for the
+#     above -- std maps `target_os = "wasi"` to the unix implementation, so the
+#     three APIs above work there. It is a second, cheaper execution surface.
+#   - i686-unknown-linux-gnu: the FULL threaded suite at 32-bit pointer width.
+#     Strictly the strongest evidence for the width logic, because it is the
+#     only target combining 32-bit pointers with real concurrency.
+#
+# Test targets are never hand-listed here: `wasm-test.sh` discovers every
+# `[[test]]` named `wasm_*` from `cargo metadata`, so a new
+# `<crate>/tests/wasm/*.rs` is picked up with no change to this file.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wasm-unknown:
+    name: wasm32-unknown-unknown (build + clippy + run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace --target wasm32-unknown-unknown
+
+      # `--no-default-features` is what proves the no_std + alloc path still
+      # builds at 32 bits; `std` is on by default.
+      - name: Build kovan (no_std, no default features)
+        run: cargo build -p kovan --target wasm32-unknown-unknown --no-default-features
+
+      # `--lib` deliberately: `--all-targets` would also build the pristine
+      # tests/*.rs, which are native-only by design (threads, and native-only
+      # dev-deps such as rand/shuttle/criterion).
+      - name: Clippy
+        run: cargo clippy --workspace --target wasm32-unknown-unknown --lib -- -D warnings
+
+      # wasm-bindgen refuses to run when the CLI's schema version differs from
+      # the wasm-bindgen crate compiled into the test binary, so the version is
+      # derived from the lockfile rather than pinned by hand.
+      - name: Install wasm-bindgen-cli matching the lockfile
+        run: |
+          VER=$(cargo metadata --format-version 1 --filter-platform wasm32-unknown-unknown \
+                | jq -r '.packages[] | select(.name=="wasm-bindgen") | .version' | head -1)
+          echo "wasm-bindgen version from lockfile: $VER"
+          cargo install wasm-bindgen-cli --version "$VER" --locked
+
+      - name: Run wasm test suites
+        run: .github/workflows/wasm-test.sh wasm32-unknown-unknown
+
+  wasm-wasi:
+    name: wasm32-wasip1 (build + run under wasmtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Official installer rather than a third-party action, so this has no
+      # dependency outside the Bytecode Alliance's own distribution.
+      - name: Install wasmtime
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Verify wasmtime is on PATH
+        run: wasmtime --version
+
+      - name: Build workspace
+        run: cargo build --workspace --target wasm32-wasip1
+
+      - name: Clippy
+        run: cargo clippy --workspace --target wasm32-wasip1 --lib -- -D warnings
+
+      # The runner is configured in .cargo/config.toml, so this genuinely
+      # executes the test binaries rather than only compiling them.
+      - name: Run wasm test suites
+        run: .github/workflows/wasm-test.sh wasm32-wasip1
+
+  i686:
+    name: i686 (full threaded suite at 32-bit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install 32-bit toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386
+
+      # No +cmpxchg16b here on purpose: i686 has no 128-bit atomic, so this
+      # exercises the portable-atomic seqlock fallback -- the same code path
+      # wasm takes, but with real threads contending on it.
+      - name: Run full suite (release)
+        run: cargo test --workspace --target i686-unknown-linux-gnu --release
+
+  width-invariants:
+    name: Pointer-width static assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      # slot.rs carries `const _: () = assert!(...)` bounds tying
+      # MAX_PAGES * SLOTS_PER_PAGE to the width of the packed tid field. Those
+      # only bite at 32 bits, so building each 32-bit target IS the check. This
+      # job exists so a failure reads as "width invariant violated" rather than
+      # being buried in a generic build log.
+      - name: Assert width invariants hold at 32 bits
+        run: |
+          cargo check -p kovan --target wasm32-unknown-unknown
+          cargo check -p kovan --target i686-unknown-linux-gnu
+          cargo check -p kovan

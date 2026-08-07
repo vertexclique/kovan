@@ -13,11 +13,30 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize};
 /// Type-erased destructor function
 pub(crate) type DestructorFn = unsafe fn(*mut RetiredNode);
 
-/// Sentinel value meaning "slot inactive / node already traversed"
-pub(crate) const INVPTR: usize = !0x0000_0000_0000_0000_usize;
+/// Sentinel value meaning "slot inactive / node already traversed".
+///
+/// All-ones, so it is never a valid allocation address at any pointer width.
+pub(crate) const INVPTR: usize = !0_usize;
 
-/// REFC_PROTECT bias for reference counting (1 << 63)
-pub(crate) const REFC_PROTECT: usize = 1_usize << 63;
+/// REFC_PROTECT bias for reference counting: the top bit of a `usize`.
+///
+/// `1 << 63` on a 64-bit target, `1 << 31` on a 32-bit one. The value is only
+/// ever used as a sign-bit bias (see `guard.rs`, `REFC_PROTECT.wrapping_neg()`),
+/// so the remaining `usize::BITS - 1` bits are the usable reference count.
+/// Batches are bounded by `RETIRE_FREQ` (64), so 31 bits is ample headroom.
+pub(crate) const REFC_PROTECT: usize = 1_usize << (usize::BITS - 1);
+
+/// Width of the `slot_index` field in the packed `(tid, slot_index)` value
+/// stored by [`RetiredNode::set_slot_info`].
+///
+/// The `tid` field gets the remaining `usize::BITS - SLOT_INFO_INDEX_BITS`
+/// bits: 48 on a 64-bit target, 16 on a 32-bit one. `slot.rs` carries the
+/// static assertions that both fields are wide enough at every supported
+/// pointer width.
+pub(crate) const SLOT_INFO_INDEX_BITS: u32 = 16;
+
+/// Mask selecting the `slot_index` field of a packed slot-info value.
+pub(crate) const SLOT_INFO_INDEX_MASK: usize = (1_usize << SLOT_INFO_INDEX_BITS) - 1;
 
 /// Mark a pointer as an RNODE (XOR with 1)
 #[inline]
@@ -149,9 +168,18 @@ impl RetiredNode {
     }
 
     /// Store (tid, slot_index) packed into the `next` field during try_retire scan phase.
+    ///
+    /// `slot_index` occupies the low [`SLOT_INFO_INDEX_BITS`] bits and `tid`
+    /// the rest. The static assertions in `slot.rs` guarantee both fit at
+    /// every supported pointer width.
     #[inline]
     pub(crate) fn set_slot_info(&self, tid: usize, index: usize) {
-        let packed = (tid << 16) | index;
+        debug_assert!(index <= SLOT_INFO_INDEX_MASK, "slot index overflows field");
+        debug_assert!(
+            tid <= usize::MAX >> SLOT_INFO_INDEX_BITS,
+            "tid overflows field"
+        );
+        let packed = (tid << SLOT_INFO_INDEX_BITS) | index;
         self.next.store(
             packed as *mut RetiredNode,
             core::sync::atomic::Ordering::Relaxed,
@@ -162,7 +190,10 @@ impl RetiredNode {
     #[inline]
     pub(crate) fn get_slot_info(&self) -> (usize, usize) {
         let packed = self.next.load(core::sync::atomic::Ordering::Relaxed) as usize;
-        (packed >> 16, packed & 0xFFFF)
+        (
+            packed >> SLOT_INFO_INDEX_BITS,
+            packed & SLOT_INFO_INDEX_MASK,
+        )
     }
 }
 

@@ -75,11 +75,23 @@
 #![warn(missing_docs)]
 #![cfg_attr(feature = "nightly", feature(thread_local))]
 
-// The DCAS slot protocol packs (pointer, seqno) pairs into 64-bit halves of
-// 128-bit words, and the batch reference counter uses a 1<<63 bias. None of
-// that is expressible on 32-bit targets.
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("kovan requires a 64-bit target (128-bit DCAS slot protocol)");
+// The DCAS slot protocol stores (pointer, seqno) pairs in the two 64-bit
+// halves of a 128-bit word. On a 32-bit target the pointer half is merely
+// zero-extended and the refcount bias is taken from `usize::BITS`, so the
+// protocol itself is width-agnostic. What differs is how the 128-bit atomic
+// is realised:
+//
+// - x86_64 / aarch64 / s390x use the `native` WordPair, which mixes sub-word
+//   AtomicU64 accesses with a 128-bit compare-exchange over the same 16
+//   bytes. That is only coherent with genuine hardware DCAS, which
+//   `ASMRState::new` asserts via `AtomicU128::is_lock_free()`.
+// - Every other target (wasm32, i686, ...) uses the `fallback` WordPair,
+//   which routes *all* access through a single AtomicU128 and so stays
+//   coherent even when `portable-atomic` emulates that atomic with a lock.
+//
+// The trade on those targets is that reclamation is no longer lock-free, and
+// therefore no longer wait-free. The data structures remain correct; they
+// lose the progress guarantee. See the platform-support table in README.md.
 
 extern crate alloc;
 

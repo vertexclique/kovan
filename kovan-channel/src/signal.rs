@@ -10,6 +10,7 @@
 
 use core::sync::atomic::Ordering;
 use std::task::Waker;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 // The blocking path's own shuttle target (mirrors the `AtomicWaker` swap
@@ -24,9 +25,9 @@ use shuttle::sync::atomic::AtomicUsize;
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::AtomicUsize;
 
-#[cfg(feature = "shuttle")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "shuttle"))]
 use shuttle::thread::{self, Thread};
-#[cfg(not(feature = "shuttle"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "shuttle")))]
 use std::thread::{self, Thread};
 
 /// A mechanism for thread synchronization and notification.
@@ -50,11 +51,64 @@ pub trait Notifier: Send + Sync {
 }
 
 /// A signal for blocking thread synchronization.
+///
+/// Native-only: parking/unparking a thread has no meaning on a
+/// single-threaded target such as `wasm32-unknown-unknown` or
+/// `wasm32-wasip1` (`thread::park`/`thread::sleep` and
+/// `Instant::now()`/`SystemTime::now()` panic there under the `unsupported`
+/// std backend, and a blocking `recv()` could never be woken anyway since
+/// there is no second thread to wake it). Wasm code uses [`AsyncSignal`]
+/// instead, via the crate's async/non-blocking API (`try_recv`,
+/// `send_async`/`recv_async`, `unbounded::Sender::send`, and `select!` with
+/// a `default` arm).
+///
+/// # Examples
+///
+/// Blocking `select!` across two channels, each fed by its own thread:
+///
+/// ```rust
+/// use kovan_channel::{unbounded, select};
+/// use std::thread;
+///
+/// let (s1, r1) = unbounded::<i32>();
+/// let (s2, r2) = unbounded::<i32>();
+///
+/// thread::spawn(move || {
+///     s1.send(10);
+/// });
+///
+/// thread::spawn(move || {
+///     s2.send(20);
+/// });
+///
+/// select! {
+///     v1 = r1 => println!("Received from s1: {}", v1),
+///     v2 = r2 => println!("Received from s2: {}", v2),
+/// }
+/// ```
+///
+/// Blocking `select!` when a value is already available:
+///
+/// ```rust
+/// use kovan_channel::{unbounded, select};
+///
+/// let (s1, r1) = unbounded::<i32>();
+/// let (s2, r2) = unbounded::<i32>();
+///
+/// s1.send(10);
+///
+/// select! {
+///     v1 = r1 => assert_eq!(v1, 10),
+///     v2 = r2 => panic!("Should receive from r1"),
+/// }
+/// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Signal {
     state: AtomicUsize,
     thread: Thread,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Notifier for Signal {
     fn notify(&self) {
         self.state.store(1, Ordering::Release);
@@ -66,12 +120,14 @@ impl Notifier for Signal {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for Signal {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Signal {
     /// Creates a new signal for the current thread.
     pub fn new() -> Self {
