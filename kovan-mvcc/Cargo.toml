@@ -29,6 +29,74 @@ kovan = { workspace = true }
 kovan-map = { workspace = true }
 parking_lot = "0.12"
 
-[dev-dependencies]
+# `uuid`'s v4 generator has no randomness source on wasm32-unknown-unknown and
+# fails with a compile_error! unless one is named explicitly. Without this the
+# crate cannot build for wasm at all, even though nothing else in it is
+# target-specific.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { version = "1.18", features = ["v4", "js"] }
+
+# `shuttle` (its `corosensei` stack switcher) and `rand`'s default
+# backend have no wasm32 implementation -- see `kovan/Cargo.toml`'s
+# identical split for criterion/shuttle. Nothing under `tests/wasm/`
+# uses either; native-only keeps `cargo check --target wasm32-*` clean.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 rand = "0.9"
 shuttle = "0.9.1"
+
+# Single-threaded adaptations of the tests/*.rs integration tests, kept
+# under tests/wasm/ so they also run on 32-bit wasm (wasm32-wasip1 has no
+# working std::thread::spawn). Cargo's autodiscovery only picks up
+# top-level tests/*.rs files, not subdirectories, so each target below is
+# registered explicitly. The tests/*.rs originals are untouched and remain
+# the real concurrency coverage on native.
+[[test]]
+name = "wasm_basic_ops"
+path = "tests/wasm/basic_ops.rs"
+
+[[test]]
+name = "wasm_concurrency"
+path = "tests/wasm/concurrency.rs"
+
+[[test]]
+name = "wasm_concurrent_stress"
+path = "tests/wasm/concurrent_stress.rs"
+
+[[test]]
+name = "wasm_isolation"
+path = "tests/wasm/isolation.rs"
+
+[[test]]
+name = "wasm_isolation_levels"
+path = "tests/wasm/isolation_levels.rs"
+
+[[test]]
+name = "wasm_large_payloads"
+path = "tests/wasm/large_payloads.rs"
+
+[[test]]
+name = "wasm_minimal_bank"
+path = "tests/wasm/minimal_bank.rs"
+
+[[test]]
+name = "wasm_minimal_bug"
+path = "tests/wasm/minimal_bug.rs"
+
+[[test]]
+name = "wasm_percolator_cleanup"
+path = "tests/wasm/percolator_cleanup.rs"
+
+[[test]]
+name = "wasm_safe_read_watermark"
+path = "tests/wasm/safe_read_watermark.rs"
+
+[[test]]
+name = "wasm_simple_conflict"
+path = "tests/wasm/simple_conflict.rs"
+
+[[test]]
+name = "wasm_two_key_bug"
+path = "tests/wasm/two_key_bug.rs"

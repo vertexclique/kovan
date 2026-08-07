@@ -39,7 +39,20 @@ portable-atomic = { version = "1.11.1", default-features = false, features = [
 ] }
 shuttle = { version = "0.9.1", optional = true }
 
-[dev-dependencies]
+# criterion and shuttle are native-only: both pull in threading and stack
+# machinery (shuttle -> corosensei) that has no wasm32 implementation, so
+# leaving them unconditional breaks `cargo check --all-targets` for the wasm
+# targets even though the library itself builds fine. The tests and benches
+# that use them carry a matching `#![cfg(not(target_arch = "wasm32"))]`.
+# Real test execution on wasm32-unknown-unknown (the browser target) needs the
+# wasm-bindgen harness: `cargo test --target wasm32-unknown-unknown` has no
+# native test runner. wasip1 is NOT a substitute -- std routes `target_os =
+# "wasi"` to the unix impl, so Instant::now()/thread::sleep work there and
+# panic on unknown-unknown. Only this target catches that class.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
 shuttle = "0.9.1"
 # Other memory-reclamation crates, used only by the comparison benchmark
@@ -56,3 +69,41 @@ harness = false
 [[bench]]
 name = "throughput"
 harness = false
+
+# Single-threaded adaptations of the tests/*.rs integration tests, kept
+# under tests/wasm/ so they also run on 32-bit wasm (wasm32-wasip1 has no
+# working std::thread::spawn). Cargo's autodiscovery only picks up
+# top-level tests/*.rs files, not subdirectories, so each target below is
+# registered explicitly. The tests/*.rs originals are untouched and remain
+# the real concurrency coverage on native.
+[[test]]
+name = "wasm_atom"
+path = "tests/wasm/atom.rs"
+
+[[test]]
+name = "wasm_cache_padded"
+path = "tests/wasm/cache_padded.rs"
+
+[[test]]
+name = "wasm_correctness"
+path = "tests/wasm/correctness.rs"
+
+[[test]]
+name = "wasm_protect"
+path = "tests/wasm/protect.rs"
+
+[[test]]
+name = "wasm_reclaim"
+path = "tests/wasm/reclaim.rs"
+
+[[test]]
+name = "wasm_reclaim_fixes"
+path = "tests/wasm/reclaim_fixes.rs"
+
+[[test]]
+name = "wasm_robust"
+path = "tests/wasm/robust.rs"
+
+[[test]]
+name = "wasm_stress"
+path = "tests/wasm/stress.rs"

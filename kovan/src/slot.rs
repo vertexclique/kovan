@@ -321,6 +321,25 @@ const PAGE_MASK: usize = 127;
 /// Maximum number of pages in the page table. Supports up to 65,536 threads.
 const MAX_PAGES: usize = 512;
 
+/// Maximum number of distinct thread IDs the page table can hand out.
+const MAX_THREADS: usize = MAX_PAGES * SLOTS_PER_PAGE;
+
+// `RetiredNode::set_slot_info` packs (tid, slot_index) into one `usize`, with
+// `slot_index` in the low `SLOT_INFO_INDEX_BITS` bits and `tid` above it. The
+// tid field is 48 bits wide on a 64-bit target but only 16 on a 32-bit one, so
+// these bounds are load-bearing for 32-bit support (wasm32, i686) rather than
+// merely documentary. Growing MAX_PAGES or SLOTS_PER_PAGE past 2^16 total
+// threads breaks the 32-bit build here instead of silently truncating a tid at
+// runtime.
+const _: () = assert!(
+    MAX_THREADS <= 1_usize << (usize::BITS - crate::retired::SLOT_INFO_INDEX_BITS),
+    "MAX_PAGES * SLOTS_PER_PAGE exceeds the tid field of the packed slot info"
+);
+const _: () = assert!(
+    SLOTS_PER_THREAD <= 1_usize << crate::retired::SLOT_INFO_INDEX_BITS,
+    "SLOTS_PER_THREAD exceeds the slot_index field of the packed slot info"
+);
+
 /// A page of thread slots, allocated on demand.
 struct SlotPage([ThreadSlots; SLOTS_PER_PAGE]);
 

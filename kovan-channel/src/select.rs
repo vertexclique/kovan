@@ -2,21 +2,10 @@
 ///
 /// # Examples
 ///
-/// ```
-/// use kovan_channel::{unbounded, select};
-///
-/// let (s1, r1) = unbounded::<i32>();
-/// let (s2, r2) = unbounded::<i32>();
-///
-/// s1.send(10);
-///
-/// select! {
-///     v1 = r1 => assert_eq!(v1, 10),
-///     v2 = r2 => panic!("Should receive from r1"),
-/// }
-/// ```
-///
-/// With default case:
+/// With a `default` case, so the example is safe to compile on every
+/// target -- including `wasm32-*`, where the blocking arm below (no
+/// `default`, parking on a shared [`crate::signal::Signal`]) is gated out.
+/// See [`crate::signal::Signal`] for a blocking `select!` example.
 ///
 /// ```
 /// use kovan_channel::{unbounded, select};
@@ -36,9 +25,6 @@ macro_rules! select {
         default => $default_body:expr $(,)?
     ) => {
         {
-            use std::sync::Arc;
-            use $crate::signal::Signal;
-
             loop {
                 // 1. Try all
                 $(

@@ -11,3 +11,15 @@ rustflags = ["-C", "target-feature=+cmpxchg16b"]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+cmpxchg16b"]
+
+# Run wasm32-wasip1 test binaries under wasmtime so `cargo test --target
+# wasm32-wasip1` actually executes. Single-threaded by construction: neither
+# wasm target enables threads, so only `tests/single_thread.rs` is compiled in.
+[target.wasm32-wasip1]
+runner = "wasmtime --dir=."
+
+# `cargo test --target wasm32-unknown-unknown` has no built-in runner. The
+# wasm-bindgen harness supplies one (node by default). This is the ONLY way to
+# execute the browser target; wasip1 does not exercise the same std paths.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

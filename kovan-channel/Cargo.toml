@@ -34,6 +34,15 @@ shuttle = { version = "0.9.1", optional = true }
 
 [dev-dependencies]
 futures = "0.3"
+
+# `criterion` (via its default `rayon` feature) and `shuttle` (via
+# `corosensei`, stackful coroutines with no wasm support, and transitively
+# via `rand` -> `getrandom` without the wasm "js" feature) both fail to
+# compile for `wasm32-*`. Native-only.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
 shuttle = "0.9.1"
 
@@ -52,3 +61,28 @@ harness = false
 [[bench]]
 name = "async_wake_latency"
 harness = false
+
+# Single-threaded, non-blocking-API-only adaptations of the tests/*.rs
+# integration tests, kept under tests/wasm/ so they also compile and run on
+# `wasm32-*`. Each file is whole-file-gated `#![cfg(target_arch = "wasm32")]`
+# (see tests/shuttle_channel.rs for the same pattern with a feature instead
+# of a target), so it contributes zero tests to the native suite -- the
+# native baseline is unaffected. Cargo's autodiscovery only picks up
+# top-level tests/*.rs files, not subdirectories, so each target below is
+# registered explicitly. The tests/*.rs originals are untouched and remain
+# the real blocking/concurrency coverage on native.
+[[test]]
+name = "wasm_try_recv"
+path = "tests/wasm/try_recv.rs"
+
+[[test]]
+name = "wasm_unbounded_send"
+path = "tests/wasm/unbounded_send.rs"
+
+[[test]]
+name = "wasm_async_send_recv"
+path = "tests/wasm/async_send_recv.rs"
+
+[[test]]
+name = "wasm_select"
+path = "tests/wasm/select.rs"

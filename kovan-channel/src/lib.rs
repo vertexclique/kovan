@@ -24,25 +24,24 @@
 //! # Example
 //!
 //! ```rust
-//! use kovan_channel::{unbounded, select};
-//! use std::thread;
+//! use kovan_channel::unbounded;
 //!
-//! let (s1, r1) = unbounded::<i32>();
-//! let (s2, r2) = unbounded::<i32>();
-//!
-//! thread::spawn(move || {
-//!     s1.send(10);
-//! });
-//!
-//! thread::spawn(move || {
-//!     s2.send(20);
-//! });
-//!
-//! select! {
-//!     v1 = r1 => println!("Received from s1: {}", v1),
-//!     v2 = r2 => println!("Received from s2: {}", v2),
-//! }
+//! let (s, r) = unbounded::<i32>();
+//! s.send(10);
+//! assert_eq!(r.try_recv(), Some(10));
 //! ```
+//!
+//! # Platform support
+//!
+//! Blocking APIs (`bounded::Sender::send`, `recv`/`recv_deadline` on both
+//! flavors, `select!` without a `default` arm, `after`, `tick`) are
+//! native-only and gated out on `wasm32-*` targets, where parking a thread
+//! is unsupported (`wasm32-unknown-unknown`/`wasm32-wasip1` panic on
+//! `thread::park`/`thread::sleep`/`Instant::now`/`SystemTime::now`, and both
+//! are single-threaded so a park could never be woken anyway). See
+//! [`signal::Signal`] for a blocking-`select!` example. wasm builds keep the
+//! non-blocking surface: `try_recv`, `send_async`/`recv_async`,
+//! `unbounded::Sender::send`, `select!` with a `default` arm, and `never`.
 //!
 //! # Safety
 //!
@@ -60,6 +59,7 @@ pub mod signal;
 /// Lock-free registration queues for parked senders/receivers.
 mod waitlist;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use flavors::RecvDeadline;
 pub use flavors::bounded;
 pub use flavors::unbounded;
@@ -78,6 +78,8 @@ pub fn bounded<T: 'static>(cap: usize) -> (bounded::Sender<T>, bounded::Receiver
     bounded::channel(cap)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use flavors::after::after;
 pub use flavors::never::never;
+#[cfg(not(target_arch = "wasm32"))]
 pub use flavors::tick::tick;

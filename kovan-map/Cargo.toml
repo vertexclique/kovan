@@ -30,10 +30,47 @@ kovan = { workspace = true }
 foldhash = { version = "0.2" }
 shuttle = { version = "0.9.1", optional = true }
 
-[dev-dependencies]
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 shuttle = "0.9.1"
 
 [[bench]]
 name = "perf"
 harness = false
+
+# Single-threaded adaptations of the tests/*.rs integration tests, kept
+# under tests/wasm/ so they also run on 32-bit wasm (wasm32-wasip1 has no
+# working std::thread::spawn). Cargo's autodiscovery only picks up
+# top-level tests/*.rs files, not subdirectories, so each target below is
+# registered explicitly. The tests/*.rs originals are untouched and remain
+# the real concurrency coverage on native.
+[[test]]
+name = "wasm_force_remove_test"
+path = "tests/wasm/force_remove_test.rs"
+
+[[test]]
+name = "wasm_get_or_insert_test"
+path = "tests/wasm/get_or_insert_test.rs"
+
+[[test]]
+name = "wasm_hashmap_test"
+path = "tests/wasm/hashmap_test.rs"
+
+[[test]]
+name = "wasm_hopscotch_test"
+path = "tests/wasm/hopscotch_test.rs"
+
+[[test]]
+name = "wasm_iter_api_test"
+path = "tests/wasm/iter_api_test.rs"
+
+[[test]]
+name = "wasm_resize_leak_probe"
+path = "tests/wasm/resize_leak_probe.rs"
+
+[[test]]
+name = "wasm_stress_test"
+path = "tests/wasm/stress_test.rs"
