@@ -31,26 +31,34 @@
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use kovan::{Atomic, RetiredNode, pin, retire};
-use std::cell::Cell;
-use std::rc::Rc;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Node with embedded RetiredNode for proper reclamation.
 ///
-/// `freed`/`drop_count` are `Rc<Cell<_>>` rather than `Arc<Atomic*>`: these
-/// nodes go through raw `Atomic<T>`/`retire()`, which — unlike `Atom<T>` —
-/// has no `Send + Sync` bound on `T`, and `retire()`'s own safety docs
-/// sanction thread-affine payloads when reclamation is single-threaded
-/// (exactly this test file).
+/// Counters are `Arc<Atomic*>`, never `Rc<Cell<_>>`.
+///
+/// `retire()`'s "Cross-thread drop" note (`kovan::guard`) says a retired
+/// node's destructor runs on whichever thread later traverses the slot its
+/// batch landed in -- typically NOT the retiring thread -- and that
+/// thread-affine payloads (`Rc`, lock guards) are sound only when reclamation
+/// is single-threaded.
+///
+/// Each test function here IS single-threaded, but that is not the relevant
+/// scope: kovan's reclaimer is process-global and libtest runs test functions
+/// on several threads at once, so a batch retired by one test thread is freed
+/// by another. An `Rc` refcount touched from two threads corrupts the heap
+/// (observed as `tcache_thread_shutdown(): unaligned tcache chunk detected`).
+/// `Arc<Atomic*>` is what the pristine `tests/` files use, for this reason.
 #[repr(C)]
 struct EraTestNode {
     retired: RetiredNode,
     value: u64,
-    freed: Rc<Cell<bool>>,
+    freed: Arc<AtomicBool>,
 }
 
 impl EraTestNode {
-    fn new(value: u64, freed: Rc<Cell<bool>>) -> *mut Self {
+    fn new(value: u64, freed: Arc<AtomicBool>) -> *mut Self {
         Box::into_raw(Box::new(Self {
             retired: RetiredNode::new(),
             value,
@@ -61,7 +69,7 @@ impl EraTestNode {
 
 impl Drop for EraTestNode {
     fn drop(&mut self) {
-        self.freed.set(true);
+        self.freed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -96,8 +104,8 @@ fn advance_epoch_by(n: usize) {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn era_updates_on_load_prevent_premature_free_single_threaded() {
-    let freed_a = Rc::new(Cell::new(false));
-    let freed_b = Rc::new(Cell::new(false));
+    let freed_a = Arc::new(AtomicBool::new(false));
+    let freed_b = Arc::new(AtomicBool::new(false));
     let shared = Atomic::new(EraTestNode::new(1, freed_a.clone()));
 
     // Pin BEFORE the epoch advances and BEFORE the later-born node is
@@ -140,7 +148,7 @@ fn era_updates_on_load_prevent_premature_free_single_threaded() {
     // Safety: the node loaded via ptr2, born after our pin, must not be
     // freed while `guard` (pinned before it was born) is still alive.
     assert!(
-        !freed_b.get(),
+        !freed_b.load(Ordering::SeqCst),
         "node born in later epoch was freed while guard was held! (UAF)"
     );
 
@@ -163,12 +171,12 @@ fn era_updates_on_load_prevent_premature_free_single_threaded() {
 struct CountedNode {
     retired: RetiredNode,
     value: usize,
-    drop_count: Rc<Cell<usize>>,
+    drop_count: Arc<AtomicUsize>,
 }
 
 impl Drop for CountedNode {
     fn drop(&mut self) {
-        self.drop_count.set(self.drop_count.get() + 1);
+        self.drop_count.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -177,7 +185,7 @@ impl Drop for CountedNode {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn era_tracking_many_loads_sequential() {
-    let drops = Rc::new(Cell::new(0usize));
+    let drops = Arc::new(AtomicUsize::new(0));
     let shared: Atomic<CountedNode> = Atomic::null();
 
     let mut loads = 0u64;
@@ -206,5 +214,8 @@ fn era_tracking_many_loads_sequential() {
 
     assert!(loads > 0, "readers should have done some loads");
     kovan::flush();
-    assert!(drops.get() > 0, "some nodes should be freed");
+    assert!(
+        drops.load(Ordering::SeqCst) > 0,
+        "some nodes should be freed"
+    );
 }

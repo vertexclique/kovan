@@ -30,24 +30,32 @@
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use kovan::{Atom, AtomOption, Atomic, RetiredNode, pin, retire};
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Bare retired node — not wrapped by `Atom<T>`, so no `Send + Sync` bound
-/// applies and a thread-affine `Rc<Cell<_>>` counter is sound (see
-/// `kovan::retire`'s "Cross-thread drop" note: sound for single-threaded
-/// reclamation, which every test in this file is).
+/// Counters are `Arc<Atomic*>`, never `Rc<Cell<_>>`.
+///
+/// `retire()`'s "Cross-thread drop" note (`kovan::guard`) says a retired
+/// node's destructor runs on whichever thread later traverses the slot its
+/// batch landed in -- typically NOT the retiring thread -- and that
+/// thread-affine payloads (`Rc`, lock guards) are sound only when reclamation
+/// is single-threaded.
+///
+/// Each test function here IS single-threaded, but that is not the relevant
+/// scope: kovan's reclaimer is process-global and libtest runs test functions
+/// on several threads at once, so a batch retired by one test thread is freed
+/// by another. An `Rc` refcount touched from two threads corrupts the heap
+/// (observed as `tcache_thread_shutdown(): unaligned tcache chunk detected`).
+/// `Arc<Atomic*>` is what the pristine `tests/` files use, for this reason.
 #[repr(C)]
 struct CountedNode {
     retired: RetiredNode,
-    drop_count: Rc<Cell<usize>>,
+    drop_count: Arc<AtomicUsize>,
 }
 
 impl Drop for CountedNode {
     fn drop(&mut self) {
-        self.drop_count.set(self.drop_count.get() + 1);
+        self.drop_count.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -62,7 +70,7 @@ impl Drop for CountedNode {
 #[test]
 #[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
 fn retire_eventually_frees_single_threaded() {
-    let drops = Rc::new(Cell::new(0usize));
+    let drops = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..2048 {
         let node = Box::into_raw(Box::new(CountedNode {
@@ -74,12 +82,15 @@ fn retire_eventually_frees_single_threaded() {
     }
     kovan::flush();
 
-    assert!(drops.get() > 0, "expected some nodes to be freed");
+    assert!(
+        drops.load(Ordering::SeqCst) > 0,
+        "expected some nodes to be freed"
+    );
 }
 
 #[test]
 fn test_guard_protects_from_reclamation() {
-    let drops = Rc::new(Cell::new(0usize));
+    let drops = Arc::new(AtomicUsize::new(0));
     let atomic = Atomic::new(Box::into_raw(Box::new(CountedNode {
         retired: RetiredNode::new(),
         drop_count: drops.clone(),
@@ -90,7 +101,7 @@ fn test_guard_protects_from_reclamation() {
     unsafe { retire(ptr.as_raw()) };
 
     // While guard is held, node should not be freed (within same epoch)
-    assert_eq!(drops.get(), 0);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
 
     drop(guard);
 }
@@ -104,7 +115,7 @@ fn test_guard_protects_from_reclamation() {
 #[test]
 #[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
 fn retire_under_load_sequence_single_threaded() {
-    let drops = Rc::new(Cell::new(0usize));
+    let drops = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..1600 {
         let node = Box::into_raw(Box::new(CountedNode {
@@ -126,7 +137,7 @@ fn retire_under_load_sequence_single_threaded() {
     }
 
     // At least some should have been freed
-    assert!(drops.get() > 0);
+    assert!(drops.load(Ordering::SeqCst) > 0);
 }
 
 #[test]
