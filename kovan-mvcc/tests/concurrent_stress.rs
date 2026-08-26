@@ -47,7 +47,7 @@ fn test_concurrent_readers() {
     // Pre-populate
     for i in 0..50 {
         let mut txn = db.begin();
-        txn.write(&format!("key_{}", i), vec![i as u8]).unwrap();
+        txn.write(format!("key_{}", i), vec![i as u8]).unwrap();
         txn.commit().unwrap();
     }
 
@@ -57,7 +57,7 @@ fn test_concurrent_readers() {
         handles.push(thread::spawn(move || {
             for i in 0..50 {
                 let txn = db.begin();
-                let val = txn.read(&format!("key_{}", i)).unwrap();
+                let val = txn.read(format!("key_{}", i)).unwrap();
                 assert_eq!(val, vec![i as u8]);
             }
         }));
@@ -140,14 +140,14 @@ fn test_many_keys_single_txn() {
 
     let mut txn = db.begin();
     for i in 0..500 {
-        txn.write(&format!("key_{}", i), format!("value_{}", i).into_bytes())
+        txn.write(format!("key_{}", i), format!("value_{}", i).into_bytes())
             .unwrap();
     }
     txn.commit().unwrap();
 
     let txn = db.begin();
     for i in 0..500 {
-        let val = txn.read(&format!("key_{}", i)).unwrap();
+        let val = txn.read(format!("key_{}", i)).unwrap();
         assert_eq!(val, format!("value_{}", i).into_bytes());
     }
 }

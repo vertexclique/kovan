@@ -52,11 +52,8 @@ fn sequential_transfer_conflict_then_retry_preserves_total() {
     {
         let mut init = db.begin();
         for i in 0..NUM_ACCOUNTS {
-            init.write(
-                &format!("acc_{}", i),
-                INITIAL_BALANCE.to_le_bytes().to_vec(),
-            )
-            .unwrap();
+            init.write(format!("acc_{}", i), INITIAL_BALANCE.to_le_bytes().to_vec())
+                .unwrap();
         }
         init.commit().unwrap();
     }

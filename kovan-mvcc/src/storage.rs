@@ -29,40 +29,40 @@ use parking_lot::Mutex;
 /// Defines the interface for the underlying storage engine.
 pub trait Storage: Send + Sync {
     /// Get a lock for a key
-    fn get_lock(&self, key: &str) -> Option<LockInfo>;
+    fn get_lock(&self, key: &[u8]) -> Option<LockInfo>;
     /// Acquire a lock for a key
-    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), MvccError>;
+    fn put_lock(&self, key: &[u8], lock: LockInfo) -> Result<(), MvccError>;
     /// Release a lock for a key
-    fn delete_lock(&self, key: &str);
+    fn delete_lock(&self, key: &[u8]);
 
     /// Get the latest write for a key with commit_ts <= ts (includes Rollback records)
-    fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)>;
+    fn get_latest_write(&self, key: &[u8], ts: u64) -> Option<(u64, WriteInfo)>;
     /// Get the latest Put or Delete write for a key with commit_ts <= ts, skipping Rollbacks
-    fn get_latest_commit(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)>;
+    fn get_latest_commit(&self, key: &[u8], ts: u64) -> Option<(u64, WriteInfo)>;
     /// Record a write (commit)
-    fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo);
+    fn put_write(&self, key: &[u8], commit_ts: u64, info: WriteInfo);
 
     /// Get data for a key at a specific start_ts
-    fn get_data(&self, key: &str, start_ts: u64) -> Option<Value>;
+    fn get_data(&self, key: &[u8], start_ts: u64) -> Option<Value>;
     /// Write data for a key at a specific start_ts
-    fn put_data(&self, key: &str, start_ts: u64, value: Value);
+    fn put_data(&self, key: &[u8], start_ts: u64, value: Value);
     /// Delete data for a key at a specific start_ts
-    fn delete_data(&self, key: &str, start_ts: u64);
+    fn delete_data(&self, key: &[u8], start_ts: u64);
 
     /// GC: Remove write records with commit_ts < watermark, keeping the latest visible version.
     /// Returns the number of records removed.
-    fn gc_writes(&self, _key: &str, _watermark: u64) -> usize {
+    fn gc_writes(&self, _key: &[u8], _watermark: u64) -> usize {
         0
     }
 
     /// GC: Remove data versions with start_ts < watermark that are no longer referenced.
     /// Returns the number of versions removed.
-    fn gc_data(&self, _key: &str, _watermark: u64) -> usize {
+    fn gc_data(&self, _key: &[u8], _watermark: u64) -> usize {
         0
     }
 
     /// GC: Scan all keys that have write records (for incremental GC cursor).
-    fn scan_write_keys(&self) -> Vec<String> {
+    fn scan_write_keys(&self) -> Vec<Vec<u8>> {
         vec![]
     }
 }
@@ -71,13 +71,13 @@ pub trait Storage: Send + Sync {
 /// Uses HashMap for concurrent access.
 pub struct InMemoryStorage {
     /// CF_LOCK: Key -> LockInfo
-    locks: HashMap<String, LockInfo>,
+    locks: HashMap<Vec<u8>, LockInfo>,
 
     /// CF_WRITE: Key -> CommitTS -> WriteInfo
-    writes: HashMap<String, Arc<Mutex<BTreeMap<u64, WriteInfo>>>>,
+    writes: HashMap<Vec<u8>, Arc<Mutex<BTreeMap<u64, WriteInfo>>>>,
 
     /// CF_DATA: Key -> StartTS -> Value
-    data: HashMap<String, Arc<Mutex<BTreeMap<u64, Value>>>>,
+    data: HashMap<Vec<u8>, Arc<Mutex<BTreeMap<u64, Value>>>>,
 }
 
 impl InMemoryStorage {
@@ -97,21 +97,21 @@ impl Default for InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
-    fn get_lock(&self, key: &str) -> Option<LockInfo> {
+    fn get_lock(&self, key: &[u8]) -> Option<LockInfo> {
         self.locks.get(key)
     }
 
-    fn put_lock(&self, key: &str, lock: LockInfo) -> Result<(), MvccError> {
-        match self.locks.insert_if_absent(key.to_string(), lock.clone()) {
+    fn put_lock(&self, key: &[u8], lock: LockInfo) -> Result<(), MvccError> {
+        match self.locks.insert_if_absent(key.to_vec(), lock.clone()) {
             None => Ok(()), // Acquired
             Some(existing) => {
                 if existing.txn_id == lock.txn_id {
                     // We own it. Overwrite to update info if needed.
-                    self.locks.insert(key.to_string(), lock);
+                    self.locks.insert(key.to_vec(), lock);
                     Ok(())
                 } else {
                     Err(MvccError::LockConflict {
-                        key: key.to_string(),
+                        key: key.to_vec(),
                         holder_txn: existing.txn_id,
                     })
                 }
@@ -119,19 +119,16 @@ impl Storage for InMemoryStorage {
         }
     }
 
-    fn delete_lock(&self, key: &str) {
+    fn delete_lock(&self, key: &[u8]) {
         self.locks.remove(key);
     }
 
-    fn put_write(&self, key: &str, commit_ts: u64, info: WriteInfo) {
+    fn put_write(&self, key: &[u8], commit_ts: u64, info: WriteInfo) {
         let map_mutex = if let Some(mutex) = self.writes.get(key) {
             mutex
         } else {
             let new_map = Arc::new(Mutex::new(BTreeMap::new()));
-            match self
-                .writes
-                .insert_if_absent(key.to_string(), new_map.clone())
-            {
+            match self.writes.insert_if_absent(key.to_vec(), new_map.clone()) {
                 None => new_map,            // Inserted
                 Some(existing) => existing, // Lost race, use existing
             }
@@ -142,7 +139,7 @@ impl Storage for InMemoryStorage {
     }
 
     /// Find the latest write with commit_ts <= ts
-    fn get_latest_write(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
+    fn get_latest_write(&self, key: &[u8], ts: u64) -> Option<(u64, WriteInfo)> {
         if let Some(map_mutex) = self.writes.get(key) {
             let map = map_mutex.lock();
             // range(..=ts) gives all entries with key <= ts
@@ -154,7 +151,7 @@ impl Storage for InMemoryStorage {
     }
 
     /// Find the latest Put or Delete write with commit_ts <= ts, skipping Rollback records
-    fn get_latest_commit(&self, key: &str, ts: u64) -> Option<(u64, WriteInfo)> {
+    fn get_latest_commit(&self, key: &[u8], ts: u64) -> Option<(u64, WriteInfo)> {
         if let Some(map_mutex) = self.writes.get(key) {
             let map = map_mutex.lock();
             for (k, v) in map.range(..=ts).rev() {
@@ -168,12 +165,12 @@ impl Storage for InMemoryStorage {
         }
     }
 
-    fn put_data(&self, key: &str, start_ts: u64, value: Value) {
+    fn put_data(&self, key: &[u8], start_ts: u64, value: Value) {
         let map_mutex = if let Some(mutex) = self.data.get(key) {
             mutex
         } else {
             let new_map = Arc::new(Mutex::new(BTreeMap::new()));
-            match self.data.insert_if_absent(key.to_string(), new_map.clone()) {
+            match self.data.insert_if_absent(key.to_vec(), new_map.clone()) {
                 None => new_map,
                 Some(existing) => existing,
             }
@@ -183,7 +180,7 @@ impl Storage for InMemoryStorage {
         map.insert(start_ts, value);
     }
 
-    fn get_data(&self, key: &str, start_ts: u64) -> Option<Value> {
+    fn get_data(&self, key: &[u8], start_ts: u64) -> Option<Value> {
         if let Some(map_mutex) = self.data.get(key) {
             let map = map_mutex.lock();
             map.get(&start_ts).cloned()
@@ -192,14 +189,14 @@ impl Storage for InMemoryStorage {
         }
     }
 
-    fn delete_data(&self, key: &str, start_ts: u64) {
+    fn delete_data(&self, key: &[u8], start_ts: u64) {
         if let Some(map_mutex) = self.data.get(key) {
             let mut map = map_mutex.lock();
             map.remove(&start_ts);
         }
     }
 
-    fn gc_writes(&self, key: &str, watermark: u64) -> usize {
+    fn gc_writes(&self, key: &[u8], watermark: u64) -> usize {
         if let Some(map_mutex) = self.writes.get(key) {
             let mut map = map_mutex.lock();
             // Find the latest version at or below watermark
@@ -220,7 +217,7 @@ impl Storage for InMemoryStorage {
         }
     }
 
-    fn gc_data(&self, key: &str, watermark: u64) -> usize {
+    fn gc_data(&self, key: &[u8], watermark: u64) -> usize {
         if let Some(map_mutex) = self.data.get(key) {
             let mut map = map_mutex.lock();
             // Find the latest version at or below watermark
@@ -241,7 +238,7 @@ impl Storage for InMemoryStorage {
         }
     }
 
-    fn scan_write_keys(&self) -> Vec<String> {
+    fn scan_write_keys(&self) -> Vec<Vec<u8>> {
         self.writes.keys().collect()
     }
 }
