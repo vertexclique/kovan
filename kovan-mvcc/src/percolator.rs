@@ -415,15 +415,15 @@ pub struct Txn {
     /// Whether commit leaves the writer registered for external apply.
     external_apply: bool,
     /// Buffered writes: key -> (lock_type, value)
-    writes: HopscotchMap<String, (LockType, Option<Value>)>,
+    writes: HopscotchMap<Vec<u8>, (LockType, Option<Value>)>,
     /// Primary key for 2PC
-    primary_key: Option<String>,
+    primary_key: Option<Vec<u8>>,
     /// Whether this transaction has been committed (prevents Drop from rolling back)
     committed: bool,
     /// Isolation level for this transaction
     isolation_level: IsolationLevel,
     /// Read-set for Serializable: keys read during the transaction
-    read_set: Option<HopscotchMap<String, ()>>,
+    read_set: Option<HopscotchMap<Vec<u8>, ()>>,
     /// SSI commit lock (shared with KovanMVCC), serializes Serializable commits
     ssi_commit_lock: Arc<parking_lot::Mutex<()>>,
 }
@@ -450,7 +450,8 @@ impl Txn {
     /// - ReadCommitted: uses a fresh timestamp per read call
     /// - RepeatableRead: uses start_ts (standard SI)
     /// - Serializable: uses start_ts + tracks key in read_set
-    pub fn read(&self, key: &str) -> Option<Vec<u8>> {
+    pub fn read(&self, key: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+        let key = key.as_ref();
         // 0. Check local write buffer first (read-your-own-writes, even before
         // prewrite). Skip the guarded map lookup entirely when there are no
         // buffered writes (the common case for read-only transactions) — the
@@ -460,7 +461,7 @@ impl Txn {
         {
             // Track in read_set for Serializable even on local hits
             if let Some(ref read_set) = self.read_set {
-                read_set.insert(key.to_string(), ());
+                read_set.insert(key.to_vec(), ());
             }
             return match lock_type {
                 LockType::Put => value_opt.map(|arc| (*arc).clone()),
@@ -504,11 +505,13 @@ impl Txn {
                     BackoffAction::Abort => {
                         eprintln!(
                             "[READ_CONFLICT] key={} locked by txn={} at ts={}",
-                            key, lock.txn_id, lock.start_ts
+                            crate::error::render_key(key),
+                            lock.txn_id,
+                            lock.start_ts
                         );
                         // Track in read_set for Serializable even on misses
                         if let Some(ref read_set) = self.read_set {
-                            read_set.insert(key.to_string(), ());
+                            read_set.insert(key.to_vec(), ());
                         }
                         return None;
                     }
@@ -519,7 +522,7 @@ impl Txn {
             if let Some((_commit_ts, write_info)) = self.storage.get_latest_commit(key, read_ts) {
                 // Track in read_set for Serializable
                 if let Some(ref read_set) = self.read_set {
-                    read_set.insert(key.to_string(), ());
+                    read_set.insert(key.to_vec(), ());
                 }
                 match write_info.kind {
                     WriteKind::Put => {
@@ -539,26 +542,27 @@ impl Txn {
 
             // Track in read_set for Serializable even on misses (phantom prevention)
             if let Some(ref read_set) = self.read_set {
-                read_set.insert(key.to_string(), ());
+                read_set.insert(key.to_vec(), ());
             }
             return None;
         }
     }
 
-    pub fn write(&mut self, key: &str, value: Vec<u8>) -> Result<(), MvccError> {
+    pub fn write(&mut self, key: impl AsRef<[u8]>, value: Vec<u8>) -> Result<(), MvccError> {
+        let key = key.as_ref();
         self.writes
-            .insert(key.to_string(), (LockType::Put, Some(Arc::new(value))));
+            .insert(key.to_vec(), (LockType::Put, Some(Arc::new(value))));
         if self.primary_key.is_none() {
-            self.primary_key = Some(key.to_string());
+            self.primary_key = Some(key.to_vec());
         }
         Ok(())
     }
 
-    pub fn delete(&mut self, key: &str) -> Result<(), MvccError> {
-        self.writes
-            .insert(key.to_string(), (LockType::Delete, None));
+    pub fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<(), MvccError> {
+        let key = key.as_ref();
+        self.writes.insert(key.to_vec(), (LockType::Delete, None));
         if self.primary_key.is_none() {
-            self.primary_key = Some(key.to_string());
+            self.primary_key = Some(key.to_vec());
         }
         Ok(())
     }
@@ -638,20 +642,20 @@ impl Txn {
         Ok(commit_ts)
     }
 
-    fn prewrite(&mut self, primary_key: &str) -> Result<(), MvccError> {
+    fn prewrite(&mut self, primary_key: &[u8]) -> Result<(), MvccError> {
         // Sort keys to prevent deadlocks/livelocks
         let mut keys: Vec<_> = self.writes.keys().collect();
         keys.sort();
 
         // Collect lock infos and values for each key upfront
-        let key_infos: Vec<(String, LockInfo, Option<Value>)> = keys
+        let key_infos: Vec<(Vec<u8>, LockInfo, Option<Value>)> = keys
             .iter()
             .map(|key| {
                 let (lock_type, value_opt) = self.writes.get(key).unwrap();
                 let lock_info = LockInfo {
                     txn_id: self.txn_id,
                     start_ts: self.start_ts,
-                    primary_key: primary_key.to_string(),
+                    primary_key: primary_key.to_vec(),
                     lock_type,
                     short_value: None,
                 };
@@ -660,7 +664,7 @@ impl Txn {
             .collect();
 
         // Track which locks we've acquired so we can release them on failure
-        let mut acquired_locks: Vec<&str> = Vec::with_capacity(key_infos.len());
+        let mut acquired_locks: Vec<&[u8]> = Vec::with_capacity(key_infos.len());
 
         // Pass 1: Acquire all locks
         for (key, lock_info, _) in &key_infos {
@@ -683,9 +687,7 @@ impl Txn {
                     for acquired_key in &acquired_locks {
                         self.storage.delete_lock(acquired_key);
                     }
-                    return Err(MvccError::RollbackRecord {
-                        key: key.to_string(),
-                    });
+                    return Err(MvccError::RollbackRecord { key: key.to_vec() });
                 }
                 if write_info.kind != WriteKind::Rollback && commit_ts >= self.start_ts {
                     // Write conflict
@@ -693,7 +695,7 @@ impl Txn {
                         self.storage.delete_lock(acquired_key);
                     }
                     return Err(MvccError::WriteConflict {
-                        key: key.to_string(),
+                        key: key.to_vec(),
                         conflicting_ts: commit_ts,
                     });
                 }
@@ -710,12 +712,12 @@ impl Txn {
         Ok(())
     }
 
-    fn commit_primary(&self, primary_key: &str, commit_ts: u64) -> Result<(), MvccError> {
+    fn commit_primary(&self, primary_key: &[u8], commit_ts: u64) -> Result<(), MvccError> {
         let lock =
             self.storage
                 .get_lock(primary_key)
                 .ok_or_else(|| MvccError::PrimaryLockMissing {
-                    key: primary_key.to_string(),
+                    key: primary_key.to_vec(),
                 })?;
 
         if lock.txn_id != self.txn_id {
@@ -741,7 +743,7 @@ impl Txn {
         Ok(())
     }
 
-    fn commit_secondaries(&self, primary_key: &str, commit_ts: u64) {
+    fn commit_secondaries(&self, primary_key: &[u8], commit_ts: u64) {
         for (key, (lock_type, _)) in &self.writes {
             if key == primary_key {
                 continue;
