@@ -648,6 +648,9 @@ impl Txn {
         keys.sort();
 
         // Collect lock infos and values for each key upfront
+        // Allocated once for the whole transaction rather than once per
+        // key: every LockInfo below names the same primary.
+        let primary: std::sync::Arc<[u8]> = std::sync::Arc::from(primary_key);
         let key_infos: Vec<(Vec<u8>, LockInfo, Option<Value>)> = keys
             .iter()
             .map(|key| {
@@ -655,7 +658,7 @@ impl Txn {
                 let lock_info = LockInfo {
                     txn_id: self.txn_id,
                     start_ts: self.start_ts,
-                    primary_key: primary_key.to_vec(),
+                    primary_key: std::sync::Arc::clone(&primary),
                     lock_type,
                     short_value: None,
                 };

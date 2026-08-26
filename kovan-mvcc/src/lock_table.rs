@@ -3,7 +3,14 @@
 pub struct LockInfo {
     pub txn_id: u128,
     pub start_ts: u64,
-    pub primary_key: Vec<u8>,
+    /// The transaction's primary key, shared rather than copied.
+    ///
+    /// Every key a transaction prewrites carries a `LockInfo` naming the
+    /// same primary. Owning it per lock allocated the primary key once
+    /// per key in the transaction; sharing it allocates once and bumps a
+    /// refcount thereafter, which is the difference between O(keys) and
+    /// O(1) allocations on the prewrite path.
+    pub primary_key: std::sync::Arc<[u8]>,
     pub lock_type: LockType,
     /// Optimization: Store small values directly in lock
     pub short_value: Option<Vec<u8>>,
@@ -95,7 +102,7 @@ mod tests {
         let lock = LockInfo {
             txn_id: 1,
             start_ts: 10,
-            primary_key: b"key1".to_vec(),
+            primary_key: std::sync::Arc::from(&b"key1"[..]),
             lock_type: LockType::Put,
             short_value: None,
         };
