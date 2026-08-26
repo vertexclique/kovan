@@ -50,11 +50,11 @@ fn concurrent_try_lock_exactly_one_wins() {
             let table = Arc::clone(&table);
             shuttle::thread::spawn(move || {
                 table.try_lock(
-                    "key",
+                    b"key",
                     LockInfo {
                         txn_id,
                         start_ts: 0,
-                        primary_key: "key".to_string(),
+                        primary_key: std::sync::Arc::from(&b"key"[..]),
                         lock_type: LockType::Put,
                         short_value: None,
                     },
@@ -76,7 +76,7 @@ fn concurrent_try_lock_exactly_one_wins() {
         "expected exactly one winner for a concurrent try_lock on the same key, got {winners:?}"
     );
     assert!(
-        table.is_locked_by("key", winners[0]),
+        table.is_locked_by(b"key", winners[0]),
         "the lock table's recorded holder doesn't match the transaction try_lock said won"
     );
 }

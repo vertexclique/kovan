@@ -461,7 +461,13 @@ impl Txn {
         {
             // Track in read_set for Serializable even on local hits
             if let Some(ref read_set) = self.read_set {
-                read_set.insert(key.to_vec(), ());
+                // Only a key not already tracked needs to be owned. A
+                // transaction that reads the same key repeatedly - a loop
+                // over a row, a re-check after a branch - otherwise pays
+                // an allocation per read for an entry it already has.
+                if !read_set.contains_key(key) {
+                    read_set.insert(key.to_vec(), ());
+                }
             }
             return match lock_type {
                 LockType::Put => value_opt.map(|arc| (*arc).clone()),
@@ -511,7 +517,9 @@ impl Txn {
                         );
                         // Track in read_set for Serializable even on misses
                         if let Some(ref read_set) = self.read_set {
-                            read_set.insert(key.to_vec(), ());
+                            if !read_set.contains_key(key) {
+                                read_set.insert(key.to_vec(), ());
+                            }
                         }
                         return None;
                     }
@@ -522,7 +530,9 @@ impl Txn {
             if let Some((_commit_ts, write_info)) = self.storage.get_latest_commit(key, read_ts) {
                 // Track in read_set for Serializable
                 if let Some(ref read_set) = self.read_set {
-                    read_set.insert(key.to_vec(), ());
+                    if !read_set.contains_key(key) {
+                        read_set.insert(key.to_vec(), ());
+                    }
                 }
                 match write_info.kind {
                     WriteKind::Put => {
@@ -542,7 +552,13 @@ impl Txn {
 
             // Track in read_set for Serializable even on misses (phantom prevention)
             if let Some(ref read_set) = self.read_set {
-                read_set.insert(key.to_vec(), ());
+                // Only a key not already tracked needs to be owned. A
+                // transaction that reads the same key repeatedly - a loop
+                // over a row, a re-check after a branch - otherwise pays
+                // an allocation per read for an entry it already has.
+                if !read_set.contains_key(key) {
+                    read_set.insert(key.to_vec(), ());
+                }
             }
             return None;
         }

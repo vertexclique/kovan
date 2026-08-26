@@ -13,7 +13,7 @@ fn test_simple_concurrent_transfer() {
     {
         let mut txn = db.begin();
         for i in 0..num_accounts {
-            txn.write(&format!("acc_{}", i), 1000u64.to_le_bytes().to_vec())
+            txn.write(format!("acc_{}", i), 1000u64.to_le_bytes().to_vec())
                 .unwrap();
         }
         txn.commit().unwrap();
@@ -85,7 +85,7 @@ fn test_simple_concurrent_transfer() {
     let mut total = 0;
     let txn = db.begin();
     for i in 0..num_accounts {
-        let val = txn.read(&format!("acc_{}", i)).unwrap();
+        let val = txn.read(format!("acc_{}", i)).unwrap();
         total += u64::from_le_bytes(val.try_into().unwrap());
     }
 
