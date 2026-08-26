@@ -516,10 +516,10 @@ impl Txn {
                             lock.start_ts
                         );
                         // Track in read_set for Serializable even on misses
-                        if let Some(ref read_set) = self.read_set {
-                            if !read_set.contains_key(key) {
-                                read_set.insert(key.to_vec(), ());
-                            }
+                        if let Some(ref read_set) = self.read_set
+                            && !read_set.contains_key(key)
+                        {
+                            read_set.insert(key.to_vec(), ());
                         }
                         return None;
                     }
@@ -529,10 +529,10 @@ impl Txn {
             // 2. Find latest non-rollback write in CF_WRITE with commit_ts <= read_ts
             if let Some((_commit_ts, write_info)) = self.storage.get_latest_commit(key, read_ts) {
                 // Track in read_set for Serializable
-                if let Some(ref read_set) = self.read_set {
-                    if !read_set.contains_key(key) {
-                        read_set.insert(key.to_vec(), ());
-                    }
+                if let Some(ref read_set) = self.read_set
+                    && !read_set.contains_key(key)
+                {
+                    read_set.insert(key.to_vec(), ());
                 }
                 match write_info.kind {
                     WriteKind::Put => {
