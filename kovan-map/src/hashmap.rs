@@ -6,8 +6,8 @@
 //! 2. **Resizable bucket table**: the bucket array lives in a single
 //!    allocation (header + inline buckets) swapped atomically on resize and
 //!    reclaimed through kovan. The map grows when the load factor exceeds
-//!    3/4 and shrinks below 1/4 (never under its initial capacity),
-//!    mirroring `HopscotchMap`'s resize protocol.
+//!    3/4 and shrinks below 1/4 (never under its initial capacity), the
+//!    same thresholds as `HopscotchMap`.
 //! 3. **Optimized Node Layout**: fields ordered `hash -> key -> value -> next`
 //!    to optimize cache line usage during checks.
 //!
@@ -238,9 +238,9 @@ where
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let hash = self.hasher.hash_one(&key);
         let mut backoff = Backoff::new();
-        // Count a new key exactly once across re-validation retries
-        // (mirrors HopscotchMap: prevents both under-count, which causes
-        // cascading resizes, and double-count).
+        // Count a new key exactly once across re-validation retries:
+        // prevents both under-count, which causes cascading resizes, and
+        // double-count.
         let mut counted = false;
         // The first successful op's previous value is the linearized result;
         // re-validation retries may replace a migrated clone of it.
@@ -489,11 +489,12 @@ where
                         // here, and reporting None for someone else's entry
                         // would admit a second winner. Return the canonical
                         // value either way (for our own clone that is a
-                        // clone of the value we just inserted), matching
-                        // HopscotchMap's retry semantics: under a concurrent
-                        // resize a successful insert may report
+                        // clone of the value we just inserted): under a
+                        // concurrent resize a successful insert may report
                         // Some(its own value); callers must treat the
-                        // returned value as canonical.
+                        // returned value as canonical. (`HopscotchMap`
+                        // closes this: its resize holds every home guard, so
+                        // an insert that landed never retries.)
                         return Some(node.value.clone());
                     }
                     prev_link = &node.next;
