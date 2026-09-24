@@ -113,11 +113,7 @@ where
     /// before it that stays within its home's neighborhood there, and return the slot that
     /// frees. `Err(Freed::Contended)` when a step lost a race (a retry can succeed),
     /// `Err(Freed::Full)` when no entry can move.
-    fn move_toward(
-        table: &Table<K, V>,
-        free: usize,
-        guard: &kovan::Guard,
-    ) -> Result<usize, Freed> {
+    fn move_toward(table: &Table<K, V>, free: usize, guard: &kovan::Guard) -> Result<usize, Freed> {
         let mut contended = false;
         // `free` is past the inserting home's neighborhood, so `nearest` is past the home.
         let nearest = free + 1 - NEIGHBORHOOD_SIZE;

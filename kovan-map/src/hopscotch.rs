@@ -214,9 +214,7 @@ where
             // (which resets the count while it holds every home guard) never sees the entry
             // without its count.
             let new_count = match outcome {
-                InsertResult::Success(None) => {
-                    Some(self.count.fetch_add(1, Ordering::Relaxed) + 1)
-                }
+                InsertResult::Success(None) => Some(self.count.fetch_add(1, Ordering::Relaxed) + 1),
                 _ => None,
             };
             // The guard is released (publishing the new entry's hop bit) before the resize arms
@@ -375,11 +373,10 @@ where
             // already cleared lands after the reset and eats the count of a later insert.
             // Saturating decrement: prevent count from wrapping to usize::MAX which would
             // trigger catastrophic cascading resizes.
-            let shrink_to = if let Ok(prev) = self.count.fetch_update(
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-                |c| c.checked_sub(1),
-            ) {
+            let shrink_to = if let Ok(prev) =
+                self.count
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1))
+            {
                 let new_count = prev - 1;
                 let current_capacity = table.capacity;
                 let load_factor = new_count as f64 / current_capacity as f64;

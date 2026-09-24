@@ -182,11 +182,7 @@ fn stopped_at<T: Send + 'static>(
     let (arrived, arrival) = sync_channel(1);
     let (release, go) = sync_channel(1);
     let handle = thread::spawn(move || {
-        pause::arm(Stop {
-            point,
-            arrived,
-            go,
-        });
+        pause::arm(Stop { point, arrived, go });
         op()
     });
     (handle, arrival, release)
