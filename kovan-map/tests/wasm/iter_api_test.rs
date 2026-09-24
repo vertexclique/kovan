@@ -1,6 +1,6 @@
 //! Single-threaded, wasm-capable adaptation of `tests/iter_api_test.rs`.
 //!
-//! The original has no threading at all — it is a straight copy, unchanged.
+//! The original has no threading at all - it is a straight copy, unchanged.
 //! (The `Mutex`-backed `guard()` only serializes the drop-accounting tests
 //! against each other within one native test binary, where libtest runs
 //! tests in parallel by default; it's kept for parity with the original,

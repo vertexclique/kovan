@@ -122,11 +122,11 @@ struct Node<K, V> {
 }
 
 // SAFETY (kovan retirement rule): a retired Node's destructor may run on
-// any thread, and nodes (with K and V inside) move between threads — hence
+// any thread, and nodes (with K and V inside) move between threads - hence
 // `K: Send, V: Send` for Send. Unlike exclusive-transfer containers,
 // lookups DO produce `&K`/`&V` from a shared `&Node` (get() clones V
 // through &V under concurrent readers), so Sync additionally requires
-// `K: Sync, V: Sync` — the same bounds the map-level Sync impl below has
+// `K: Sync, V: Sync` - the same bounds the map-level Sync impl below has
 // always required for sharing the map.
 unsafe impl<K: Send, V: Send> Send for Node<K, V> {}
 unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Node<K, V> {}
@@ -136,14 +136,14 @@ unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Node<K, V> {}
 // ---------------------------------------------------------------------------
 //
 // Removing (or replacing) a node first TAGS the victim's `next` pointer
-// (low bit set) — the logical delete — and only then unlinks it from its
+// (low bit set) - the logical delete - and only then unlinks it from its
 // predecessor. The thread whose tag-CAS succeeded exclusively owns the node
 // and is the only one to `retire()` it. This closes two races a plain
 // unlink-CAS protocol has:
 //
 //  * insert-after-removed-tail: a tail insert CASes `tail.next: null -> new`;
 //    if the tail was concurrently unlinked and retired, the new node is
-//    spliced onto dead memory — the insert is lost and the node leaks.
+//    spliced onto dead memory - the insert is lost and the node leaks.
 //    With tagging, the remover first turns the tail's `next` into
 //    tagged-null, so the insert's CAS (expecting untagged null) fails.
 //
@@ -156,7 +156,7 @@ unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Node<K, V> {}
 // Invariants:
 //  * tags appear only on `Node.next` fields, never on bucket heads
 //    (snipping stores the untagged successor);
-//  * a node whose `next` is tagged has been retired by its tag owner —
+//  * a node whose `next` is tagged has been retired by its tag owner -
 //    `clear()`, the migration sweep, and `Table::drop` must skip it;
 //  * every traversal untags before following a `next` pointer.
 
@@ -180,7 +180,7 @@ fn is_tagged<K, V>(p: *const Node<K, V>) -> bool {
 // ---------------------------------------------------------------------------
 //
 // The header and the bucket array share one allocation, so the read path is
-// `table ptr -> header line (mask, hot in cache) -> bucket line` — the same
+// `table ptr -> header line (mask, hot in cache) -> bucket line` - the same
 // number of cold dereferences as a fixed embedded array. The table pointer
 // itself is swapped atomically on resize.
 //
@@ -304,7 +304,7 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         }
     }
 
-    /// Free remaining chains (skipping tagged nodes — already retired by
+    /// Free remaining chains (skipping tagged nodes - already retired by
     /// their tag owners) and the allocation itself.
     ///
     /// Free only the table allocation, not the chains (caller already drained
@@ -449,7 +449,7 @@ where
     /// Creates a new hash map with at least `capacity` buckets and a custom hasher.
     ///
     /// The map grows when its load factor exceeds 0.75 and shrinks when it
-    /// falls below 0.25 — but never below `capacity`.
+    /// falls below 0.25 - but never below `capacity`.
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         let table = TableRef::<K, V>::alloc(capacity);
         let floor = table.capacity();
@@ -478,7 +478,7 @@ where
         }
     }
 
-    /// Optimized get operation. Never blocks — reads the current table
+    /// Optimized get operation. Never blocks - reads the current table
     /// snapshot under a guard, even while a resize is in flight.
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
@@ -590,7 +590,7 @@ where
                             backoff.spin();
                             continue 'outer;
                         }
-                        // We own the old node now — we retire it, exactly once.
+                        // We own the old node now - we retire it, exactly once.
                         let new_node = Box::into_raw(Box::new(Node {
                             retired: RetiredNode::new(),
                             hash,
@@ -615,7 +615,7 @@ where
                         }
                         if !swapped {
                             // A helper snipped the old node before our swing;
-                            // the replacement is not installed — retry the
+                            // the replacement is not installed - retry the
                             // whole op (the removal already linearized).
                             drop(Box::from_raw(new_node));
                             backoff.spin();
@@ -643,7 +643,7 @@ where
                         fence(Ordering::SeqCst);
                         // Re-validate: if a resize started (or completed)
                         // since we loaded the table, the migration may have
-                        // cloned the entry before our update — redo the op
+                        // cloned the entry before our update - redo the op
                         // on the new table so the update is not lost.
                         if self.resizing.load(Ordering::SeqCst)
                             || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
@@ -707,7 +707,7 @@ where
                     return result.unwrap();
                 }
                 Err(_) => {
-                    // Contention at the tail — retry the search/append loop.
+                    // Contention at the tail - retry the search/append loop.
                     unsafe {
                         drop(Box::from_raw(new_node_ptr));
                     }
@@ -784,7 +784,7 @@ where
             }
 
             // 2. Key not found (or our pre-migration insert was not carried
-            //    over) — insert at TAIL. Untagged-null expectation makes the
+            //    over) - insert at TAIL. Untagged-null expectation makes the
             //    CAS fail if the tail was concurrently logically deleted.
             let new_node_ptr = Box::into_raw(Box::new(Node {
                 retired: RetiredNode::new(),
@@ -918,7 +918,7 @@ where
                         let old_value = node.value.clone();
 
                         // Logical delete: tag the victim's next. The tag
-                        // owner — and only the tag owner — retires the node,
+                        // owner - and only the tag owner - retires the node,
                         // and the tag makes concurrent tail-inserts onto
                         // this node fail.
                         if node
@@ -936,7 +936,7 @@ where
                             continue 'outer;
                         }
 
-                        // Physical unlink (best effort — if it fails, a
+                        // Physical unlink (best effort - if it fails, a
                         // later walker snips it).
                         let _ = prev_link.compare_exchange(
                             Shared::from_raw(current),
@@ -953,7 +953,7 @@ where
                             result = Some(old_value);
                         }
 
-                        // Single atomic decrement (signed counter — cannot
+                        // Single atomic decrement (signed counter - cannot
                         // wrap; a transient negative just clamps to 0 below).
                         let new_count =
                             (self.count.fetch_sub(1, Ordering::Relaxed) - 1).max(0) as usize;
@@ -973,7 +973,7 @@ where
                         fence(Ordering::SeqCst);
                         // Re-validate: a concurrent migration may have cloned
                         // this entry into the new table before we deleted it
-                        // here — redo the removal on the current table so the
+                        // here - redo the removal on the current table so the
                         // key does not resurrect.
                         if self.resizing.load(Ordering::SeqCst)
                             || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
@@ -1023,7 +1023,7 @@ where
             match self.remove(key) {
                 Some(v) => {
                     // The first removal unlinks the first match in scan
-                    // order — the live (most recent) version.
+                    // order - the live (most recent) version.
                     if newest.is_none() {
                         newest = Some(v);
                     }
@@ -1066,7 +1066,7 @@ where
                 ) {
                     Ok(_) => {
                         // Retire the chain's live nodes. Tagged nodes were
-                        // already retired by their tag owners — skip them.
+                        // already retired by their tag owners - skip them.
                         unsafe {
                             let mut current = head.as_raw();
                             while !current.is_null() {
@@ -1110,7 +1110,7 @@ where
     ///
     /// Clones every entry into a new table, swaps the table pointer, then
     /// retires the old table. The old table's destructor frees whatever
-    /// nodes remain in its chains at reclamation time — entries removed or
+    /// nodes remain in its chains at reclamation time - entries removed or
     /// replaced in the meantime were unlinked and retired individually, so
     /// nothing is freed twice and nothing leaks.
     fn try_resize(&self, new_capacity: usize) {
@@ -1151,8 +1151,8 @@ where
 
         let new_table = TableRef::<K, V>::alloc(new_capacity);
 
-        // Migrate: clone every live entry (logically-deleted nodes — tagged
-        // next — are skipped). We are the only writer of the new table (it
+        // Migrate: clone every live entry (logically-deleted nodes - tagged
+        // next - are skipped). We are the only writer of the new table (it
         // is unpublished), so plain stores are sufficient.
         for i in 0..old_table.capacity() {
             let bucket = old_table.bucket(i);
@@ -1196,7 +1196,7 @@ where
                 unsafe { retire(proxy) };
             }
             Err(_) => {
-                // Table changed under us (cannot normally happen — we hold
+                // Table changed under us (cannot normally happen - we hold
                 // the resize latch). Discard the unpublished new table.
                 unsafe { new_table.free() };
             }
@@ -1274,7 +1274,7 @@ where
                     // Advance current (the pointer may carry a deletion tag).
                     self.current = untag(next);
                     if is_tagged(next) {
-                        // Logically deleted — do not yield.
+                        // Logically deleted - do not yield.
                         continue;
                     }
                     return Some((node.key.clone(), node.value.clone()));
@@ -1343,7 +1343,7 @@ where
     }
 }
 
-/// Owned iterator yielding `(K, V)` by value — moves out of the nodes, no
+/// Owned iterator yielding `(K, V)` by value - moves out of the nodes, no
 /// clone. Consuming the map gives exclusive access, so no guard protection of
 /// the yielded values is needed.
 pub struct IntoIter<K: 'static, V: 'static> {
@@ -1405,7 +1405,7 @@ where
         let mut me = core::mem::ManuallyDrop::new(self);
         let guard = pin();
         let table = TableRef::<K, V>::from_raw(me.table.load(Ordering::Relaxed, &guard).as_raw());
-        // Suppress HashMap::drop (we own the table now); drop only the hasher —
+        // Suppress HashMap::drop (we own the table now); drop only the hasher -
         // the remaining fields are atomics / usize / ZST marker.
         unsafe { core::ptr::drop_in_place(&mut me.hasher) };
         IntoIter {
@@ -1453,7 +1453,7 @@ unsafe impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> Sync for HashMap<K, 
 
 impl<K: 'static, V: 'static, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
-        // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
+        // SAFETY: `drop(&mut self)` guarantees exclusive ownership - no concurrent
         // readers can exist.  Rust's type system enforces this: `Iter<'a, …>` borrows
         // `&'a HashMap`, so it cannot outlive the `HashMap`.  The Table's destructor
         // frees its chains.

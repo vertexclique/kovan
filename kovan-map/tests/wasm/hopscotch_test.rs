@@ -4,25 +4,25 @@
 //! not ported.
 //!
 //! Not ported (race-only):
-//! - `test_concurrent_insert_read` — 4 writer threads insert disjoint key
+//! - `test_concurrent_insert_read` - 4 writer threads insert disjoint key
 //!   ranges while 4 reader threads concurrently poll one key; the only
 //!   thing under test is that reads racing writes from real OS threads
 //!   don't crash or corrupt state. Sequentially there's no race, and the
 //!   write half reduces to `test_many_entries` below.
-//! - `test_concurrent_remove` — 4 threads remove disjoint key ranges; same
+//! - `test_concurrent_remove` - 4 threads remove disjoint key ranges; same
 //!   shape, sequentially just `test_remove` run 4000 times.
-//! - `test_concurrent_mixed_operations` — 8 threads doing
+//! - `test_concurrent_mixed_operations` - 8 threads doing
 //!   insert/get/remove on disjoint keys with no assertion beyond "doesn't
 //!   crash"; its entire value is real concurrent access to shared
 //!   internals.
-//! - `test_concurrent_growth` — 4 threads insert disjoint keys into a
+//! - `test_concurrent_growth` - 4 threads insert disjoint keys into a
 //!   small-capacity map to force *concurrent* resize; sequentially the
 //!   same total inserts trigger the same sequence of resizes with no race
 //!   to survive, which is exactly `test_capacity_and_growth` below.
-//! - `test_insert_replace_concurrent` — 8 threads race to `insert` the
+//! - `test_insert_replace_concurrent` - 8 threads race to `insert` the
 //!   SAME key with different values; sequentially the last writer always
 //!   wins deterministically, already covered by `test_insert_replace`.
-//! - `test_concurrent_insert_resize_with_readers` — 4 writers forcing
+//! - `test_concurrent_insert_resize_with_readers` - 4 writers forcing
 //!   several resize cycles while 4 readers poll concurrently, tolerating a
 //!   handful of races-losses before a re-insert pass. Sequentially there
 //!   are no resize-vs-reader races to lose entries to, so the interesting
@@ -37,14 +37,14 @@
 //! registers zero tests (which would report a false green).
 //!
 //! Not ported (race-only), both:
-//! - `concurrent_insert_if_absent_loses_no_increments` — 16 threads race
+//! - `concurrent_insert_if_absent_loses_no_increments` - 16 threads race
 //!   `insert_if_absent` on the same key, routing 250 increments each
 //!   through whichever `Arc` counter the call resolves to. The failure mode
 //!   this guards against (phase-1 scan / phase-2 CAS letting two same-key
 //!   inserters claim different slots) only exists under concurrent callers;
 //!   run from one thread the first call always wins and the total is
 //!   trivially correct.
-//! - `concurrent_insert_if_absent_has_exactly_one_winner` — the contract
+//! - `concurrent_insert_if_absent_has_exactly_one_winner` - the contract
 //!   stated directly: across concurrent same-key callers, at most one may
 //!   be told "absent". With a single caller there is exactly one call, so
 //!   the assertion holds by construction and exercises nothing about the

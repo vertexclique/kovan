@@ -69,7 +69,7 @@ fn hashmap_force_remove_evicts_all_versions_after_race() {
         map.force_remove(&42);
         assert!(
             !map.contains_key(&42),
-            "round {round}: key visible after force_remove — stale version resurrected"
+            "round {round}: key visible after force_remove - stale version resurrected"
         );
         kovan::flush();
     }

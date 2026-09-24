@@ -4,7 +4,7 @@
 //! not ported.
 //!
 //! Not ported (race-only):
-//! - `hashmap_force_remove_evicts_all_versions_after_race` — the entire
+//! - `hashmap_force_remove_evicts_all_versions_after_race` - the entire
 //!   point is that a storm of concurrent insert/remove from 8 real threads
 //!   can leave *multiple* stale versions of the same key in the bucket
 //!   chain (plain `remove()` only pops the first match), and `force_remove`
@@ -12,7 +12,7 @@
 //!   `remove` never leave more than one live version behind, so plain
 //!   `remove` would already fully evict and `force_remove`'s extra sweep is
 //!   never exercised.
-//! - `hopscotch_force_remove_after_race` — same reasoning, hopscotch side.
+//! - `hopscotch_force_remove_after_race` - same reasoning, hopscotch side.
 
 // On wasm32 there is no libtest runner; the wasm-bindgen harness supplies one.
 // Aliasing its attribute to `test` lets every case below run unmodified on both
