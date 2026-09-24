@@ -1,14 +1,15 @@
-//! Test-only stops at the points a resize interleaving turns on. A thread armed for a point
-//! meets the test there once: it reports its arrival and waits until the test lets it go, so a
-//! test replays an interleaving step by step instead of hoping a scheduler produces it. Compiled
-//! only under `cfg(test)`; the calls in the map's code vanish from every other build.
+//! Test-only stops at the points a resize or a displacement interleaving turns on. A thread
+//! armed for a point meets the test there once: it reports its arrival and waits until the test
+//! lets it go, so a test replays an interleaving step by step instead of hoping a scheduler
+//! produces it. Compiled only under `cfg(test)`; the calls in the map's code vanish from every
+//! other build.
 
 extern crate std;
 
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, SyncSender};
 
-/// A point in the map's write path a test can stop one thread at.
+/// A point in the map's code a test can stop one thread at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Point {
     /// An insert holds its home bucket's writer guard, has scanned for its key and has not
@@ -18,6 +19,15 @@ pub(super) enum Point {
     AfterLanding,
     /// A resize or a clear found a home bucket's writer guard held by a writer.
     ResizerMetHeldGuard,
+    /// An insert or a remove found its home bucket's writer guard held by another writer.
+    WriterMetHeldGuard,
+    /// A lookup read its home's hop bits and has not read a slot yet.
+    LookupReadHops,
+    /// A displacement linked the entry it moves at its new slot and published the new slot's
+    /// hop bit and the advanced move stamp; the entry is still in its old slot too.
+    MoveLinkedTwice,
+    /// A displacement unlinked the moved entry from its old slot, whose hop bit is still set.
+    MoveUnlinked,
 }
 
 /// Where an armed thread stops, and the two channels it meets the test on.
