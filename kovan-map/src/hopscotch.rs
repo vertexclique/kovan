@@ -100,10 +100,10 @@ impl<K: Clone, V: Clone> Clone for Entry<K, V> {
 }
 
 // SAFETY (kovan retirement rule): a retired Entry's destructor may run on
-// any thread, and entries (with K and V inside) move between threads —
+// any thread, and entries (with K and V inside) move between threads -
 // hence `K: Send, V: Send` for Send. Lookups DO produce `&K`/`&V` from a
 // shared `&Entry` (get() clones V through &V under concurrent readers),
-// so Sync additionally requires `K: Sync, V: Sync` — the same bounds the
+// so Sync additionally requires `K: Sync, V: Sync` - the same bounds the
 // map-level Sync impl has always required for sharing the map.
 unsafe impl<K: Send, V: Send> Send for Entry<K, V> {}
 unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Entry<K, V> {}
@@ -117,7 +117,7 @@ struct Table<K, V> {
     mask: usize,
 }
 
-// SAFETY (kovan retirement rule): same reasoning as Entry — a retired
+// SAFETY (kovan retirement rule): same reasoning as Entry - a retired
 // Table's destructor may run on any thread (hence K, V: Send via the
 // contained entries); shared access to entries through a `&Table` carries
 // Entry's Sync requirements.
@@ -402,7 +402,7 @@ where
     /// When multiple threads call this concurrently for the same key (without
     /// concurrent removes), all callers receive the same value.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
-        // Fast path: key already exists — no clone, no insert.
+        // Fast path: key already exists - no clone, no insert.
         if let Some(v) = self.get(&key) {
             return v;
         }
@@ -453,7 +453,7 @@ where
             match self.remove(key) {
                 Some(v) => {
                     // The first removal unlinks the first match in scan
-                    // order — the live (most recent) version.
+                    // order - the live (most recent) version.
                     if newest.is_none() {
                         newest = Some(v);
                     }
@@ -542,7 +542,7 @@ where
 
                                     // Re-validate: a concurrent migration may
                                     // have cloned this entry into a new table
-                                    // before we unlinked it here — redo the
+                                    // before we unlinked it here - redo the
                                     // removal on the current table so the key
                                     // does not resurrect.
                                     if self.resizing.load(Ordering::SeqCst)
@@ -1192,7 +1192,7 @@ where
     }
 }
 
-/// Owned iterator yielding `(K, V)` by value — moves out of the entries, no
+/// Owned iterator yielding `(K, V)` by value - moves out of the entries, no
 /// clone. Each drained slot is nulled so the table destructor stays a no-op.
 pub struct HopscotchIntoIter<K: 'static, V: 'static> {
     table: *mut Table<K, V>,
@@ -1312,7 +1312,7 @@ unsafe impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> Sync for HopscotchMa
 
 impl<K, V, S> Drop for HopscotchMap<K, V, S> {
     fn drop(&mut self) {
-        // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
+        // SAFETY: `drop(&mut self)` guarantees exclusive ownership - no concurrent
         // readers can exist. The Table's destructor frees the remaining entries.
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
