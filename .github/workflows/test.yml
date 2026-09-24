@@ -82,7 +82,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # One model-checked scenario per crate (kovan-channel covers three).
+      # One model-checked scenario file per crate (kovan-channel covers three
+      # scenarios, kovan-map two files: its two maps).
       # Each opts in via its own `shuttle` feature, kept off by default so
       # it costs nothing outside this job. Release mode: shuttle's own
       # scheduling overhead dwarfs the workload either way, but release
@@ -91,6 +92,7 @@ jobs:
         run: |
           cargo test -p kovan --features shuttle --test shuttle_reclaim --release
           cargo test -p kovan-map --features shuttle --test shuttle_resize --release
+          cargo test -p kovan-map --features shuttle --test shuttle_hopscotch --release
           cargo test -p kovan-channel --features shuttle --test shuttle_channel --release
           cargo test -p kovan-queue --features shuttle --test shuttle_array_queue --release
           cargo test -p kovan-stm --features shuttle --test shuttle_stm --release

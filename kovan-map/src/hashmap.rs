@@ -64,7 +64,7 @@ use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 // instead of a 1-byte one; not chased further since the type swap was
 // never actually required).
 #[inline(always)]
-fn resize_spin_hint() {
+pub(crate) fn resize_spin_hint() {
     #[cfg(feature = "shuttle")]
     {
         shuttle::hint::spin_loop();

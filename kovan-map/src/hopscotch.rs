@@ -3,16 +3,24 @@
 //! # Features
 //!
 //! - **Robust Concurrency**: Uses Copy-on-Move displacement to prevent Use-After-Free.
-//! - **Safe Resizing**: Uses a lightweight resize lock to prevent lost updates during migration.
+//! - **Safe Resizing**: A resize (and a clear) takes every home bucket's writer guard of the
+//!   table before it copies a slot, so a write either lands before the copy (and is copied) or
+//!   waits for the new table; a table a resize replaced never admits a writer again. An insert
+//!   that landed is final: it never retries into the new table, where it would meet its own
+//!   migrated entry and report it as another caller's.
+//! - **Stable iteration**: An iterator walks the table that was current when it was created to
+//!   the end, even when a resize replaces it meanwhile.
 //! - **Memory reclamation**: Uses Kovan.
 //! - **Clone Support**: Supports V: Clone (e.g., `Arc<T>`) instead of just Copy.
 
 extern crate alloc;
 
+use crate::hashmap::resize_spin_hint;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use foldhash::fast::FixedState;
 use kovan::{Atomic, RetiredNode, Shared, pin, retire};
@@ -48,7 +56,9 @@ struct Bucket<K, V> {
     /// for the key) and phase-2 (CAS any empty neighborhood slot, THEN set
     /// the hop bit) are not atomic: two `insert_if_absent` callers could
     /// both be told "absent", leaving two live versions of one key with
-    /// `get` only ever returning one of them.
+    /// `get` only ever returning one of them. A resize or a clear takes
+    /// every home guard of the table (`hold_writers`) before it touches a
+    /// slot, and a resize keeps the guards of the table it replaced.
     write_guard: AtomicBool,
 }
 
@@ -241,7 +251,7 @@ where
     #[inline]
     fn wait_for_resize(&self) {
         while self.resizing.load(Ordering::Acquire) {
-            core::hint::spin_loop();
+            resize_spin_hint();
         }
     }
 
@@ -291,10 +301,6 @@ where
     /// Helper for get_or_insert logic.
     fn insert_impl(&self, key: K, value: V, only_if_absent: bool) -> Option<V> {
         let hash = self.hasher.hash_one(&key);
-        // Track whether we already incremented count for a new insert across
-        // retry iterations.  Prevents both under-count (which causes cascading
-        // resizes on Windows) and double-count.
-        let mut counted = false;
 
         loop {
             self.wait_for_resize();
@@ -310,11 +316,14 @@ where
             // Home-bucket writer guard: serialize same-bucket inserts so the
             // existence scan and the slot claim inside try_insert are one
             // atomic step. Contended -> spin via the outer loop, which keeps
-            // re-checking `resizing` (the resizer never takes this guard, so
-            // there is no lock-order deadlock; an insert that lands in the
-            // old table during a swap is caught by the re-validation below).
+            // re-checking `resizing` and reloads the table. A resize takes
+            // every home guard of the table before it copies a slot
+            // (`hold_writers`) and keeps the guards of a table it replaced,
+            // so holding this guard means the table is live and every slot
+            // this call writes is copied by any resize that follows. No
+            // lock-order deadlock: a guard holder never waits for anything.
             if self.acquire_write_guard(table, hash).is_none() {
-                core::hint::spin_loop();
+                resize_spin_hint();
                 continue;
             }
 
@@ -326,40 +335,42 @@ where
             // must release BEFORE the resize arms below drop the pin and
             // migrate (the release touches this table's bucket, which is
             // only safe while the pin keeps the table alive).
-            let insert_result = {
+            let (insert_result, new_count) = {
                 let _wg = WriteGuardRelease {
                     table,
                     idx: table.bucket_index(hash),
                 };
-                self.try_insert(
+                let insert_result = self.try_insert(
                     table,
                     hash,
                     key.clone(),
                     value.clone(),
                     only_if_absent,
                     &guard,
-                )
+                );
+                // A new entry is counted once, before its home guard is
+                // released: concurrent removes cannot decrement the count
+                // below the true entry count, and a clear (which resets the
+                // count while it holds every home guard) never sees the
+                // entry without its count.
+                let new_count = match insert_result {
+                    InsertResult::Success(None) => {
+                        Some(self.count.fetch_add(1, Ordering::Relaxed) + 1)
+                    }
+                    _ => None,
+                };
+                (insert_result, new_count)
             };
             match insert_result {
                 InsertResult::Success(old_val) => {
-                    // Count new inserts immediately so that concurrent removes
-                    // cannot decrement count below the true entry count.
-                    if old_val.is_none() && !counted {
-                        self.count.fetch_add(1, Ordering::Relaxed);
-                        counted = true;
-                    }
-
-                    // If a resize started while we were inserting, our update
-                    // might have been missed by the migration.
-                    // We must retry to ensure we write to the new table.
-                    if self.resizing.load(Ordering::SeqCst)
-                        || self.table.load(Ordering::SeqCst, &guard) != table_ptr
-                    {
-                        continue;
-                    }
-
-                    if counted {
-                        let new_count = self.count.load(Ordering::Relaxed);
+                    #[cfg(test)]
+                    pause::at(pause::Point::AfterLanding);
+                    // Final. The write landed in a live table under its home
+                    // guard, so a resize that starts after it copies it; a
+                    // retry here would meet this call's own migrated entry
+                    // and report it as present (`insert_if_absent` answering
+                    // `Some(own value)` for an insert that happened).
+                    if let Some(new_count) = new_count {
                         let current_capacity = table.capacity;
                         let load_factor = new_count as f64 / current_capacity as f64;
 
@@ -566,12 +577,16 @@ where
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            resize_spin_hint();
         }
 
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
         let table = unsafe { &*table_ptr.as_raw() };
+        // No insert is between its scan and its claim while the slots are
+        // cleared: one that landed is cleared with the rest, one that did
+        // not lands after the clear with its hop bit intact.
+        Self::hold_writers(table);
 
         for i in 0..(table.capacity + NEIGHBORHOOD_SIZE) {
             let bucket = table.get_bucket(i);
@@ -599,7 +614,42 @@ where
         }
 
         self.count.store(0, Ordering::Release);
+        Self::release_writers(table);
         self.resizing.store(false, Ordering::Release);
+    }
+
+    /// Take every home bucket's writer guard of `table`, waiting out each
+    /// insert that holds one (bounded: a guard holder runs `try_insert` to its
+    /// end and waits for nothing). Once this returns no insert is between its
+    /// existence scan and its slot claim anywhere in `table`, and none can
+    /// start there: a writer that fails its guard reloads the table. Only the
+    /// thread that set `resizing` calls it (a resize or a clear), so two
+    /// holders never wait on each other.
+    fn hold_writers(table: &Table<K, V>) {
+        for idx in 0..table.capacity {
+            // Acquire pairs with a writer's release of the guard: every slot
+            // and hop bit it wrote is visible to the copy or clear after this.
+            while table
+                .get_bucket(idx)
+                .write_guard
+                .swap(true, Ordering::Acquire)
+            {
+                #[cfg(test)]
+                pause::at(pause::Point::ResizerMetHeldGuard);
+                resize_spin_hint();
+            }
+        }
+    }
+
+    /// Give back what [`Self::hold_writers`] took, for a table that stays
+    /// live (a clear, or a resize that did not publish its new table).
+    fn release_writers(table: &Table<K, V>) {
+        for idx in 0..table.capacity {
+            table
+                .get_bucket(idx)
+                .write_guard
+                .store(false, Ordering::Release);
+        }
     }
 
     /// Try to take the home bucket's writer guard. `Some(())` on success;
@@ -671,6 +721,9 @@ where
                 }
             }
         }
+
+        #[cfg(test)]
+        pause::at(pause::Point::InGuardBeforeClaim);
 
         // 2. Find empty slot
         for offset in 0..NEIGHBORHOOD_SIZE {
@@ -951,6 +1004,13 @@ where
             return;
         }
 
+        // Every insert into the old table lands before the copy below reads
+        // its slot, or waits and lands in the new table: none is lost, and
+        // none has to retry into the new table and meet its own entry there.
+        // No displacement moves an entry past the copy's position either
+        // (displacement runs under a home guard).
+        Self::hold_writers(old_table);
+
         let new_table = Box::into_raw(Box::new(Table::new(new_capacity)));
         let new_table_ref = unsafe { &*new_table };
 
@@ -984,6 +1044,9 @@ where
                 &guard,
             ) {
                 Ok(_) => {
+                    // The replaced table keeps its writer guards held: a
+                    // writer that still holds its pointer fails its guard,
+                    // reloads and writes to the new table.
                     unsafe { retire(old_table_ptr.as_raw()) };
                 }
                 Err(_) => {
@@ -993,23 +1056,35 @@ where
         }
 
         if !success {
-            // The unpublished new table's destructor frees its cloned entries.
+            // The unpublished new table's destructor frees its cloned entries;
+            // the old table stays live, so its writers get their guards back.
             unsafe {
                 drop(Box::from_raw(new_table));
             }
+            Self::release_writers(old_table);
         }
 
         self.resizing.store(false, Ordering::Release);
     }
     /// Returns an iterator over the map entries.
+    ///
+    /// The iterator walks the table that is current when it is created, to
+    /// its end, even when a resize replaces that table meanwhile (the walk's
+    /// position means nothing in another table, whose layout differs). An
+    /// entry present from the iterator's creation to its end is yielded, and
+    /// a resize neither skips nor repeats it; an entry inserted, removed or
+    /// updated concurrently may or may not be reflected. A concurrent insert
+    /// that displaces an entry within its neighborhood moves it to a higher
+    /// slot, so it is never skipped, but one already yielded can be yielded
+    /// again.
     pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
         let guard = pin();
-        let table_ptr = self.table.load(Ordering::Acquire, &guard);
-        let _table = unsafe { &*table_ptr.as_raw() };
+        let table = self.table.load(Ordering::Acquire, &guard).as_raw();
         HopscotchIter {
-            map: self,
+            table,
             bucket_idx: 0,
             guard,
+            _map: PhantomData,
         }
     }
 
@@ -1045,11 +1120,13 @@ where
     }
 }
 
-/// Iterator over HopscotchMap entries.
+/// Iterator over HopscotchMap entries ([`HopscotchMap::iter`]).
 pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
-    map: &'a HopscotchMap<K, V, S>,
+    /// The table the walk started on, loaded under `guard`.
+    table: *const Table<K, V>,
     bucket_idx: usize,
     guard: kovan::Guard,
+    _map: PhantomData<&'a HopscotchMap<K, V, S>>,
 }
 
 impl<'a, K, V, S> Iterator for HopscotchIter<'a, K, V, S>
@@ -1060,8 +1137,11 @@ where
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let table_ptr = self.map.table.load(Ordering::Acquire, &self.guard);
-        let table = unsafe { &*table_ptr.as_raw() };
+        // SAFETY: owned by this iterator's `guard`, which was pinned before
+        // `table` was loaded and dies with the iterator: a resize that
+        // retires the table cannot free it (or its entries) while the guard
+        // is held.
+        let table = unsafe { &*self.table };
 
         while self.bucket_idx < table.buckets.len() {
             let bucket = table.get_bucket(self.bucket_idx);
@@ -1249,158 +1329,9 @@ impl<K, V, S> Drop for HopscotchMap<K, V, S> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "hopscotch_pause.rs"]
+mod pause;
 
-    #[test]
-    fn test_insert_and_get() {
-        let map = HopscotchMap::new();
-        assert_eq!(map.insert(1, 100), None);
-        assert_eq!(map.get(&1), Some(100));
-        assert_eq!(map.get(&2), None);
-    }
-
-    #[test]
-    fn test_growing() {
-        let map = HopscotchMap::with_capacity(32);
-        for i in 0..100 {
-            map.insert(i, i * 2);
-        }
-        for i in 0..100 {
-            assert_eq!(map.get(&i), Some(i * 2));
-        }
-    }
-
-    #[test]
-    fn test_concurrent() {
-        use alloc::sync::Arc;
-        extern crate std;
-        use std::thread;
-
-        let map = Arc::new(HopscotchMap::with_capacity(64));
-        let mut handles = alloc::vec::Vec::new();
-
-        for thread_id in 0..4 {
-            let map_clone = Arc::clone(&map);
-            let handle = thread::spawn(move || {
-                for i in 0..1000 {
-                    let key = thread_id * 1000 + i;
-                    map_clone.insert(key, key * 2);
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        for thread_id in 0..4 {
-            for i in 0..1000 {
-                let key = thread_id * 1000 + i;
-                assert_eq!(map.get(&key), Some(key * 2));
-            }
-        }
-    }
-
-    #[test]
-    fn test_concurrent_insert_and_remove() {
-        use alloc::sync::Arc;
-        extern crate std;
-        use std::thread;
-
-        let map = Arc::new(HopscotchMap::with_capacity(64));
-
-        // Phase 1: Pre-populate so removers have something to work with
-        for thread_id in 0..4u64 {
-            for i in 0..500u64 {
-                let key = thread_id * 1000 + i;
-                map.insert(key, key * 3);
-            }
-        }
-
-        let mut insert_handles = alloc::vec::Vec::new();
-        let mut remove_handles = alloc::vec::Vec::new();
-
-        // Spawn inserter threads: each inserts keys in its own range
-        for thread_id in 0..4u64 {
-            let map_clone = Arc::clone(&map);
-            insert_handles.push(thread::spawn(move || {
-                for i in 0..500u64 {
-                    let key = thread_id * 1000 + i;
-                    map_clone.insert(key, key * 3);
-                }
-            }));
-        }
-
-        // Spawn remover threads: each removes keys from the same ranges,
-        // racing with inserters
-        for thread_id in 0..4u64 {
-            let map_clone = Arc::clone(&map);
-            remove_handles.push(thread::spawn(move || {
-                for i in 0..500u64 {
-                    let key = thread_id * 1000 + i;
-                    if let Some(val) = map_clone.remove(&key) {
-                        // Value must be correct if present
-                        assert_eq!(val, key * 3);
-                    }
-                }
-            }));
-        }
-
-        for handle in insert_handles {
-            handle.join().unwrap();
-        }
-        for handle in remove_handles {
-            handle.join().unwrap();
-        }
-
-        // Verify: every remaining key has the correct value
-        for thread_id in 0..4u64 {
-            for i in 0..500u64 {
-                let key = thread_id * 1000 + i;
-                if let Some(val) = map.get(&key) {
-                    assert_eq!(val, key * 3);
-                }
-            }
-        }
-    }
-
-    /// Regression: get_or_insert must not panic when a concurrent remove
-    /// deletes the key between the internal insert and the return.
-    #[test]
-    fn test_hopscotch_get_or_insert_concurrent_remove() {
-        use alloc::sync::Arc;
-        extern crate std;
-        use std::sync::Barrier;
-        use std::thread;
-
-        let map = Arc::new(HopscotchMap::<u64, u64>::with_capacity(64));
-        let barrier = Arc::new(Barrier::new(8));
-
-        let handles: Vec<_> = (0..8u64)
-            .map(|tid| {
-                let map = map.clone();
-                let barrier = barrier.clone();
-                thread::spawn(move || {
-                    barrier.wait();
-                    for i in 0..5000u64 {
-                        let key = i % 32; // Small key space forces heavy contention
-                        if tid % 2 == 0 {
-                            // Half the threads do get_or_insert
-                            let _ = map.get_or_insert(key, tid * 1000 + i);
-                        } else {
-                            // Other half remove
-                            let _ = map.remove(&key);
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join()
-                .expect("Thread panicked during get_or_insert/remove race");
-        }
-    }
-}
+#[cfg(test)]
+#[path = "hopscotch_tests.rs"]
+mod tests;
