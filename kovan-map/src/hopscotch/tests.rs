@@ -1,4 +1,4 @@
-//! Colocated coverage for `hopscotch.rs`: the map's single-thread contract, its concurrent
+//! Colocated coverage for the hopscotch module: the map's single-thread contract, its concurrent
 //! stress cases, and deterministic replays of the interleavings a resize turns on (an insert
 //! that lands just before the table it landed in is replaced, a resize meeting a writer that
 //! holds a home bucket, a walk whose table is replaced under it) and those a displacement turns
@@ -163,6 +163,7 @@ extern crate std;
 
 use super::pause::{self, Point, Stop};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::hash::Hasher;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
