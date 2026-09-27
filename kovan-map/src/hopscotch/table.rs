@@ -485,24 +485,49 @@ impl<K, V> Table<K, V> {
     /// writer holds it.
     #[inline]
     pub(super) fn home_guard(&self, idx: usize) -> Option<HomeGuard<'_>> {
+        self.home_guard_unless(idx, |_| false).ok()
+    }
+
+    /// Take the writer guard of the home bucket `idx` without waiting, unless another writer
+    /// holds it or `refuse` holds of the home's control word: `Err` with the word as read then.
+    /// One read of the word serves `refuse`, the test of the guard and the compare-exchange that
+    /// takes it, which sets the guard bit and nothing else, as a read-modify-write setting the
+    /// bit would.
+    #[inline(always)]
+    pub(super) fn home_guard_unless(
+        &self,
+        idx: usize,
+        refuse: impl Fn(u64) -> bool,
+    ) -> Result<HomeGuard<'_>, u64> {
         let control = &self.get_bucket(idx).control;
         // A writer that finds the guard held leaves the word alone: its read shares the
-        // holder's line, where the read-modify-write below would take the line from the holder
-        // in the middle of its write. Relaxed: only a hint, the read-modify-write decides.
-        if control.load(Ordering::Relaxed) & GUARD != 0 {
-            return None;
+        // holder's line, where a read-modify-write would take the line from the holder in the
+        // middle of its write. Relaxed: the compare-exchange decides.
+        let mut word = control.load(Ordering::Relaxed);
+        loop {
+            if word & GUARD != 0 || refuse(word) {
+                return Err(word);
+            }
+            // Acquire: pairs with the previous holder's release, so every slot and hop bit it
+            // wrote is visible to this holder. Relaxed on failure: the word read is only tested
+            // again. The word changes only under the guard and at its release, so a failure
+            // finds the guard held, or retries with the word a holder released.
+            match control.compare_exchange_weak(
+                word,
+                word | GUARD,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(HomeGuard {
+                        control,
+                        idx,
+                        word: word | GUARD,
+                    });
+                }
+                Err(now) => word = now,
+            }
         }
-        // Acquire: pairs with the previous holder's release, so every slot and hop bit it wrote
-        // is visible to this holder.
-        let prev = control.fetch_or(GUARD, Ordering::Acquire);
-        if prev & GUARD != 0 {
-            return None;
-        }
-        Some(HomeGuard {
-            control,
-            idx,
-            word: prev | GUARD,
-        })
     }
 
     /// The entry of `key`, whose hash is `hash`, as `get` finds it, taking no guard: a scan of

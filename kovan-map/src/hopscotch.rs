@@ -382,24 +382,22 @@ where
                 continue;
             }
 
-            let home_idx = table.bucket_index(hash);
-            // A home without hop bits has no entry to remove, and seeing that takes no guard:
-            // an entry's bit stays set from its publication to its unlink. Relaxed: no slot is
-            // read.
-            let word = table.get_bucket(home_idx).control.load(Ordering::Relaxed);
-            if hop_bits(word) == 0 {
-                return None;
-            }
-
             // The home guard, as an insert takes it: the scan below is stable, the unlink cannot
             // race an update or a move of the entry, and a resize copies the table either before
             // this call takes the guard (and this call then waits for the new table) or after
-            // the unlink.
-            let Some(mut home) = table.home_guard(home_idx) else {
-                #[cfg(test)]
-                pause::at(pause::Point::WriterMetHeldGuard);
-                spin_hint();
-                continue;
+            // the unlink. A home without hop bits has no entry to remove, and seeing that takes
+            // no guard: an entry's bit stays set from its publication to its unlink. One read of
+            // the home's control word serves both.
+            let home_idx = table.bucket_index(hash);
+            let mut home = match table.home_guard_unless(home_idx, |word| hop_bits(word) == 0) {
+                Ok(home) => home,
+                Err(word) if hop_bits(word) == 0 => return None,
+                Err(_) => {
+                    #[cfg(test)]
+                    pause::at(pause::Point::WriterMetHeldGuard);
+                    spin_hint();
+                    continue;
+                }
             };
             // The scan reads the home's entries without protecting them: only the holder of
             // `home` unlinks or retires one.

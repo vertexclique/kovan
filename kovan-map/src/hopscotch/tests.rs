@@ -162,6 +162,7 @@ fn test_hopscotch_get_or_insert_concurrent_remove() {
 extern crate std;
 
 use super::pause::{self, Point, Stop};
+use super::table::GUARD;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::Hasher;
@@ -705,5 +706,60 @@ fn a_scan_under_the_home_guard_answers_as_a_reader_scan() {
     for k in home_0.into_iter().chain([1]) {
         assert_eq!(map.remove(&k), Some(k), "key {k:#x}");
     }
+    assert!(map.is_empty());
+}
+
+/// A writer takes a home's guard from one read of its control word: the guard it gets names the
+/// home's bits as they were when it took it, a refused or held home is left as it was, and a
+/// remove of a key whose home has no bits answers `None` even while another writer holds that
+/// home, without waiting for it.
+#[test]
+fn a_home_guard_is_taken_from_one_read_of_the_control_word() {
+    let map = Arc::new(HopscotchMap::<u64, u64, Identity>::with_capacity_and_hasher(64, Identity));
+    // Home 3 holds keys 3 and 67 in slots 3 and 4; home 5 has no bits.
+    for k in [3, 67] {
+        assert_eq!(map.insert(k, k), None);
+    }
+    let guard = pin();
+    let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
+    let control = |idx: usize| table.get_bucket(idx).control.load(Ordering::Relaxed);
+    let before = control(3);
+    assert_eq!(hop_bits(before), 0b11);
+
+    let refused = table.home_guard_unless(3, |word| hop_bits(word) != 0);
+    assert_eq!(refused.err(), Some(before), "refused with the word it read");
+    assert_eq!(control(3), before, "a refused home is left as it was");
+
+    let held = table
+        .home_guard_unless(3, |_| false)
+        .expect("no writer holds home 3");
+    assert_eq!(held.hops(), 0b11);
+    assert_eq!(control(3), before | GUARD);
+    let met = table.home_guard_unless(3, |_| false);
+    assert_eq!(
+        met.err(),
+        Some(before | GUARD),
+        "a held home answers the word it read"
+    );
+    assert_eq!(control(3), before | GUARD, "a held home is left as it was");
+    drop(held);
+    assert_eq!(control(3), before, "the release clears the guard bit alone");
+
+    let empty = table.home_guard(5).expect("no writer holds home 5");
+    let (done, answer) = sync_channel(1);
+    let remover = {
+        let map = Arc::clone(&map);
+        thread::spawn(move || done.send(map.remove(&5)).expect("the test waits"))
+    };
+    assert_eq!(
+        answer
+            .recv_timeout(MEET)
+            .expect("the remove answers while home 5 is held"),
+        None
+    );
+    remover.join().expect("the remove");
+    drop(empty);
+    assert_eq!(map.remove(&67), Some(67));
+    assert_eq!(map.remove(&3), Some(3));
     assert!(map.is_empty());
 }
