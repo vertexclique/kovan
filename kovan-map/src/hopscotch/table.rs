@@ -16,9 +16,10 @@ use kovan::{Atomic, RetiredNode, Shared, pin};
 
 // A bucket's control word describes the bucket as a home, in three fields:
 // - the hop bits (`HOP_MASK`): bit `i` set means slot `home + i` holds an entry of this home. An
-//   entry's bit is set after it is linked and cleared after it is unlinked, and a move sets the
-//   new slot's bit before it unlinks the old slot, so from the publication of its bit to its
-//   removal an entry is always in a slot its home's bits name;
+//   insert publishes its entry's bit before it links the entry (and takes it back when the link
+//   loses the slot), a remove clears the bit after it unlinks the entry, and a move sets the new
+//   slot's bit before it unlinks the old slot, so from its link to its removal an entry is always
+//   in a slot its home's bits name, and no lookup finds an entry a later lookup could miss;
 // - the home's writer guard (`GUARD`, Herlihy-style hopscotch): held across every write that
 //   links, replaces, unlinks or moves an entry of the home (an insert's existence scan and slot
 //   claim, a remove, a displacement moving one of the home's entries) and, for every home at
@@ -69,7 +70,8 @@ pub(super) struct Bucket<K, V> {
 }
 
 /// A held writer guard of one home bucket, with the home's control word as this holder last
-/// wrote it. Dropping it releases the guard, publishing the staged hop bits in the same store.
+/// wrote it. Dropping it releases the guard, publishing the hop bits it staged (an unlink's) in
+/// the same store.
 pub(super) struct HomeGuard<'t> {
     control: &'t AtomicU64,
     /// The home bucket's index.
@@ -85,11 +87,21 @@ impl HomeGuard<'_> {
         hop_bits(self.word)
     }
 
-    /// Stage the hop bit of the slot `offset` past the home (an entry linked there), published
-    /// when the guard is released.
+    /// Publish now, still holding the guard, the hop bit of the slot `offset` past the home,
+    /// for an entry about to be linked there. Relaxed: the link's release CAS, sequenced after
+    /// this store, carries it to every reader that finds the entry.
     #[inline(always)]
-    pub(super) fn stage_linked(&mut self, offset: usize) {
+    pub(super) fn publish_linked(&mut self, offset: usize) {
         self.word |= hop_bit(offset);
+        self.control.store(self.word, Ordering::Relaxed);
+    }
+
+    /// Take back the hop bit `publish_linked` published, when the link lost the slot. A reader
+    /// that met the bit meanwhile found another home's entry (or none) in the slot.
+    #[inline(always)]
+    pub(super) fn retract_linked(&mut self, offset: usize) {
+        self.word &= !hop_bit(offset);
+        self.control.store(self.word, Ordering::Relaxed);
     }
 
     /// Stage clearing the hop bit of the slot `offset` past the home (its entry unlinked),

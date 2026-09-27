@@ -65,30 +65,42 @@ where
             if !table.looks_free(home.idx + offset, guard) {
                 continue;
             }
-            match link(&table.get_bucket(home.idx + offset).slot, entry, guard) {
-                Ok(linked) => {
-                    home.stage_linked(offset);
-                    return InsertResult::Linked(linked);
-                }
+            match Self::link_in(table, home, offset, entry, guard) {
+                Ok(linked) => return InsertResult::Linked(linked),
                 Err(back) => entry = back,
             }
         }
 
         // 3. Displace entries of other homes until a slot of the neighborhood is free.
         match Self::displace(table, home.idx, guard) {
-            Freed::Slot(offset) => {
-                let slot = &table.get_bucket(home.idx + offset).slot;
-                match link(slot, entry, guard) {
-                    Ok(linked) => {
-                        home.stage_linked(offset);
-                        InsertResult::Linked(linked)
-                    }
-                    Err(back) => InsertResult::Retry(Pending::Built(back)),
-                }
-            }
+            Freed::Slot(offset) => match Self::link_in(table, home, offset, entry, guard) {
+                Ok(linked) => InsertResult::Linked(linked),
+                Err(back) => InsertResult::Retry(Pending::Built(back)),
+            },
             Freed::Contended => InsertResult::Retry(Pending::Built(entry)),
             Freed::Full => InsertResult::NeedResize(Pending::Built(entry)),
         }
+    }
+
+    /// Link `entry` in the free slot `offset` past the home of `home`, publishing the slot's hop
+    /// bit first: a lookup that finds the entry, through any word of the home that names the
+    /// slot (a word read before a remove emptied it, say), finds it only after every later
+    /// lookup sees the bit too, so the link is the insert's linearization point for every
+    /// reader. A link that loses the slot takes the bit back. Modelled in
+    /// `tla/hopscotch/HopscotchMap.tla` (IFr, IL); linking first and publishing the bit at the
+    /// guard's release (Mutation "link_then_publish") lets a lookup see an insert that a later
+    /// lookup does not.
+    fn link_in(
+        table: &Table<K, V>,
+        home: &mut HomeGuard<'_>,
+        offset: usize,
+        entry: Box<Entry<K, V>>,
+        guard: &kovan::Guard,
+    ) -> Result<*const Entry<K, V>, Box<Entry<K, V>>> {
+        home.publish_linked(offset);
+        link(&table.get_bucket(home.idx + offset).slot, entry, guard).inspect_err(|_| {
+            home.retract_linked(offset);
+        })
     }
 
     /// Free a slot of the neighborhood of `home` by moving entries: find the first free slot
