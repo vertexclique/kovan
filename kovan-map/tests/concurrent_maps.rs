@@ -15,7 +15,7 @@ mod stress;
 
 use kovan_map::{HashMap, HopscotchMap};
 use lin::{Call, Event, linearizable};
-use maps::{Constant, Identity, Map};
+use maps::{Clustered, Constant, Grouped, Identity, Map};
 use std::collections::HashMap as StdMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -780,5 +780,88 @@ mod matches_std_on_any_sequence {
         fn hopscotch_identity(steps in proptest::collection::vec(step(), 0..600)) {
             check::<HopscotchMap<u64, u64, Identity>>(&steps);
         }
+    }
+}
+
+/// Sixteen threads each own every sixteenth key (so the keys of one hash group, or of one
+/// neighborhood, belong to sixteen different threads) and run insert, replace, claim,
+/// get_or_insert, remove, force_remove and lookups on them, in bursts that grow and then shrink
+/// the table, checking every answer against the thread's own `std` model: with no other thread
+/// on its keys, every answer is determined. At the end the map holds exactly the union of the
+/// models. `KOVAN_STRESS_SCALE` multiplies the calls (millions in the release runs).
+mod owned_keys_answer_like_a_sequential_model {
+    use super::*;
+
+    const THREADS: usize = 16;
+    const KEYS_PER_THREAD: u64 = 256;
+
+    fn run<M: Map<u64, u64>>(calls: usize) {
+        let _serial = serial();
+        let map = Arc::new(M::with_capacity(64));
+        let m = Arc::clone(&map);
+        let models: Vec<StdMap<u64, u64>> = together(THREADS, move |t| {
+            let mut rng = Rng::new(t as u64 + 1_000);
+            let mut model: StdMap<u64, u64> = StdMap::new();
+            for i in 0..calls {
+                let k = t as u64 + THREADS as u64 * rng.below(KEYS_PER_THREAD);
+                let v = i as u64;
+                // Bursts of 4096 calls lean to inserting, then to removing.
+                let grow = (i / 4_096).is_multiple_of(2);
+                let roll = rng.below(10);
+                let (got, want) = match (grow, roll) {
+                    (true, 0..=3) | (false, 0) => (m.insert(k, v), model.insert(k, v)),
+                    (true, 4..=5) | (false, 1) => {
+                        let want = model.get(&k).copied();
+                        model.entry(k).or_insert(v);
+                        (m.insert_if_absent(k, v), want)
+                    }
+                    (true, 6) | (false, 2) => (
+                        Some(m.get_or_insert(k, v)),
+                        Some(*model.entry(k).or_insert(v)),
+                    ),
+                    (true, 7) | (false, 3..=5) => (m.remove(&k), model.remove(&k)),
+                    (false, 6) => (m.force_remove(&k), model.remove(&k)),
+                    (_, 8) => (
+                        m.contains_key(&k).then_some(0),
+                        model.contains_key(&k).then_some(0),
+                    ),
+                    _ => (m.get(&k), model.get(&k).copied()),
+                };
+                assert_eq!(
+                    got,
+                    want,
+                    "{} thread {t} call {i} key {k} (roll {roll})",
+                    M::NAME
+                );
+            }
+            model
+        });
+        let mut want: Vec<(u64, u64)> = models.into_iter().flatten().collect();
+        want.sort_unstable();
+        let mut got = map.entries();
+        got.sort_unstable();
+        assert_eq!(got.len(), want.len(), "{}: entries", M::NAME);
+        assert_eq!(got, want, "{}: contents", M::NAME);
+        assert_eq!(map.len(), want.len(), "{}: count", M::NAME);
+    }
+
+    #[test]
+    fn hashmap() {
+        run::<HashMap<u64, u64, Fold>>(scaled(20_000));
+    }
+
+    #[test]
+    fn hashmap_grouped() {
+        run::<HashMap<u64, u64, Grouped>>(scaled(20_000));
+    }
+
+    #[test]
+    fn hopscotch() {
+        run::<HopscotchMap<u64, u64, Fold>>(scaled(20_000));
+    }
+
+    #[test]
+    fn hopscotch_clustered() {
+        run::<HopscotchMap<u64, u64, Clustered>>(scaled(20_000));
     }
 }

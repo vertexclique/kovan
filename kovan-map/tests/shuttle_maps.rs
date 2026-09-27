@@ -18,7 +18,7 @@ mod lin;
 mod maps;
 
 use lin::{Call, Event, linearizable};
-use maps::{Constant, Identity, Map};
+use maps::{Clustered, Constant, Grouped, Identity, Map};
 use shuttle::sync::Mutex;
 use shuttle::sync::atomic::{AtomicU64, Ordering};
 use shuttle::thread;
@@ -317,7 +317,9 @@ macro_rules! scenario {
 
 scenario!(claims_race_a_grow, claims_race_a_grow:
     hashmap => kovan_map::HashMap<u64, u64, Fold>,
+    hashmap_grouped => kovan_map::HashMap<u64, u64, Grouped>,
     hopscotch => kovan_map::HopscotchMap<u64, u64, Fold>,
+    hopscotch_clustered => kovan_map::HopscotchMap<u64, u64, Clustered>,
 );
 scenario!(writes_race_a_shrink, writes_race_a_shrink:
     hashmap => kovan_map::HashMap<u64, u64, Fold>,

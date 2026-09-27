@@ -116,3 +116,49 @@ impl BuildHasher for Constant {
         ConstHasher
     }
 }
+
+/// A hasher that shapes a `u64` key's hash with `SHAPE` (the key given to `write_u64`).
+pub struct ShapedHasher<const SHAPE: u8>(u64);
+
+impl<const SHAPE: u8> Hasher for ShapedHasher<SHAPE> {
+    fn finish(&self) -> u64 {
+        match SHAPE {
+            // Sixteen consecutive keys share one hash: a chain of sixteen in the chained map.
+            0 => self.0 / 16,
+            // Sixteen consecutive keys get consecutive hashes, groups 64 apart: neighborhoods
+            // that overlap, displacements, and groups folding onto one another at small
+            // capacities.
+            _ => self.0 / 16 * 64 + self.0 % 16,
+        }
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 << 8) | u64::from(*b);
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+/// Sixteen consecutive keys share each hash.
+#[derive(Clone, Copy, Default)]
+pub struct Grouped;
+
+impl BuildHasher for Grouped {
+    type Hasher = ShapedHasher<0>;
+    fn build_hasher(&self) -> ShapedHasher<0> {
+        ShapedHasher(0)
+    }
+}
+
+/// Sixteen consecutive keys get consecutive hashes, their groups 64 apart.
+#[derive(Clone, Copy, Default)]
+pub struct Clustered;
+
+impl BuildHasher for Clustered {
+    type Hasher = ShapedHasher<1>;
+    fn build_hasher(&self) -> ShapedHasher<1> {
+        ShapedHasher(0)
+    }
+}
