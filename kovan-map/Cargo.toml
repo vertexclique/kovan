@@ -75,3 +75,7 @@ path = "tests/wasm/resize_leak_probe.rs"
 [[test]]
 name = "wasm_stress_test"
 path = "tests/wasm/stress_test.rs"
+
+[[bench]]
+name = "hopscotch"
+harness = false
