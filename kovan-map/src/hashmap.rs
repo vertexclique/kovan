@@ -56,6 +56,7 @@ pub use iter::{IntoIter, Iter, Keys, Values};
 mod iter;
 mod node;
 mod resize;
+mod std_traits;
 mod table;
 mod walk;
 
@@ -155,29 +156,11 @@ enum Claim<R, V> {
     Present(V),
 }
 
-#[cfg(feature = "std")]
-impl<K, V> HashMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
-    /// Creates a new empty hash map with FoldHash (FixedState).
-    pub fn new() -> Self {
-        Self::with_hasher(FixedState::default())
-    }
-
-    /// Creates a new empty hash map with at least `capacity` buckets.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_capacity_and_hasher(capacity, FixedState::default())
-    }
-}
-
-impl<K, V, S> HashMap<K, V, S>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-    S: BuildHasher,
-{
+// Small accessors that never hash: only the struct's own `'static` bound, as std's equivalent
+// block for `with_hasher`/`with_capacity_and_hasher`/`capacity`/`len`/`is_empty`/`hasher` needs
+// no `Hash`, `Eq`, `Clone` or `BuildHasher`. A method that hashes or clones a value lives in the
+// bound impl block below instead.
+impl<K: 'static, V: 'static, S> HashMap<K, V, S> {
     /// Creates a new hash map with custom hasher.
     pub fn with_hasher(hasher: S) -> Self {
         Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
@@ -205,6 +188,53 @@ where
         self.table_ref(&guard).capacity()
     }
 
+    /// Returns true if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the number of elements in the map.
+    ///
+    /// O(1): the current table's count, kept by insert/remove and set exactly
+    /// by a resize. Approximate while concurrent updates are in flight (a
+    /// write counts itself right after its CAS), exact in quiescence.
+    pub fn len(&self) -> usize {
+        let guard = pin();
+        self.table_ref(&guard)
+            .count()
+            .load(Ordering::Relaxed)
+            .max(0) as usize
+    }
+
+    /// Get the underlying hasher itself.
+    pub fn hasher(&self) -> &S {
+        &self.hasher
+    }
+}
+
+#[cfg(feature = "std")]
+impl<K, V> HashMap<K, V, FixedState>
+where
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
+{
+    /// Creates a new empty hash map with FoldHash (FixedState).
+    pub fn new() -> Self {
+        Self::with_hasher(FixedState::default())
+    }
+
+    /// Creates a new empty hash map with at least `capacity` buckets.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_hasher(capacity, FixedState::default())
+    }
+}
+
+impl<K, V, S> HashMap<K, V, S>
+where
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
+    S: BuildHasher,
+{
     /// Returns the value of `key`. Never blocks: reads the current table
     /// under a guard, even while a resize is in flight.
     ///
@@ -451,34 +481,11 @@ where
         }
     }
 
-    /// Returns true if the map is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns the number of elements in the map.
-    ///
-    /// O(1): the current table's count, kept by insert/remove and set exactly
-    /// by a resize. Approximate while concurrent updates are in flight (a
-    /// write counts itself right after its CAS), exact in quiescence.
-    pub fn len(&self) -> usize {
-        let guard = pin();
-        self.table_ref(&guard)
-            .count()
-            .load(Ordering::Relaxed)
-            .max(0) as usize
-    }
-
     /// Insert all `(K, V)` pairs from `iter`. Takes `&self` (concurrent map).
     pub fn extend<I: IntoIterator<Item = (K, V)>>(&self, iter: I) {
         for (k, v) in iter {
             self.insert(k, v);
         }
-    }
-
-    /// Get the underlying hasher itself.
-    pub fn hasher(&self) -> &S {
-        &self.hasher
     }
 
     /// A new key landed in `table`: count it there, and grow the table past three quarters.
@@ -529,17 +536,6 @@ where
         } else {
             self.cleanup(hash, key, guard);
         }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<K, V> Default for HashMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 

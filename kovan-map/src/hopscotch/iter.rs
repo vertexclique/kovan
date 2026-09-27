@@ -12,12 +12,11 @@ use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
 use kovan::{Shared, pin};
 
-impl<K, V, S> HopscotchMap<K, V, S>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-    S: BuildHasher,
-{
+// Construction only: none of `iter`/`keys`/`values` hashes or clones a value (the walk that
+// does lives in `Iterator for HopscotchIter` below), so this block needs only the struct's own
+// `'static` bound, as std's `HashMap::iter`/`keys`/`values` need none of `Hash`, `Eq`, `Clone`
+// or `BuildHasher` either.
+impl<K: 'static, V: 'static, S> HopscotchMap<K, V, S> {
     /// Returns an iterator over the map entries.
     ///
     /// The iterator walks the table that is current when it is created, to
@@ -224,8 +223,8 @@ where
 
 impl<K, V, S> core::iter::FromIterator<(K, V)> for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
     S: BuildHasher + Default,
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
@@ -237,11 +236,14 @@ where
     }
 }
 
+// Bounded by exactly what `Iterator for HopscotchIter` needs (see its own comment): a concurrent
+// walk yields owned clones, so `K: Eq + Clone` and `V: Clone` are unavoidable here, unlike std's
+// unconstrained `IntoIterator for &HashMap`, which yields borrowed `(&K, &V)` and hashes nothing
+// at this bound-checked level either.
 impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
+    K: Eq + Clone + 'static,
     V: Clone + 'static,
-    S: BuildHasher,
 {
     type Item = (K, V);
     type IntoIter = HopscotchIter<'a, K, V, S>;

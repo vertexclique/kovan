@@ -35,18 +35,23 @@ pub(super) enum Found<'g, K: 'static, V: 'static> {
     Frozen,
 }
 
+// Never hashes: only the struct's own `'static` bound, so `capacity`/`len`/`iter` (unconstrained
+// accessors, see `hashmap.rs` and `hashmap/iter.rs`) can call it without pulling in `find`'s
+// `Hash + Eq + Clone` and `BuildHasher` bound below.
+impl<K: 'static, V: 'static, S> HashMap<K, V, S> {
+    /// The current table, protected by `guard`.
+    #[inline(always)]
+    pub(super) fn table_ref(&self, guard: &Guard) -> TableRef<K, V> {
+        TableRef::from_raw(self.table.load(Ordering::Acquire, guard).as_raw())
+    }
+}
+
 impl<K, V, S> HashMap<K, V, S>
 where
     K: Hash + Eq + Clone + 'static,
     V: Clone + 'static,
     S: BuildHasher,
 {
-    /// The current table, protected by `guard`.
-    #[inline(always)]
-    pub(super) fn table_ref(&self, guard: &Guard) -> TableRef<K, V> {
-        TableRef::from_raw(self.table.load(Ordering::Acquire, guard).as_raw())
-    }
-
     /// The writers' walk of the chain of `hash` in the current table: snips every deleted node
     /// it passes (a snip whose CAS fails starts the walk over) and stops at the node of `key`,
     /// at the chain's end, or at a frozen link. Returns the table it walked.
