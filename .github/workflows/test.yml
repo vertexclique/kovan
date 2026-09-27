@@ -86,6 +86,18 @@ jobs:
         env:
           RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
+      # `default = ["std"]` on kovan and kovan-map is a real feature
+      # combination (the no_std + alloc path); wasm.yml proves it builds at
+      # 32 bits, this proves it on the host target too. `--lib` for the same
+      # reason as the wasm job: `--all-targets` would pull in the native-only
+      # dev-deps of tests/benches, which do not build without `std`.
+      - name: Clippy (no_std, no default features)
+        run: |
+          cargo clippy -p kovan --no-default-features --lib -- -D warnings
+          cargo clippy -p kovan-map --no-default-features --lib -- -D warnings
+        env:
+          RUSTFLAGS: "-C target-feature=+cmpxchg16b"
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
