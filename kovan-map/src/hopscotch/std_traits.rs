@@ -3,6 +3,11 @@
 //! give them, built entirely on `HopscotchMap`'s public API (`iter`, `get`, `len`,
 //! `with_capacity_and_hasher`, `insert`). None of it touches a write path's own body.
 //!
+//! `Clone` and `Extend<(K, V)>` also ask `K: Send, V: Send`, as `FromIterator` does: an entry
+//! their inserts replace is retired, and kovan may run a retired entry's destructor on another
+//! thread (the contract of `kovan::retire`), which a `!Send` key or value must never meet.
+//! `Extend<(&K, &V)>` needs no `Send`: its `Copy` keys and values have no destructor.
+//!
 //! `FromIterator` and both `IntoIterator` impls live in `iter.rs`, next to the iterator types
 //! they return; `Send`/`Sync`/`Drop` stay in the main module, next to the field layout they
 //! reason about.
@@ -23,11 +28,12 @@ impl<K: 'static, V: 'static, S: Default> Default for HopscotchMap<K, V, S> {
 }
 
 /// A snapshot of the map's entries, as `std::collections::HashMap`'s `Debug` prints its own.
+/// Bounded by what the walk needs (owned clones, keys compared to skip one met twice), never by
+/// `Hash` or `S: BuildHasher`: printing hashes nothing.
 impl<K, V, S> fmt::Debug for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + fmt::Debug + 'static,
+    K: Eq + Clone + fmt::Debug + 'static,
     V: Clone + fmt::Debug + 'static,
-    S: BuildHasher,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
@@ -39,8 +45,8 @@ where
 /// concurrent write to `self` during the clone may or may not be reflected in the result.
 impl<K, V, S> Clone for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher + Clone,
 {
     fn clone(&self) -> Self {
@@ -57,8 +63,8 @@ where
 /// the map's own writers.
 impl<K, V, S> Extend<(K, V)> for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {

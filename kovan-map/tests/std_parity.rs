@@ -116,6 +116,32 @@ fn hashmap_accessors_need_no_hash_eq_clone_or_buildhasher() {
 }
 
 #[test]
+fn new_and_with_capacity_need_no_hash_eq_or_clone() {
+    let map: HopscotchMap<NoBounds, NoBounds> = HopscotchMap::new();
+    assert!(map.is_empty());
+    let map: HopscotchMap<NoBounds, NoBounds> = HopscotchMap::with_capacity(128);
+    assert!(map.capacity() >= 128);
+
+    let map: KHashMap<NoBounds, NoBounds> = KHashMap::new();
+    assert!(map.is_empty());
+    let map: KHashMap<NoBounds, NoBounds> = KHashMap::with_capacity(128);
+    assert!(map.capacity() >= 128);
+}
+
+/// `Clone` and `Debug` only: no `Hash`, no `Eq`.
+#[derive(Clone, Debug)]
+struct CloneDebugOnly;
+
+#[test]
+fn debug_needs_no_hash_or_buildhasher() {
+    // HopscotchMap's walk compares keys (K: Eq), HashMap's does not; neither hashes.
+    let map: HopscotchMap<i32, CloneDebugOnly, NoHasher> = HopscotchMap::with_hasher(NoHasher);
+    assert_eq!(format!("{map:?}"), "{}");
+    let map: KHashMap<CloneDebugOnly, CloneDebugOnly, NoHasher> = KHashMap::with_hasher(NoHasher);
+    assert_eq!(format!("{map:?}"), "{}");
+}
+
+#[test]
 fn hopscotch_into_iterator_for_ref_needs_no_hash_or_buildhasher() {
     // K: Eq + Clone (the walk yields owned clones - see the impl's doc comment), but no Hash and
     // no S: BuildHasher: `NoHasher` implements neither.
@@ -138,27 +164,27 @@ fn hashmap_into_iterator_for_ref_needs_no_hash_eq_or_buildhasher() {
     assert_eq!(n, 0);
 }
 
-/// `Rc` is `!Send`: proves `FromIterator` no longer requires `K: Send, V: Send` (0.1.20's bound
-/// would refuse this at compile time).
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-struct NotSend(std::rc::Rc<i32>);
-
-#[test]
-fn from_iter_does_not_require_send() {
-    let items: Vec<(NotSend, i32)> = (0..8).map(|i| (NotSend(std::rc::Rc::new(i)), i)).collect();
-    let map: HopscotchMap<NotSend, i32> = items.iter().cloned().collect();
-    assert_eq!(map.len(), 8);
-    for (k, v) in &items {
-        assert_eq!(map.get(k), Some(*v));
-    }
-
-    let map: KHashMap<NotSend, i32> = items.into_iter().collect();
-    assert_eq!(map.len(), 8);
-}
-
 // ---------------------------------------------------------------------------
 // New trait impls, checked against std::collections::HashMap on the same input
 // ---------------------------------------------------------------------------
+
+/// `FromIterator`, `Clone` and `Extend` ask `Send` of what they insert (a replaced entry's
+/// destructor may run on another thread), never `Sync`: `Cell` is `Send` and not `Sync`.
+#[test]
+fn inserting_impls_need_send_not_sync() {
+    use std::cell::Cell;
+    let map: HopscotchMap<i32, Cell<i32>> = (0..4).map(|i| (i, Cell::new(i))).collect();
+    let mut cloned = map.clone();
+    Extend::extend(&mut cloned, [(9, Cell::new(9))]);
+    assert_eq!((map.len(), cloned.len()), (4, 5));
+    assert_eq!(cloned.get(&9).map(Cell::into_inner), Some(9));
+
+    let map: KHashMap<i32, Cell<i32>> = (0..4).map(|i| (i, Cell::new(i))).collect();
+    let mut cloned = map.clone();
+    Extend::extend(&mut cloned, [(9, Cell::new(9))]);
+    assert_eq!((map.len(), cloned.len()), (4, 5));
+    assert_eq!(cloned.get(&9).map(Cell::into_inner), Some(9));
+}
 
 #[test]
 fn hopscotch_from_iter_and_eq_match_std() {
@@ -264,6 +290,48 @@ fn hashmap_clone_is_an_independent_snapshot() {
     cloned.insert(999, 999);
     assert_eq!(map.get(&999), None);
     assert_ne!(map.len(), cloned.len());
+}
+
+/// A clone of a grown map is sized like its source and, once emptied, shrinks back exactly as
+/// far as the source does, never holding the grown table forever.
+#[test]
+fn hopscotch_clone_of_a_grown_map_shrinks_like_its_source() {
+    let map: HopscotchMap<u64, u64> = HopscotchMap::with_capacity(64);
+    for i in 0..10_000 {
+        map.insert(i, i);
+    }
+    let cloned = map.clone();
+    assert_eq!(cloned.capacity(), map.capacity());
+    for i in 0..10_000 {
+        assert_eq!(map.remove(&i), Some(i));
+        assert_eq!(cloned.remove(&i), Some(i));
+    }
+    assert_eq!(cloned.capacity(), map.capacity());
+}
+
+#[test]
+fn hashmap_clone_of_a_grown_map_shrinks_like_its_source() {
+    let map: KHashMap<u64, u64> = (0..10_000).map(|i| (i, i)).collect();
+    let grown = map.capacity();
+    let cloned = map.clone();
+    assert_eq!(cloned.capacity(), grown);
+    for i in 0..10_000 {
+        assert_eq!(map.remove(&i), Some(i));
+        assert_eq!(cloned.remove(&i), Some(i));
+    }
+    assert!(map.capacity() < grown, "the source shrinks back");
+    assert_eq!(cloned.capacity(), map.capacity());
+
+    // A sized map's floor survives the clone too.
+    let sized: KHashMap<u64, u64> = KHashMap::with_capacity(4096);
+    for i in 0..100 {
+        sized.insert(i, i);
+    }
+    let cloned = sized.clone();
+    for i in 0..100 {
+        assert_eq!(cloned.remove(&i), Some(i));
+    }
+    assert_eq!(cloned.capacity(), 4096);
 }
 
 #[test]
@@ -389,3 +457,72 @@ fn hashmap_correct_under_rapidhash_concurrent_resize() {
         assert_eq!(map.get(&k), Some(k * 2));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The snapshot impls under concurrent writers: a clone taken while writers grow and shrink the
+// map through several resizes holds every key present throughout with its value, nothing torn,
+// no key twice, and equals its source once the writers stop.
+// ---------------------------------------------------------------------------
+
+macro_rules! snapshot_under_churn {
+    ($name:ident, $map:ident) => {
+        #[test]
+        fn $name() {
+            use std::collections::HashSet;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            const STABLE: u64 = 2_000;
+            const CYCLE: u64 = 20_000;
+            let map: Arc<$map<u64, u64, RapidState>> =
+                Arc::new($map::with_capacity_and_hasher(64, RapidState::default()));
+            for k in 0..STABLE {
+                map.insert(k, k * 3);
+            }
+            // A fixed amount of writing (three grow-and-shrink cycles per writer) bounds the
+            // garbage the run retires; the snapshots are taken for as long as the writers run.
+            let writers_left = Arc::new(AtomicUsize::new(4));
+            let writers: Vec<_> = (0..4u64)
+                .map(|t| {
+                    let (map, left) = (Arc::clone(&map), Arc::clone(&writers_left));
+                    thread::spawn(move || {
+                        let base = STABLE + t * CYCLE;
+                        for i in 0..6 * CYCLE {
+                            let k = base + i % CYCLE;
+                            if (i / CYCLE) % 2 == 0 {
+                                map.insert(k, k * 3);
+                            } else {
+                                map.remove(&k);
+                            }
+                        }
+                        left.fetch_sub(1, Ordering::Release);
+                    })
+                })
+                .collect();
+            let mut snapshots = 0;
+            while snapshots == 0 || writers_left.load(Ordering::Acquire) > 0 {
+                snapshots += 1;
+                let cloned = (*map).clone();
+                let mut seen = HashSet::new();
+                for (k, v) in cloned.iter() {
+                    assert!(seen.insert(k), "key {k} yielded twice by a quiescent clone");
+                    assert_eq!(v, k * 3, "key {k} cloned with a value it never held");
+                }
+                assert_eq!(cloned.len(), seen.len());
+                for k in 0..STABLE {
+                    assert_eq!(cloned.get(&k), Some(k * 3), "stable key {k} missing");
+                }
+                assert!(cloned == cloned.clone());
+                assert!(format!("{cloned:?}").starts_with('{'));
+            }
+            for w in writers {
+                w.join().unwrap();
+            }
+            let quiescent = (*map).clone();
+            assert!(*map == quiescent);
+            assert_eq!(quiescent.len(), map.len());
+        }
+    };
+}
+
+snapshot_under_churn!(hopscotch_snapshot_impls_under_churn, HopscotchMap);
+snapshot_under_churn!(hashmap_snapshot_impls_under_churn, KHashMap);

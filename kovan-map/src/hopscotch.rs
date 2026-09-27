@@ -133,12 +133,10 @@ impl<K: 'static, V: 'static, S> HopscotchMap<K, V, S> {
     }
 }
 
+// Construction with the built-in hasher never hashes either: the struct's own `'static` only,
+// as std's `HashMap::new`/`with_capacity` carry no bound.
 #[cfg(feature = "std")]
-impl<K, V> HopscotchMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
+impl<K: 'static, V: 'static> HopscotchMap<K, V, FixedState> {
     /// Creates a new `HopscotchMap` with default capacity and hasher.
     pub fn new() -> Self {
         Self::with_hasher(FixedState::default())
