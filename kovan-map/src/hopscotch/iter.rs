@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use super::table::{Entry, Table};
+use super::table::{Entry, Table, hop_bits};
 use super::{HopscotchMap, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
@@ -28,8 +28,10 @@ where
     /// displacement, which moves an entry to a higher slot of its
     /// neighborhood, links it there before unlinking it from its old slot (so
     /// the walk meets it) and the walk recognizes a key it already met there
-    /// (so it is not repeated). An entry inserted, removed or updated
-    /// concurrently may or may not be reflected, and no key is yielded twice.
+    /// (so it is not repeated). The walk yields an entry only once its home's
+    /// hop bits name its slot, so it never reports an entry a lookup could not
+    /// find yet. An entry inserted, removed or updated concurrently may or may
+    /// not be reflected, and no key is yielded twice.
     pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
         let guard = pin();
         let table = self.table.load(Ordering::Acquire, &guard).as_raw();
@@ -59,8 +61,8 @@ pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
     table: *const Table<K, V>,
     bucket_idx: usize,
     /// The entry the walk read in each of its last `NEIGHBORHOOD_SIZE` slots (slot `i` at
-    /// `i % NEIGHBORHOOD_SIZE`, null for a free slot), loaded under `guard`: how the walk
-    /// recognizes a key it already met.
+    /// `i % NEIGHBORHOOD_SIZE`, null for a free slot or an entry whose bit was not published),
+    /// loaded under `guard`: how the walk recognizes a key it already met.
     recent: [*const Entry<K, V>; NEIGHBORHOOD_SIZE],
     guard: kovan::Guard,
     _map: PhantomData<&'a HopscotchMap<K, V, S>>,
@@ -105,13 +107,24 @@ where
 
             let slot = &table.get_bucket(idx).slot;
             let entry_ptr: *const Entry<K, V> = slot.load(Ordering::Acquire, &self.guard).as_raw();
-            self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
+            self.recent[idx % NEIGHBORHOOD_SIZE] = core::ptr::null();
             if entry_ptr.is_null() {
                 continue;
             }
             // SAFETY: loaded under `self.guard`, which keeps it from being freed.
             let entry = unsafe { &*entry_ptr };
-            if !self.met_before(table.bucket_index(entry.hash), idx, entry) {
+            let home = table.bucket_index(entry.hash);
+            // Yield an entry only once its home's hop bits name its slot, as a lookup sees it:
+            // an insert links its entry before it publishes the entry's bit (at its guard's
+            // release), and a move links the entry at its new slot before it publishes that
+            // slot's bit, while the entry is still in its old slot, behind the walk. Acquire:
+            // pairs with the release that published the bit.
+            let word = table.get_bucket(home).control.load(Ordering::Acquire);
+            if hop_bits(word) & (1 << (idx - home)) == 0 {
+                continue;
+            }
+            self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
+            if !self.met_before(home, idx, entry) {
                 return Some((entry.key.clone(), entry.value.clone()));
             }
         }
