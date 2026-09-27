@@ -1,7 +1,7 @@
 //! Single-threaded, wasm-capable adaptation of `tests/stress_test.rs`.
 //!
 //! 7 of the original's 8 tests are adapted to run the same total op count
-//! from one thread instead of across several real threads — none of them
+//! from one thread instead of across several real threads - none of them
 //! assert anything beyond "the operation sequence completes without
 //! panicking or corrupting map state" (or, for
 //! `test_hopscotch_growth_under_contention`, a race-tolerant loose bound
@@ -10,13 +10,13 @@
 //! itself. 1 is not ported.
 //!
 //! Not ported (race-only):
-//! - `test_hashmap_iter_during_mutation` — spawns a writer thread that
+//! - `test_hashmap_iter_during_mutation` - spawns a writer thread that
 //!   inserts new keys while the main thread concurrently calls `map.iter()`
 //!   on the same map; the assertion is just that this doesn't crash. Its
 //!   entire value is proving the iterator survives a table being mutated
 //!   out from under it *during* iteration, from a real second thread.
 //!   Sequentially there is no concurrent mutation for the iterator to
-//!   survive — inserting then iterating is a no-op check with zero
+//!   survive - inserting then iterating is a no-op check with zero
 //!   coverage of that property.
 
 // On wasm32 there is no libtest runner; the wasm-bindgen harness supplies one.
@@ -34,7 +34,7 @@ use kovan_map::{HashMap, HopscotchMap};
 
 /// Sequential adaptation of `stress_test::test_hashmap_heavy_contention_same_key`.
 /// The original ran 8 threads each doing 5000 insert+get pairs against key
-/// `0`. This runs the same 40,000 insert+get pairs from one thread — it
+/// `0`. This runs the same 40,000 insert+get pairs from one thread - it
 /// validates the operation sequence doesn't corrupt state, not CAS
 /// correctness under real same-key contention. The threaded original
 /// remains the real coverage on native.
@@ -73,7 +73,7 @@ fn hashmap_insert_remove_cycle_sequential() {
 /// Sequential adaptation of `stress_test::test_hashmap_read_heavy`. The
 /// original ran 8 reader threads (10,000 reads each) concurrently with 1
 /// writer thread inserting 1000 more keys. This runs the writer's inserts
-/// first, then the same total read count, from one thread — it validates
+/// first, then the same total read count, from one thread - it validates
 /// the same reads resolve to the same values, not concurrent read/write
 /// safety. The threaded original remains the real coverage on native.
 #[test]
@@ -134,7 +134,7 @@ fn hopscotch_insert_remove_cycle_sequential() {
 /// The original ran 8 threads inserting disjoint keys into a small-capacity
 /// map to force concurrent resize, then tolerated up to 50 losses out of
 /// 8000 keys to resize races. Sequentially there is no resize race, so
-/// every key must survive — the loose bound becomes an exact one. This
+/// every key must survive - the loose bound becomes an exact one. This
 /// still exercises the same growth pattern (small starting capacity, 8000
 /// total inserts), just not concurrent-resize-vs-writer safety.
 #[test]

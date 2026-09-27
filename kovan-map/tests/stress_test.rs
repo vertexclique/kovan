@@ -154,7 +154,7 @@ fn test_hopscotch_growth_under_contention() {
         h.join().unwrap();
     }
 
-    // Verify entries — under heavy concurrent resize some may need re-insert
+    // Verify entries - under heavy concurrent resize some may need re-insert
     let mut missing = 0;
     for t in 0..8 {
         for i in 0..1000 {
