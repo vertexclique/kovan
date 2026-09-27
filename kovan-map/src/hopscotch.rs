@@ -39,6 +39,7 @@ pub use iter::{HopscotchIntoIter, HopscotchIter, HopscotchKeys, HopscotchValues}
 mod displace;
 mod iter;
 mod resize;
+mod std_traits;
 mod table;
 
 /// Neighborhood size (H parameter in hopscotch hashing)
@@ -78,29 +79,11 @@ enum Outcome<R, V> {
     Present(V),
 }
 
-#[cfg(feature = "std")]
-impl<K, V> HopscotchMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
-    /// Creates a new `HopscotchMap` with default capacity and hasher.
-    pub fn new() -> Self {
-        Self::with_hasher(FixedState::default())
-    }
-
-    /// Creates a new `HopscotchMap` with the specified capacity and default hasher.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_capacity_and_hasher(capacity, FixedState::default())
-    }
-}
-
-impl<K, V, S> HopscotchMap<K, V, S>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-    S: BuildHasher,
-{
+// Small accessors that never hash: only the struct's own `'static` bound, as std's equivalent
+// block for `with_hasher`/`with_capacity_and_hasher`/`capacity`/`len`/`is_empty`/`hasher` needs
+// no `Hash`, `Eq`, `Clone` or `BuildHasher`. A method that hashes or clones a value lives in the
+// bound impl block below instead.
+impl<K: 'static, V: 'static, S> HopscotchMap<K, V, S> {
     /// Creates a new `HopscotchMap` with the specified hasher and default capacity.
     pub fn with_hasher(hasher: S) -> Self {
         Self::with_capacity_and_hasher(INITIAL_CAPACITY, hasher)
@@ -134,6 +117,35 @@ where
         unsafe { (*table_ptr.as_raw()).capacity }
     }
 
+    /// Get the underlying hasher.
+    pub fn hasher(&self) -> &S {
+        &self.hasher
+    }
+}
+
+#[cfg(feature = "std")]
+impl<K, V> HopscotchMap<K, V, FixedState>
+where
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
+{
+    /// Creates a new `HopscotchMap` with default capacity and hasher.
+    pub fn new() -> Self {
+        Self::with_hasher(FixedState::default())
+    }
+
+    /// Creates a new `HopscotchMap` with the specified capacity and default hasher.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_hasher(capacity, FixedState::default())
+    }
+}
+
+impl<K, V, S> HopscotchMap<K, V, S>
+where
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
+    S: BuildHasher,
+{
     #[inline]
     fn wait_for_resize(&self) {
         while self.resizing.load(Ordering::Acquire) {
@@ -492,22 +504,6 @@ where
         for (k, v) in iter {
             self.insert(k, v);
         }
-    }
-
-    /// Get the underlying hasher.
-    pub fn hasher(&self) -> &S {
-        &self.hasher
-    }
-}
-
-#[cfg(feature = "std")]
-impl<K, V> Default for HopscotchMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -22,12 +22,11 @@ use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 use kovan::{Atomic, pin};
 
-impl<K, V, S> HashMap<K, V, S>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-    S: BuildHasher,
-{
+// Construction only: none of `iter`/`keys`/`values` hashes or clones a value (the walk that
+// does lives in `Iterator for Iter` below), so this block needs only the struct's own `'static`
+// bound, as std's `HashMap::iter`/`keys`/`values` need none of `Hash`, `Eq`, `Clone` or
+// `BuildHasher` either.
+impl<K: 'static, V: 'static, S> HashMap<K, V, S> {
     /// Returns an iterator over the map entries, `(K, V)` clones.
     ///
     /// The iterator walks the table that is current when it is created, to its end, even when a
@@ -193,11 +192,14 @@ where
     }
 }
 
+// Bounded by exactly what `Iterator for Iter` needs: a concurrent walk yields owned clones, so
+// `K: Clone` and `V: Clone` are unavoidable here, unlike std's unconstrained `IntoIterator for
+// &HashMap`, which yields borrowed `(&K, &V)` and hashes nothing at this bound-checked level
+// either.
 impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
+    K: Clone + 'static,
     V: Clone + 'static,
-    S: BuildHasher,
 {
     type Item = (K, V);
     type IntoIter = Iter<'a, K, V, S>;
@@ -307,8 +309,8 @@ where
 
 impl<K, V, S> core::iter::FromIterator<(K, V)> for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + 'static,
+    V: Clone + 'static,
     S: BuildHasher + Default,
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
