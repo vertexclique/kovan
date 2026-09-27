@@ -12,11 +12,11 @@ use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
 use kovan::pin;
 
-// Construction only: none of `iter`/`keys`/`values` hashes or clones a value (the walk that
-// does lives in `Iterator for HopscotchIter` below), so this block needs only the struct's own
-// `'static` bound, as std's `HashMap::iter`/`keys`/`values` need none of `Hash`, `Eq`, `Clone`
-// or `BuildHasher` either.
-impl<K: 'static, V: 'static, S> HopscotchMap<K, V, S> {
+// Construction: none of `iter`/`keys`/`values` hashes or clones a value (the walk that does
+// lives in `Iterator for HopscotchIter` below). `K: Eq` is captured here as the walk's key
+// comparison (how it recognizes a key it already met), so the `Iterator` impls keep the bounds
+// they have always had, `K: Clone` and `V: Clone`.
+impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
     /// Returns an iterator over the map entries.
     ///
     /// The iterator walks the table that is current when it is created, to
@@ -38,6 +38,7 @@ impl<K: 'static, V: 'static, S> HopscotchMap<K, V, S> {
             table,
             bucket_idx: 0,
             recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
+            same_key: <K as PartialEq>::eq,
             guard,
             _map: PhantomData,
         }
@@ -63,11 +64,13 @@ pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
     /// `i % NEIGHBORHOOD_SIZE`, null for a free slot),
     /// loaded under `guard`: how the walk recognizes a key it already met.
     recent: [*const Entry<K, V>; NEIGHBORHOOD_SIZE],
+    /// `K`'s equality, taken where `iter` is built.
+    same_key: fn(&K, &K) -> bool,
     guard: kovan::Guard,
     _map: PhantomData<&'a HopscotchMap<K, V, S>>,
 }
 
-impl<K: Eq, V, S> HopscotchIter<'_, K, V, S> {
+impl<K, V, S> HopscotchIter<'_, K, V, S> {
     /// Whether the walk already met the key of `entry`, read at slot `idx`, in a lower slot of
     /// the key's neighborhood (which starts at `home`). A move carries an entry to a higher slot
     /// of its neighborhood, so the walk can meet it a second time there (or a newer entry of its
@@ -80,7 +83,8 @@ impl<K: Eq, V, S> HopscotchIter<'_, K, V, S> {
             // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
             // being freed.
             unsafe { seen.as_ref() }.is_some_and(|seen| {
-                seen.hash == entry.hash && (core::ptr::eq(seen, entry) || seen.key == entry.key)
+                seen.hash == entry.hash
+                    && (core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key))
             })
         })
     }
@@ -88,7 +92,7 @@ impl<K: Eq, V, S> HopscotchIter<'_, K, V, S> {
 
 impl<'a, K, V, S> Iterator for HopscotchIter<'a, K, V, S>
 where
-    K: Eq + Clone,
+    K: Clone,
     V: Clone,
 {
     type Item = (K, V);
@@ -132,7 +136,7 @@ pub struct HopscotchKeys<'a, K: 'static, V: 'static, S> {
 
 impl<'a, K, V, S> Iterator for HopscotchKeys<'a, K, V, S>
 where
-    K: Eq + Clone,
+    K: Clone,
     V: Clone,
 {
     type Item = K;
@@ -149,7 +153,7 @@ pub struct HopscotchValues<'a, K: 'static, V: 'static, S> {
 
 impl<'a, K, V, S> Iterator for HopscotchValues<'a, K, V, S>
 where
-    K: Eq + Clone,
+    K: Clone,
     V: Clone,
 {
     type Item = V;
@@ -233,8 +237,8 @@ where
     }
 }
 
-// Bounded by exactly what `Iterator for HopscotchIter` needs (see its own comment): a concurrent
-// walk yields owned clones, so `K: Eq + Clone` and `V: Clone` are unavoidable here, unlike std's
+// A concurrent walk yields owned clones (`K: Clone`, `V: Clone`) and recognizes a key it already
+// met (`K: Eq`, taken by `iter`), so these bounds are unavoidable here, unlike std's
 // unconstrained `IntoIterator for &HashMap`, which yields borrowed `(&K, &V)` and hashes nothing
 // at this bound-checked level either.
 impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>

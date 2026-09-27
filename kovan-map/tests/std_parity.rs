@@ -51,15 +51,52 @@ fn hopscotch_accessors_need_no_hash_eq_clone_or_buildhasher() {
     assert!(map.is_empty());
     assert!(map.capacity() >= 64);
     let _: &NoHasher = map.hasher();
-    // Construction only (inserting needs Hash + Eq + Clone + BuildHasher, the block these
-    // accessors were split out of).
-    let _ = map.iter();
-    let _ = map.keys();
-    let _ = map.values();
 
     let via_with_hasher: HopscotchMap<NoBounds, NoBounds, NoHasher> =
         HopscotchMap::with_hasher(NoHasher);
     assert_eq!(via_with_hasher.len(), 0);
+}
+
+/// `Eq` only: neither `Hash`, `Clone` nor `Debug`.
+#[derive(PartialEq, Eq)]
+struct EqOnly;
+
+/// A HopscotchMap walk is built with `K: Eq` alone (it recognizes a key it already met, so no key
+/// is yielded twice, and that needs key equality; std's walk yields references and needs none),
+/// no `Hash`, `Clone` or `BuildHasher`: looser than 0.1.20, whose `iter` needed `Hash + Eq +
+/// Clone`.
+#[test]
+fn hopscotch_walks_are_built_with_eq_alone() {
+    let map: HopscotchMap<EqOnly, NoBounds, NoHasher> =
+        HopscotchMap::with_capacity_and_hasher(64, NoHasher);
+    let _ = map.iter();
+    let _ = map.keys();
+    let _ = map.values();
+}
+
+/// A HopscotchMap walk yields with exactly the bounds 0.1.20's `Iterator` impls had, `K: Clone`
+/// and `V: Clone`: code generic over those bounds alone keeps compiling.
+fn walk_len<K: Clone, V: Clone, S>(walk: kovan_map::HopscotchIter<'_, K, V, S>) -> usize {
+    walk.count()
+}
+
+fn key_count<K: Clone, V: Clone, S>(keys: kovan_map::HopscotchKeys<'_, K, V, S>) -> usize {
+    keys.count()
+}
+
+fn value_count<K: Clone, V: Clone, S>(values: kovan_map::HopscotchValues<'_, K, V, S>) -> usize {
+    values.count()
+}
+
+#[test]
+fn hopscotch_walks_yield_with_the_bounds_they_always_had() {
+    let map: HopscotchMap<u64, u64> = HopscotchMap::new();
+    for k in 0..100u64 {
+        map.insert(k, k);
+    }
+    assert_eq!(walk_len(map.iter()), 100);
+    assert_eq!(key_count(map.keys()), 100);
+    assert_eq!(value_count(map.values()), 100);
 }
 
 #[test]
