@@ -94,4 +94,13 @@ P_big_iter == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Iter>>
                                     [] w = 2 -> <<Ins(1, 2)>>
                                     [] w = 3 -> <<Iia(3, 1)>>]
 I_big_iter == <<<<1, 1>>, <<2, 1>>>>
+\* Two removes of adjacent nodes and a walk of their chain.
+P_live_iter == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Rem(1)>>
+                                     [] w = 2 -> <<Rem(2)>>
+                                     [] w = 3 -> <<Iter>>]
+
+\* Only the lookup (worker 3) is scheduled fairly: the removers may stop anywhere, between a
+\* mark and its unlink included, and the lookup must still end (it does not wait for them).
+ReaderSpec == Spec /\ WF_vars(Worker(3))
+ReaderEnds == <>(ts[3].pc = "done")
 =============================================================================

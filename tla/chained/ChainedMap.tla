@@ -123,7 +123,7 @@ Idle == [pc |-> "next", i |-> 1, tbl |-> 0, prev |-> <<0, 0, 0>>, c |-> 0,
          w |-> NilLink, nw |-> NilLink, n |-> 0, fres |-> "none", ret |-> "none",
          res |-> None, ins |-> FALSE, cnt |-> FALSE, rmv |-> FALSE, inv |-> 0,
          abs0 |-> [k \in Keys |-> None], b |-> 0, buf |-> {},
-         ycnt |-> [k \in Keys |-> 0], yv |-> {}, old |-> 0, nt |-> 0, cp |-> 0, j |-> 1]
+         ycnt |-> [k \in Keys |-> 0], yv |-> {}, old |-> 0, nt |-> 0, cp |-> 0, j |-> 1, rn |-> 0]
 
 Go(p, lbl) == [ts EXCEPT ![p].pc = lbl]
 
@@ -490,7 +490,7 @@ G0(p) ==
     /\ ts[p].pc = "G0"
     /\ LET t == cur IN
        ts' = [ts EXCEPT ![p].tbl = t, ![p].prev = HeadLoc(t, Bucket(K(p), tb.cap[t])),
-                        ![p].pc = "G1"]
+                        ![p].rn = 0, ![p].pc = "G1"]
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
 
 G1(p) ==
@@ -516,18 +516,24 @@ G2(p) ==
                /\ prot' = IF hit THEN prot ELSE [prot EXCEPT ![p] = Protect(@, nw.p)]
                /\ ts' = CASE hit -> [ts EXCEPT ![p].res = mem.val[c], ![p].pc = "G9"]
                           [] ~nw.m -> [ts EXCEPT ![p].prev = NextLoc(c), ![p].c = nw.p,
-                                                 ![p].pc = "G2"]
+                                                 ![p].rn = 0, ![p].pc = "G2"]
                           [] Mutation = "no_validate" -> [ts EXCEPT ![p].c = nw.p, ![p].pc = "G2"]
                           [] Mutation = "check_addr" -> Go(p, "G0")
-                          [] OTHER -> [ts EXCEPT ![p].nw = nw, ![p].pc = "G3"]
+                          [] OTHER -> [ts EXCEPT ![p].nw = nw, ![p].pc = "G3",
+                                                 ![p].rn = IF @ = 0 THEN c ELSE @]
                /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist>>
 
-\* Validation: the link the walk came through still names c, unmarked, so c was
-\* reachable when its successor was loaded; otherwise start over.
+\* Validation: the link the walk came through (the last live node's) still names, unmarked,
+\* the first deleted node of the run the walk is in, so the whole run, c included, was
+\* reachable when c's successor was loaded; otherwise start over. 0.1.20's first fix
+\* ("validate_current") compared the link with c itself, which fails at the second deleted node
+\* of a run until a remover unlinks the first.
+RunHead(p) == IF Mutation = "validate_current" THEN ts[p].c ELSE ts[p].rn
+
 G3(p) ==
     /\ ts[p].pc = "G3"
     /\ LET pw == Rd(ts[p].prev)
-           ok == pw.p = ts[p].c /\ ~pw.m
+           ok == pw.p = RunHead(p) /\ ~pw.m
        IN /\ prot' = [prot EXCEPT ![p] = Protect(@, pw.p)]
           /\ ts' = IF ok THEN [ts EXCEPT ![p].c = ts[p].nw.p, ![p].pc = "G2"]
                    ELSE Go(p, "G0")
@@ -553,7 +559,7 @@ T1(p) ==
     /\ ts' = IF ts[p].b >= tb.cap[ts[p].tbl]
              THEN Go(p, "T9")
              ELSE [ts EXCEPT ![p].prev = HeadLoc(ts[p].tbl, ts[p].b), ![p].buf = {},
-                             ![p].pc = "T2"]
+                             ![p].rn = 0, ![p].pc = "T2"]
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
 
 T2(p) ==
@@ -579,15 +585,16 @@ T3(p) ==
             /\ err' = IF c \in prot[p] THEN err ELSE Fail("uaf")
             /\ prot' = [prot EXCEPT ![p] = Protect(@, nw.p)]
             /\ ts' = CASE ~nw.m -> [ts EXCEPT ![p].buf = @ \cup {c}, ![p].prev = NextLoc(c),
-                                              ![p].c = nw.p, ![p].pc = "T3"]
+                                              ![p].c = nw.p, ![p].rn = 0, ![p].pc = "T3"]
                        [] Mutation = "no_validate" -> [ts EXCEPT ![p].c = nw.p, ![p].pc = "T3"]
-                       [] OTHER -> [ts EXCEPT ![p].nw = nw, ![p].pc = "T4"]
+                       [] OTHER -> [ts EXCEPT ![p].nw = nw, ![p].pc = "T4",
+                                              ![p].rn = IF @ = 0 THEN c ELSE @]
             /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist>>
 
 T4(p) ==
     /\ ts[p].pc = "T4"
     /\ LET pw == Rd(ts[p].prev)
-           ok == pw.p = ts[p].c /\ ~pw.m
+           ok == pw.p = RunHead(p) /\ ~pw.m
        IN /\ prot' = [prot EXCEPT ![p] = Protect(@, pw.p)]
           /\ ts' = IF ok THEN [ts EXCEPT ![p].c = ts[p].nw.p, ![p].pc = "T3"]
                    ELSE [ts EXCEPT ![p].pc = "T1"]

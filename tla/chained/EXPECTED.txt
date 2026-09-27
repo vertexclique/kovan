@@ -25,3 +25,7 @@ CM_wit_resize_under_write          MC_ChainedMap      violated:NoResizeUnderWrit
 CM_wit_replace                     MC_ChainedMap      violated:NoReplace
 CM_big_claims                      MC_ChainedMap      pass
 CM_big_iter                        MC_ChainedMap      pass
+CM_live_reader                     MC_ChainedMap      pass
+CM_live_walker                     MC_ChainedMap      pass
+CM_mut_validate_current            MC_ChainedMap      violated:ReaderEnds
+CM_mut_validate_current_iter       MC_ChainedMap      violated:ReaderEnds
