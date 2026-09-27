@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use super::table::{Entry, GUARD, Table, hop_bit};
+use super::table::{Entry, GUARD, Table, Word, hop_bit};
 use super::{HopscotchMap, MIN_CAPACITY, NEIGHBORHOOD_SIZE};
 use crate::sync::spin_hint;
 use alloc::boxed::Box;
@@ -71,21 +71,18 @@ where
             }
 
             let probe_bucket = table.get_bucket(probe_idx);
-            let slot_ptr = probe_bucket.slot.load(Ordering::Relaxed, guard);
 
-            if slot_ptr.is_null() {
+            if probe_bucket.load(Ordering::Relaxed, guard).is_free() {
                 let offset_from_home = probe_idx - bucket_idx;
 
                 if offset_from_home < NEIGHBORHOOD_SIZE {
-                    let new_entry = Box::into_raw(Box::new(Entry {
+                    let new_entry = Box::new(Entry {
                         retired: RetiredNode::new(),
                         hash,
                         key,
                         value,
-                    }));
-                    probe_bucket
-                        .slot
-                        .store(unsafe { Shared::from_raw(new_entry) }, Ordering::Release);
+                    });
+                    probe_bucket.store(Word::of(new_entry), Ordering::Release);
 
                     let bucket = table.get_bucket(bucket_idx);
                     bucket
@@ -169,9 +166,9 @@ where
     /// an entry found its neighborhood in `new` full.
     fn copy_into(&self, old: &Table<K, V>, new: &Table<K, V>, guard: &kovan::Guard) -> bool {
         (0..(old.capacity + NEIGHBORHOOD_SIZE)).all(|i| {
-            let entry_ptr = old.get_bucket(i).slot.load(Ordering::Acquire, guard);
-            // SAFETY: loaded under `guard`; the held writers keep it in its slot.
-            unsafe { entry_ptr.as_raw().as_ref() }.is_none_or(|entry| {
+            // Loaded under `guard`; the held writers keep the entry in its slot.
+            let word = old.get_bucket(i).load(Ordering::Acquire, guard);
+            word.entry().is_none_or(|entry| {
                 self.insert_into_new_table(
                     new,
                     entry.hash,

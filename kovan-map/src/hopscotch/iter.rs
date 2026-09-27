@@ -4,13 +4,13 @@
 
 extern crate alloc;
 
-use super::table::{Entry, Table};
+use super::table::{Entry, Table, Word};
 use super::{HopscotchMap, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
 use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
-use kovan::{Shared, pin};
+use kovan::pin;
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
@@ -105,8 +105,10 @@ where
             let idx = self.bucket_idx;
             self.bucket_idx += 1;
 
-            let slot = &table.get_bucket(idx).slot;
-            let entry_ptr: *const Entry<K, V> = slot.load(Ordering::Acquire, &self.guard).as_raw();
+            let entry_ptr: *const Entry<K, V> = table
+                .get_bucket(idx)
+                .load(Ordering::Acquire, &self.guard)
+                .ptr();
             self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
             if entry_ptr.is_null() {
                 continue;
@@ -172,12 +174,9 @@ impl<K, V> Iterator for HopscotchIntoIter<K, V> {
         while self.bucket_idx < table.buckets.len() {
             let bucket = table.get_bucket(self.bucket_idx);
             self.bucket_idx += 1;
-            let entry = bucket.slot.load(Ordering::Acquire, &self.guard).as_raw();
+            let entry = bucket.load(Ordering::Acquire, &self.guard).ptr();
             if !entry.is_null() {
-                bucket.slot.store(
-                    unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                    Ordering::Relaxed,
-                );
+                bucket.store(Word::free(), Ordering::Relaxed);
                 let k = unsafe { core::ptr::read(&(*entry).key) };
                 let v = unsafe { core::ptr::read(&(*entry).value) };
                 unsafe {

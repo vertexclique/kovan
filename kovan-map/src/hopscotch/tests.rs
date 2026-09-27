@@ -413,10 +413,8 @@ fn displacing_layout() -> Arc<HopscotchMap<u64, u64, Identity>> {
 fn key_at(map: &HopscotchMap<u64, u64, Identity>, idx: usize) -> Option<u64> {
     let guard = pin();
     let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
-    let slot = &table.get_bucket(idx).slot;
-    let entry_ptr = slot.load(Ordering::Acquire, &guard);
-    // SAFETY: null for a free slot, else loaded under `guard`, which keeps it from being freed.
-    unsafe { entry_ptr.as_raw().as_ref() }.map(|entry| entry.key)
+    let word = table.get_bucket(idx).load(Ordering::Acquire, &guard);
+    word.entry().map(|entry| entry.key)
 }
 
 /// Every key a walk of the map yields, sorted.

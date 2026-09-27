@@ -6,12 +6,12 @@
 
 extern crate alloc;
 
-use super::table::{Entry, HomeGuard, Table, link, null_entry};
+use super::table::{Entry, HomeGuard, Table, Word, link};
 use super::{HopscotchMap, MAX_PROBE_DISTANCE, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
-use kovan::{RetiredNode, Shared, retire};
+use kovan::{RetiredNode, retire};
 
 #[cfg(test)]
 use super::pause;
@@ -37,21 +37,22 @@ where
         // 1. The key's entry. The scan is stable: only this guard's holder links, replaces,
         // unlinks or moves an entry of the home.
         let existing = table.find(home.idx, home.hops(), hash, pending.key(), guard);
-        if let Some((offset, found_ptr)) = existing {
+        if let Some((offset, found_word)) = existing {
+            let found_ptr = found_word.ptr();
             // SAFETY: loaded under `guard`, which keeps it from being freed.
-            let found = unsafe { &*found_ptr.as_raw() };
+            let found = unsafe { &*found_ptr };
             if only_if_absent {
                 return InsertResult::Exists(found.value.clone());
             }
             let old_value = found.value.clone();
-            let entry = Box::into_raw(pending.into_entry());
             // A store, not a CAS: no other thread writes an occupied slot of a home whose guard
             // this call holds. Release: a reader that acquires the slot sees the entry's fields.
-            let slot = &table.get_bucket(home.idx + offset).slot;
-            slot.store(unsafe { Shared::from_raw(entry) }, Ordering::Release);
+            table
+                .get_bucket(home.idx + offset)
+                .store(Word::of(pending.into_entry()), Ordering::Release);
             // SAFETY: unlinked above under its home guard, so no other thread unlinks or
             // retires it; a reader that loaded it holds a guard that keeps it alive.
-            unsafe { retire(found_ptr.as_raw()) };
+            unsafe { retire(found_ptr) };
             return InsertResult::Replaced(old_value);
         }
 
@@ -98,7 +99,7 @@ where
         guard: &kovan::Guard,
     ) -> Result<*const Entry<K, V>, Box<Entry<K, V>>> {
         home.publish_linked(offset);
-        link(&table.get_bucket(home.idx + offset).slot, entry, guard).inspect_err(|_| {
+        link(table.get_bucket(home.idx + offset), entry, guard).inspect_err(|_| {
             home.retract_linked(offset);
         })
     }
@@ -131,13 +132,12 @@ where
         let nearest = free + 1 - NEIGHBORHOOD_SIZE;
         for from in nearest..free {
             // Acquire: pairs with the release that linked the entry; its hash is read below.
-            let entry_ptr = table.get_bucket(from).slot.load(Ordering::Acquire, guard);
-            if entry_ptr.is_null() {
+            let word = table.get_bucket(from).load(Ordering::Acquire, guard);
+            let Some(entry) = word.entry() else {
                 // Freed meanwhile, and nearer the home: nothing to move.
                 return Ok(from);
-            }
-            // SAFETY: loaded under `guard`, which keeps it from being freed.
-            let owner = table.bucket_index(unsafe { &*entry_ptr.as_raw() }.hash);
+            };
+            let owner = table.bucket_index(entry.hash);
             // An entry stays within its home's neighborhood. This also keeps the inserting
             // call's own home (whose guard it holds) from being an owner: that home's entries
             // sit below `home + NEIGHBORHOOD_SIZE`, which is at most `free`.
@@ -150,7 +150,7 @@ where
                 contended = true;
                 continue;
             };
-            if Self::move_entry(table, &mut owner_guard, from, free, entry_ptr, guard)? {
+            if Self::move_entry(table, &mut owner_guard, from, free, word, guard)? {
                 return Ok(from);
             }
             contended = true;
@@ -162,7 +162,7 @@ where
         }
     }
 
-    /// Move the entry `entry_ptr` from slot `from` to the free slot `to` under `owner`, its
+    /// Move the entry `word` names from slot `from` to the free slot `to` under `owner`, its
     /// home's guard: `Ok(true)` when it moved, `Ok(false)` when it left `from` before the guard
     /// was taken, `Err(Freed::Contended)` when another writer took `to` first.
     ///
@@ -177,25 +177,26 @@ where
         owner: &mut HomeGuard<'_>,
         from: usize,
         to: usize,
-        entry_ptr: Shared<'_, Entry<K, V>>,
+        word: Word<'_, K, V>,
         guard: &kovan::Guard,
     ) -> Result<bool, Freed> {
-        let from_slot = &table.get_bucket(from).slot;
+        let from_bucket = table.get_bucket(from);
         // Under the guard an entry of the home that is still here stays until this call moves
-        // it. Relaxed: only the pointer is compared, its fields were acquired by the caller.
-        if from_slot.load(Ordering::Relaxed, guard).as_raw() != entry_ptr.as_raw() {
+        // it. Relaxed: only the word is compared, the entry's fields were acquired by the caller.
+        if from_bucket.load(Ordering::Relaxed, guard) != word {
             return Ok(false);
         }
-        // 1. Link it at `to` as well. Release: a reader that acquires `to` sees the entry's
-        // fields (this thread acquired them from `from`). Relaxed on failure: nothing is read.
-        let linked = table.get_bucket(to).slot.compare_exchange(
-            null_entry(),
-            entry_ptr,
+        // 1. Link it at `to` as well, the same word (its tag comes along). Release: a reader
+        // that acquires `to` sees the entry's fields (this thread acquired them from `from`).
+        // Relaxed on failure: nothing is read.
+        let linked = table.get_bucket(to).replace(
+            Word::free(),
+            word,
             Ordering::Release,
             Ordering::Relaxed,
             guard,
         );
-        if linked.is_err() {
+        if !linked {
             return Err(Freed::Contended);
         }
         // 2. Name `to` in the hop bits and advance the stamp, published before `from` empties.
@@ -205,7 +206,7 @@ where
         // 3. Unlink `from`: a store, as no other thread writes an occupied slot of a held home.
         // Release: a reader that acquires the free slot also sees step 2, the new bit and the
         // advanced stamp.
-        from_slot.store(null_entry(), Ordering::Release);
+        from_bucket.store(Word::free(), Ordering::Release);
         #[cfg(test)]
         pause::at(pause::Point::MoveUnlinked);
         // 4. Drop `from`'s hop bit, published when `owner` is released.

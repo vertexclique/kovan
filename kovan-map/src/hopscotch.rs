@@ -31,8 +31,8 @@ use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;
-use kovan::{Atomic, Shared, pin, retire};
-use table::{HOP_MASK, STAMP_MASK, Table, hop_bits, null_entry};
+use kovan::{Atomic, pin, retire};
+use table::{HOP_MASK, STAMP_MASK, Table, Word, hop_bits};
 
 pub use iter::{HopscotchIntoIter, HopscotchIter, HopscotchKeys, HopscotchValues};
 
@@ -164,9 +164,11 @@ where
             }
             #[cfg(test)]
             pause::at(pause::Point::LookupReadHops);
-            if let Some((_, entry_ptr)) = table.find(home, hops, hash, key, &guard) {
-                // SAFETY: loaded under `guard`, which keeps it from being freed.
-                return Some(unsafe { &*entry_ptr.as_raw() }.value.clone());
+            if let Some(entry) = table
+                .find(home, hops, hash, key, &guard)
+                .and_then(|(_, word)| word.entry())
+            {
+                return Some(entry.value.clone());
             }
             // A miss is final unless an entry of this home moved while the scan ran. A move
             // links the entry at its new slot, sets that slot's hop bit and advances the stamp,
@@ -385,16 +387,16 @@ where
                 spin_hint();
                 continue;
             };
-            let (offset, entry_ptr) = table.find(home_idx, home.hops(), hash, key, &guard)?;
+            let (offset, word) = table.find(home_idx, home.hops(), hash, key, &guard)?;
+            let entry_ptr = word.ptr();
             // SAFETY: loaded under `guard`, which keeps it from being freed.
-            let old_value = unsafe { &*entry_ptr.as_raw() }.value.clone();
+            let old_value = unsafe { &*entry_ptr }.value.clone();
             // A store, not a CAS: no other thread writes an occupied slot of a home whose guard
             // this call holds. Release: a reader that acquires the free slot sees everything this
             // call wrote before it.
             table
                 .get_bucket(home_idx + offset)
-                .slot
-                .store(null_entry(), Ordering::Release);
+                .store(Word::free(), Ordering::Release);
             home.stage_unlinked(offset);
 
             // Counted down before the home guard is released, as an insert counts up: a clear
@@ -418,7 +420,7 @@ where
 
             // SAFETY: unlinked above under its home guard, so no other thread unlinks or
             // retires it; a reader that loaded it holds a guard that keeps it alive.
-            unsafe { retire(entry_ptr.as_raw()) };
+            unsafe { retire(entry_ptr) };
 
             if let Some(cap) = shrink_to {
                 drop(guard);
@@ -449,21 +451,18 @@ where
 
         for i in 0..(table.capacity + NEIGHBORHOOD_SIZE) {
             let bucket = table.get_bucket(i);
-            let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
+            let word = bucket.load(Ordering::Acquire, &guard);
 
-            if !entry_ptr.is_null()
-                && bucket
-                    .slot
-                    .compare_exchange(
-                        entry_ptr,
-                        unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                        &guard,
-                    )
-                    .is_ok()
+            if !word.is_free()
+                && bucket.replace(
+                    word,
+                    Word::free(),
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                    &guard,
+                )
             {
-                unsafe { retire(entry_ptr.as_raw()) };
+                unsafe { retire(word.ptr()) };
             }
 
             if i < table.capacity {
