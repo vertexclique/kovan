@@ -31,7 +31,7 @@ use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;
-use kovan::{Atomic, pin, retire};
+use kovan::{Atomic, CachePadded, pin, retire};
 use table::{HOP_MASK, STAMP_MASK, Table, Word, hop_bits};
 
 pub use iter::{HopscotchIntoIter, HopscotchIter, HopscotchKeys, HopscotchValues};
@@ -47,11 +47,18 @@ const NEIGHBORHOOD_SIZE: usize = 32;
 /// Initial capacity
 const INITIAL_CAPACITY: usize = 64;
 
-/// Load factor threshold for growing (75%)
-const GROW_THRESHOLD: f64 = 0.75;
+/// Whether `count` entries overfill a table of `capacity`: more than three quarters full.
+#[inline(always)]
+fn overfull(count: usize, capacity: usize) -> bool {
+    4 * count > 3 * capacity
+}
 
-/// Load factor threshold for shrinking (25%)
-const SHRINK_THRESHOLD: f64 = 0.25;
+/// Whether `count` entries underfill a table of `capacity`: less than a quarter full, and the
+/// table larger than the least one.
+#[inline(always)]
+fn underfull(count: usize, capacity: usize) -> bool {
+    4 * count < capacity && capacity > MIN_CAPACITY
+}
 
 /// Minimum capacity to prevent excessive shrinking
 const MIN_CAPACITY: usize = 64;
@@ -62,7 +69,10 @@ const MAX_PROBE_DISTANCE: usize = 512;
 /// A concurrent, lock-free hash map based on Hopscotch Hashing.
 pub struct HopscotchMap<K: 'static, V: 'static, S = FixedState> {
     table: Atomic<Table<K, V>>,
-    count: AtomicUsize,
+    /// The entries in the map, on a cache line of its own: every write that links or unlinks an
+    /// entry bumps it, and every operation reads the table pointer and the resize flag, which
+    /// would otherwise share its line.
+    count: CachePadded<AtomicUsize>,
     /// Prevents concurrent writes during resize migration to avoid lost updates
     resizing: AtomicBool,
     hasher: S,
@@ -111,7 +121,7 @@ where
         let table = Table::new(capacity);
         Self {
             table: Atomic::new(Box::into_raw(Box::new(table))),
-            count: AtomicUsize::new(0),
+            count: CachePadded::new(AtomicUsize::new(0)),
             resizing: AtomicBool::new(false),
             hasher,
         }
@@ -260,14 +270,12 @@ where
                     // SAFETY: linked by this call under `guard`, which keeps it (and its table)
                     // from being freed even if a writer unlinks it now.
                     let answer = on_insert(unsafe { &(*entry).value });
-                    if let Some(new_count) = new_count {
+                    if let Some(new_count) = new_count
+                        && overfull(new_count, table.capacity)
+                    {
                         let current_capacity = table.capacity;
-                        let load_factor = new_count as f64 / current_capacity as f64;
-
-                        if load_factor > GROW_THRESHOLD {
-                            drop(guard);
-                            self.try_resize(current_capacity * 2);
-                        }
+                        drop(guard);
+                        self.try_resize(current_capacity * 2);
                     }
                     return Outcome::Linked(answer);
                 }
@@ -408,11 +416,7 @@ where
                 self.count
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1))
             {
-                let new_count = prev - 1;
-                let current_capacity = table.capacity;
-                let load_factor = new_count as f64 / current_capacity as f64;
-                (load_factor < SHRINK_THRESHOLD && current_capacity > MIN_CAPACITY)
-                    .then_some(current_capacity / 2)
+                underfull(prev - 1, table.capacity).then_some(table.capacity / 2)
             } else {
                 None
             };
