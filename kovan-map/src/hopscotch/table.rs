@@ -6,6 +6,8 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+use super::pause;
 use super::{MIN_CAPACITY, NEIGHBORHOOD_SIZE};
 use crate::sync::AtomicU64;
 use alloc::boxed::Box;
@@ -481,6 +483,49 @@ impl<K, V> Table<K, V> {
             idx,
             word: prev | GUARD,
         })
+    }
+
+    /// The entry of `key`, whose hash is `hash`, as `get` finds it, taking no guard: a scan of
+    /// the slots its home's hop bits name, repeated while the home's move stamp shows an entry
+    /// of the home moved during the scan.
+    #[inline]
+    pub(super) fn lookup<'g, Q>(
+        &self,
+        hash: u64,
+        key: &Q,
+        guard: &'g kovan::Guard,
+    ) -> Option<&'g Entry<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let home = self.bucket_index(hash);
+        let control = &self.get_bucket(home).control;
+        // Acquire: pairs with the release store that set each hop bit, so the entry linked
+        // before it is visible to the scan.
+        let mut word = control.load(Ordering::Acquire);
+        loop {
+            let hops = hop_bits(word);
+            if hops == 0 {
+                return None;
+            }
+            #[cfg(test)]
+            pause::at(pause::Point::LookupReadHops);
+            if let Some((_, found)) = self.find(home, hops, hash, key, guard) {
+                return found.entry();
+            }
+            // A miss is final unless an entry of this home moved while the scan ran. A move
+            // links the entry at its new slot, sets that slot's hop bit and advances the stamp,
+            // and only then empties the old slot with a release store. A scan that found the
+            // old slot empty (or reused) acquired that store, so this re-read sees the advanced
+            // stamp and the new bit with it. Acquire: the rescan reads the slots the new bits
+            // name.
+            let again = control.load(Ordering::Acquire);
+            if (again ^ word) & STAMP_MASK == 0 {
+                return None;
+            }
+            word = again;
+        }
     }
 
     /// The entry of `key` among the slots `hops` names past the home `home`, and its offset

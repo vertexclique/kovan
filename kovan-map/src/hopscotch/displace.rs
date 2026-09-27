@@ -231,7 +231,7 @@ impl<K, V> Pending<K, V> {
         }
     }
 
-    fn key(&self) -> &K {
+    pub(super) fn key(&self) -> &K {
         match self {
             Self::Parts { key, .. } => key,
             Self::Built(entry) => &entry.key,

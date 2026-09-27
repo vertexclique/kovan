@@ -32,7 +32,7 @@ use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;
 use kovan::{Atomic, CachePadded, pin, retire};
-use table::{HOP_MASK, STAMP_MASK, Table, Word, hop_bits};
+use table::{HOP_MASK, Table, Word, hop_bits};
 
 pub use iter::{HopscotchIntoIter, HopscotchIter, HopscotchKeys, HopscotchValues};
 
@@ -162,36 +162,9 @@ where
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
         let table = unsafe { &*table_ptr.as_raw() };
 
-        let home = table.bucket_index(hash);
-        let control = &table.get_bucket(home).control;
-        // Acquire: pairs with the release store that set each hop bit, so the entry linked
-        // before it is visible to the scan.
-        let mut word = control.load(Ordering::Acquire);
-        loop {
-            let hops = hop_bits(word);
-            if hops == 0 {
-                return None;
-            }
-            #[cfg(test)]
-            pause::at(pause::Point::LookupReadHops);
-            if let Some(entry) = table
-                .find(home, hops, hash, key, &guard)
-                .and_then(|(_, word)| word.entry())
-            {
-                return Some(entry.value.clone());
-            }
-            // A miss is final unless an entry of this home moved while the scan ran. A move
-            // links the entry at its new slot, sets that slot's hop bit and advances the stamp,
-            // and only then empties the old slot with a release store. A scan that found the
-            // old slot empty (or reused) acquired that store, so this re-read sees the advanced
-            // stamp and the new bit with it. Acquire: the rescan reads the slots the new bits
-            // name.
-            let again = control.load(Ordering::Acquire);
-            if (again ^ word) & STAMP_MASK == 0 {
-                return None;
-            }
-            word = again;
-        }
+        table
+            .lookup(hash, key, &guard)
+            .map(|entry| entry.value.clone())
     }
 
     /// Inserts a key-value pair into the map, returning the value it replaced.
@@ -241,6 +214,12 @@ where
             let Some(mut home) = table.home_guard(table.bucket_index(hash)) else {
                 #[cfg(test)]
                 pause::at(pause::Point::WriterMetHeldGuard);
+                // A call that only claims an absent key answers a present one without waiting
+                // for the writer holding its home: from the lookup `get` makes, as
+                // `get_or_insert` answers a present key before it writes.
+                if only_if_absent && let Some(entry) = table.lookup(hash, pending.key(), &guard) {
+                    return Outcome::Present(entry.value.clone());
+                }
                 spin_hint();
                 continue;
             };
