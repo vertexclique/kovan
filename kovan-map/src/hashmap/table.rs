@@ -1,14 +1,20 @@
 //! The map's bucket table: one allocation holding a header and the bucket array, and the
-//! reclamation proxy built with it, so a table a resize replaced is freed (with its remaining
-//! chains) only after every guard that could observe it is released.
+//! reclamation proxy built with it, so a table a resize replaced is freed (with every node its
+//! frozen chains still hold) only after every guard that could observe it is released.
+//!
+//! The table carries its own entry count, on a cache line of its own: a write counts itself in
+//! the table it landed in, and a migration gives the new table the exact number of entries it
+//! copied, so a write that landed in a table while it was being copied is counted once, in the
+//! table that holds it after the copy, never in both and never twice.
 
 extern crate alloc;
 
 use super::MIN_CAPACITY;
-use super::node::{Node, is_tagged, untag};
+use super::node::{Node, ptr};
+use crate::sync::AtomicIsize;
 use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
-use kovan::{Atomic, RetiredNode, pin};
+use kovan::{Atomic, CachePadded, RetiredNode, pin};
 
 // ---------------------------------------------------------------------------
 // Single-allocation table: [TableHeader][Atomic<Node>; capacity]
@@ -37,6 +43,10 @@ pub(super) struct TableHeader {
     /// Type-erased `*mut TableProxy<K, V>` for this table's eventual
     /// retirement (see `TableRef::alloc`). Zero means already taken/freed.
     proxy: usize,
+    /// The entries this table holds, on its own cache line: every insert and remove writes it,
+    /// every lookup reads the line above. Signed: a remove can count itself before the insert
+    /// of the same entry has, and the transient negative is clamped by `len`.
+    count: CachePadded<AtomicIsize>,
 }
 
 /// Borrowed view of a table allocation.
@@ -95,12 +105,27 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         let (layout, _) = Self::layout(capacity);
         // SAFETY: layout is non-zero sized; zeroed AtomicUsize == null bucket.
         let header = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut TableHeader };
-        assert!(!header.is_null(), "table allocation failed");
+        if header.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        // SAFETY: `header` is a fresh allocation of the table's layout. The count is written in
+        // place (shuttle's atomic is not valid zeroed).
         unsafe {
             (*header).mask = capacity - 1;
             (*header).capacity = capacity;
+            core::ptr::write(
+                core::ptr::addr_of_mut!((*header).count),
+                CachePadded::new(AtomicIsize::new(0)),
+            );
         }
         let table = Self::from_raw(header);
+        // Shuttle's instrumented pointer word is not valid zeroed either: under the feature every
+        // bucket is written in place. A build without it keeps the zeroed allocation as it is.
+        #[cfg(feature = "shuttle")]
+        for i in 0..capacity {
+            // SAFETY: bucket `i` is within the allocation and not shared yet.
+            unsafe { core::ptr::write(table.bucket_mut(i), Atomic::null()) };
+        }
         let proxy = Box::into_raw(Box::new(TableProxy {
             retired: RetiredNode::new(),
             table,
@@ -122,9 +147,8 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
     /// Free this table's proxy directly (without running its `Drop`, which
     /// would call back into `free`/`free_array_only` on this same table) if
     /// it was never retired. Used on every path where a table dies without
-    /// ever being resized away: `HashMap::drop`, `IntoIter`, and a
-    /// discarded, never-published resize target. No-op if `take_proxy` was
-    /// already called (the normal resize-retirement path).
+    /// ever being resized away: `HashMap::drop` and `IntoIter`. No-op if
+    /// `take_proxy` was already called (the normal resize-retirement path).
     #[inline(always)]
     unsafe fn drop_unused_proxy(self) {
         let proxy = unsafe { (*self.header).proxy };
@@ -139,21 +163,22 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         }
     }
 
-    /// Free remaining chains (skipping tagged nodes - already retired by
-    /// their tag owners) and the allocation itself.
-    ///
-    /// Free only the table allocation, not the chains (caller already drained
-    /// the live nodes, e.g. `IntoIter`). Tagged nodes remain kovan-owned.
+    /// Free only the table allocation, not the chains (the caller already
+    /// drained every node, e.g. `IntoIter`).
     ///
     /// # Safety
     /// Exclusive access; the chains must already be drained.
     pub(super) unsafe fn free_array_only(self) {
         unsafe { self.drop_unused_proxy() };
         let capacity = unsafe { (*self.header).capacity };
+        unsafe { self.drop_words(capacity) };
         let (layout, _) = Self::layout(capacity);
         unsafe { alloc::alloc::dealloc(self.header as *mut u8, layout) };
     }
 
+    /// Free every node the chains hold, deleted ones included (a node still in a chain was never
+    /// unlinked, so never retired: the table owns it), and the allocation itself.
+    ///
     /// # Safety
     /// Caller must have exclusive access (map drop, or proxy reclamation
     /// after guard quiescence).
@@ -162,20 +187,36 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         let capacity = unsafe { (*self.header).capacity };
         let guard = pin();
         for i in 0..capacity {
-            let mut current = self.bucket(i).load(Ordering::Relaxed, &guard).as_raw();
+            let mut current = ptr(self.bucket(i).load(Ordering::Relaxed, &guard).as_raw());
             while !current.is_null() {
+                // SAFETY: exclusive access; a node is in one chain, once.
                 unsafe {
-                    let next = (*current).next.load(Ordering::Relaxed, &guard).as_raw();
-                    if !is_tagged(next) {
-                        drop(Box::from_raw(current));
-                    }
-                    current = untag(next);
+                    let next = ptr((*current).next.load(Ordering::Relaxed, &guard).as_raw());
+                    drop(Box::from_raw(current));
+                    current = next;
                 }
             }
         }
         drop(guard);
+        unsafe { self.drop_words(capacity) };
         let (layout, _) = Self::layout(capacity);
         unsafe { alloc::alloc::dealloc(self.header as *mut u8, layout) };
+    }
+
+    /// Drop the table's atomics in place: nothing to do for `core`'s, while shuttle's own their
+    /// bookkeeping.
+    ///
+    /// # Safety
+    /// Exclusive access, once, right before the allocation is freed.
+    #[inline(always)]
+    unsafe fn drop_words(self, _capacity: usize) {
+        #[cfg(feature = "shuttle")]
+        unsafe {
+            core::ptr::drop_in_place(core::ptr::addr_of_mut!((*self.header).count));
+            for i in 0.._capacity {
+                core::ptr::drop_in_place(self.bucket_mut(i));
+            }
+        }
     }
 
     #[inline(always)]
@@ -188,10 +229,17 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         unsafe { (*self.header).capacity }
     }
 
+    /// The table's entry count (see `TableHeader::count`).
     #[inline(always)]
-    fn buckets(self) -> *const Atomic<Node<K, V>> {
+    pub(super) fn count(self) -> &'static AtomicIsize {
+        // SAFETY: the 'static is a lie scoped by the caller's guard, as for `bucket`.
+        unsafe { &(*self.header).count }
+    }
+
+    #[inline(always)]
+    fn buckets(self) -> *mut Atomic<Node<K, V>> {
         let (_, offset) = Self::layout_offset();
-        unsafe { (self.header as *const u8).add(offset) as *const Atomic<Node<K, V>> }
+        unsafe { (self.header as *mut u8).add(offset) as *mut Atomic<Node<K, V>> }
     }
 
     /// Header/bucket offset is capacity-independent; compute it once.
@@ -213,6 +261,14 @@ impl<K: 'static, V: 'static> TableRef<K, V> {
         // SAFETY: idx is masked or bounded by capacity; the 'static is a
         // lie scoped by the caller's guard (same discipline as Shared).
         unsafe { &*self.buckets().add(idx) }
+    }
+
+    /// Bucket `idx` for its in-place construction or destruction.
+    #[cfg(feature = "shuttle")]
+    #[inline(always)]
+    fn bucket_mut(self, idx: usize) -> *mut Atomic<Node<K, V>> {
+        // SAFETY: idx is bounded by capacity.
+        unsafe { self.buckets().add(idx) }
     }
 }
 

@@ -1,16 +1,32 @@
-//! A chain node of the map and its Harris-style deletion tag: a node whose `next` pointer
-//! carries the tag is logically deleted and owned (and retired) by the thread that tagged it.
+//! A chain node and the link words that join nodes into a bucket's chain.
+//!
+//! A link word (a bucket head, or a node's `next`) is a node pointer with two flag bits:
+//!
+//! - `MARK`, on a node's `next` only: the node is deleted. A remove marks the word keeping the
+//!   successor; a replace marks it naming the replacement node, which names the old successor.
+//!   Either is one CAS and is the operation's linearization point. A marked word never changes
+//!   again except to be frozen.
+//! - `FROZEN`: a migration (or a clear) froze the link; no write lands on it again, and a writer
+//!   that meets it waits for the new table.
+//!
+//! A node is retired only by the thread whose CAS unlinked it (a snip, or the unlink a remove or
+//! a replace does after its mark), so no node is retired while a table can reach it: a node
+//! still in a chain when its table is frozen belongs to that table and is freed with it. A
+//! walker steps past a marked node only after it has checked that the link it came through
+//! still names the node unmarked (see `hashmap::walk`), because a deleted node's `next` is not a
+//! link a remover ever writes again: the successor it names may have been retired since.
 
-use kovan::{Atomic, RetiredNode};
+use kovan::{Atomic, RetiredNode, Shared};
 
-/// Node in the lock-free linked list.
+/// Node in the lock-free linked list. `next` sits beside `hash`, so a walk that passes a node
+/// reads one cache line of it.
 #[repr(C)]
 pub(super) struct Node<K, V> {
     pub(super) retired: RetiredNode,
     pub(super) hash: u64,
+    pub(super) next: Atomic<Node<K, V>>,
     pub(super) key: K,
     pub(super) value: V,
-    pub(super) next: Atomic<Node<K, V>>,
 }
 
 // SAFETY (kovan retirement rule): a retired Node's destructor may run on
@@ -23,46 +39,54 @@ pub(super) struct Node<K, V> {
 unsafe impl<K: Send, V: Send> Send for Node<K, V> {}
 unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Node<K, V> {}
 
-// ---------------------------------------------------------------------------
-// Harris-style logical deletion
-// ---------------------------------------------------------------------------
-//
-// Removing (or replacing) a node first TAGS the victim's `next` pointer
-// (low bit set) - the logical delete - and only then unlinks it from its
-// predecessor. The thread whose tag-CAS succeeded exclusively owns the node
-// and is the only one to `retire()` it. This closes two races a plain
-// unlink-CAS protocol has:
-//
-//  * insert-after-removed-tail: a tail insert CASes `tail.next: null -> new`;
-//    if the tail was concurrently unlinked and retired, the new node is
-//    spliced onto dead memory - the insert is lost and the node leaks.
-//    With tagging, the remover first turns the tail's `next` into
-//    tagged-null, so the insert's CAS (expecting untagged null) fails.
-//
-//  * adjacent removes: removing B (A->B->C) and C (B->C->D) concurrently
-//    can unlink C from the already-detached B while C is still reachable
-//    through A, retiring a reachable node (use-after-free for later
-//    readers). With tagging, C's remover owns C via the tag; walkers
-//    observe `B.next` tagged and never operate relative to deleted nodes.
-//
-// Invariants:
-//  * tags appear only on `Node.next` fields, never on bucket heads
-//    (snipping stores the untagged successor);
-//  * a node whose `next` is tagged has been retired by its tag owner -
-//    `clear()`, the migration sweep, and `Table::drop` must skip it;
-//  * every traversal untags before following a `next` pointer.
+/// The deleted flag of a node's `next`.
+pub(super) const MARK: usize = 1;
+/// The frozen flag of any link word.
+pub(super) const FROZEN: usize = 2;
+const FLAGS: usize = MARK | FROZEN;
 
+// Both flags live in the low bits of a node pointer.
+const _: () = assert!(core::mem::align_of::<RetiredNode>() > FLAGS);
+
+/// The node a link word names.
 #[inline(always)]
-pub(super) fn tagged<K, V>(p: *mut Node<K, V>) -> *mut Node<K, V> {
-    (p as usize | 1) as *mut Node<K, V>
+pub(super) fn ptr<K, V>(word: *mut Node<K, V>) -> *mut Node<K, V> {
+    word.map_addr(|a| a & !FLAGS)
 }
 
 #[inline(always)]
-pub(super) fn untag<K, V>(p: *mut Node<K, V>) -> *mut Node<K, V> {
-    (p as usize & !1) as *mut Node<K, V>
+pub(super) fn is_marked<K, V>(word: *mut Node<K, V>) -> bool {
+    word.addr() & MARK != 0
 }
 
 #[inline(always)]
-pub(super) fn is_tagged<K, V>(p: *const Node<K, V>) -> bool {
-    (p as usize) & 1 != 0
+pub(super) fn is_frozen<K, V>(word: *mut Node<K, V>) -> bool {
+    word.addr() & FROZEN != 0
+}
+
+/// `word` with `flags` set.
+#[inline(always)]
+pub(super) fn with<K, V>(word: *mut Node<K, V>, flags: usize) -> *mut Node<K, V> {
+    word.map_addr(|a| a | flags)
+}
+
+/// A link word as kovan's `Shared`, for a store or a CAS.
+#[inline(always)]
+pub(super) fn word<'g, K, V>(word: *mut Node<K, V>) -> Shared<'g, Node<K, V>> {
+    // SAFETY: the word is only stored or compared, never dereferenced through this `Shared`.
+    unsafe { Shared::from_raw(word) }
+}
+
+impl<K, V> Node<K, V> {
+    /// A new, unlinked node.
+    #[inline]
+    pub(super) fn new(hash: u64, key: K, value: V) -> Self {
+        Self {
+            retired: RetiredNode::new(),
+            hash,
+            next: Atomic::null(),
+            key,
+            value,
+        }
+    }
 }

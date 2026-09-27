@@ -7,9 +7,9 @@
 //! build without the feature: the names are `core`'s atomics.
 
 #[cfg(not(feature = "shuttle"))]
-pub(crate) use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+pub(crate) use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize};
 #[cfg(feature = "shuttle")]
-pub(crate) use shuttle::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+pub(crate) use shuttle::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize};
 
 /// The pause of a thread spinning on a condition another thread clears (a resize in flight, a
 /// held home guard).
