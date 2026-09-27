@@ -29,6 +29,30 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --release
 
+      # `cargo test` never builds bench targets (they default to `test =
+      # false`) and `clippy --all-targets` only checks them, with no codegen
+      # and no link. Build them for real so a bench that fails only there has
+      # a job that catches it.
+      - name: Build benches
+        run: cargo build --workspace --benches --release
+
+  test-debug:
+    name: Test debug (overflow checks, debug assertions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (debug)
+        run: cargo build --workspace
+
+      # Debug mode, deliberately: the release job above never turns on
+      # overflow checks or debug_assert!, so a bound that only holds by
+      # accident of release codegen has no other job that catches it.
+      - name: Run tests (debug)
+        run: cargo test --workspace
+
   test-nightly:
     name: Test nightly (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -62,6 +86,18 @@ jobs:
         env:
           RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
+      # `default = ["std"]` on kovan and kovan-map is a real feature
+      # combination (the no_std + alloc path); wasm.yml proves it builds at
+      # 32 bits, this proves it on the host target too. `--lib` for the same
+      # reason as the wasm job: `--all-targets` would pull in the native-only
+      # dev-deps of tests/benches, which do not build without `std`.
+      - name: Clippy (no_std, no default features)
+        run: |
+          cargo clippy -p kovan --no-default-features --lib -- -D warnings
+          cargo clippy -p kovan-map --no-default-features --lib -- -D warnings
+        env:
+          RUSTFLAGS: "-C target-feature=+cmpxchg16b"
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -82,18 +118,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # One model-checked scenario file per crate (kovan-channel covers three
-      # scenarios, kovan-map two files: its two maps).
-      # Each opts in via its own `shuttle` feature, kept off by default so
-      # it costs nothing outside this job. Release mode: shuttle's own
-      # scheduling overhead dwarfs the workload either way, but release
-      # keeps the per-iteration cost (and so the total run) down.
+      # Scenario files are discovered, never hand-listed here: any
+      # `tests/shuttle_*.rs` in any crate is picked up automatically (see
+      # shuttle-test.sh), so a new model-checked scenario needs no change to
+      # this workflow. Each crate opts in via its own `shuttle` feature, kept
+      # off by default so it costs nothing outside this job. Release mode:
+      # shuttle's own scheduling overhead dwarfs the workload either way, but
+      # release keeps the per-iteration cost (and so the total run) down.
       - name: Run shuttle tests
-        run: |
-          cargo test -p kovan --features shuttle --test shuttle_reclaim --release
-          cargo test -p kovan-map --features shuttle --test shuttle_resize --release
-          cargo test -p kovan-map --features shuttle --test shuttle_hopscotch --release
-          cargo test -p kovan-channel --features shuttle --test shuttle_channel --release
-          cargo test -p kovan-queue --features shuttle --test shuttle_array_queue --release
-          cargo test -p kovan-stm --features shuttle --test shuttle_stm --release
-          cargo test -p kovan-mvcc --features shuttle --test shuttle_lock_table --release
+        run: .github/workflows/shuttle-test.sh
