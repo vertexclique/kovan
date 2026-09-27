@@ -1,0 +1,948 @@
+Error: Invariant NoFrozenMeet is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 0>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "unused">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = FALSE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 2: <Dispatch line 154, col 5 to line 165, col 68 of module ChainedMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 0>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "unused">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = FALSE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 3: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 0>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "unused">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F1",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = FALSE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 4: <Z0 line 622, col 5 to line 629, col 61 of module ChainedMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 0>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "unused">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F1",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z1",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 1,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = TRUE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 5: <Z1 line 632, col 5 to line 649, col 52 of module ChainedMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 2>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "building">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F1",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z2",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 1,
+        nt |-> 2,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = TRUE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 6: <Z2 line 655, col 5 to line 665, col 58 of module ChainedMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {1})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 2>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> TRUE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "building">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F1",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z3",
+        c |-> 1,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 1,
+        nt |-> 2,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = TRUE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 7: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
+/\ prot = (1 :> {1} @@ 2 :> {} @@ 9 :> {1})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 2>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> TRUE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "building">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "FR",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "frozen",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z3",
+        c |-> 1,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 1,
+        nt |-> 2,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = TRUE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 8: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
+/\ prot = (1 :> {1} @@ 2 :> {} @@ 9 :> {1})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 2>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> TRUE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "building">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "I1",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "frozen",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z3",
+        c |-> 1,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 1,
+        nt |-> 2,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = TRUE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+State 9: <I1 line 268, col 5 to line 283, col 70 of module ChainedMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {1})
+/\ cur = 1
+/\ gcnt = 1
+/\ hist = <<>>
+/\ abs = <<0, 1>>
+/\ tb = [ cap |-> <<1, 2>>,
+  head |->
+      << ( 0 :> [p |-> 1, m |-> FALSE, f |-> TRUE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ),
+         ( 0 :> [p |-> 0, m |-> FALSE, f |-> FALSE] @@
+           1 :> [p |-> 0, m |-> FALSE, f |-> FALSE] ) >>,
+  st |-> <<"current", "building">>,
+  cnt |-> <<1, 0>> ]
+/\ ts = ( 1 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "WT",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 1>>,
+        inv |-> 0,
+        tbl |-> 1,
+        prev |-> <<0, 1, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "frozen",
+        ret |-> "ins",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  2 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        cp |-> 0,
+        rn |-> 0 ] @@
+  9 :>
+      [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z3",
+        c |-> 1,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
+        tbl |-> 0,
+        prev |-> <<0, 0, 0>>,
+        nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        fres |-> "none",
+        ret |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        buf |-> {},
+        ycnt |-> <<0, 0>>,
+        yv |-> {},
+        old |-> 1,
+        nt |-> 2,
+        cp |-> 0,
+        rn |-> 0 ] )
+/\ latch = TRUE
+/\ err = "none"
+/\ mem = [ nx |->
+      << [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE],
+         [p |-> 0, m |-> FALSE, f |-> FALSE] >>,
+  st |-> <<"live", "free", "free", "free", "free", "free">>,
+  key |-> <<2, 0, 0, 0, 0, 0>>,
+  val |-> <<1, 0, 0, 0, 0, 0>> ]
+
+323 states generated, 161 distinct states found, 52 states left on queue.

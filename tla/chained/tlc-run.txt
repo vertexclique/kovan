@@ -1,0 +1,37 @@
+TLC run of every configuration in tla/chained, 2026-09-27 19:21 UTC.
+Written by tla/run_tlc.sh, not by hand. Version 2.19 of 08 August 2024.
+Java -Xmx8g; -workers 8, or 1 worker where a violation is expected. Limit: 3600 s each.
+
+configuration                         generated   distinct    sec  result                     expected                   match
+CM_ins_ins                               117537      47783      2  pass                       pass                       yes
+CM_iia_iia                                93397      37979      2  pass                       pass                       yes
+CM_iia_rem                               474479     189318      5  pass                       pass                       yes
+CM_ins_rem                               261408     105297      3  pass                       pass                       yes
+CM_rem_rem                             33798583   10004502    138  pass                       pass                       yes
+CM_frm                                   651737     257116      7  pass                       pass                       yes
+CM_get                                   254821      99363      3  pass                       pass                       yes
+CM_iter                                  434722     169737      4  pass                       pass                       yes
+CM_iter_shrink                           582968     226369      5  pass                       pass                       yes
+CM_clear                                 278837     112692      3  pass                       pass                       yes
+CM_live                                  930609     291912     25  pass                       pass                       yes
+CM_mut_retire_on_mark                       331        141      1  violated:RetiredUnreachable violated:RetiredUnreachable yes
+CM_mut_no_validate                         1734        794      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+CM_mut_stale_hit                           1284        606      1  violated:Linearizable      violated:Linearizable      yes
+CM_mut_revalidate_claim                     344        214      1  violated:Exactness         violated:Exactness         yes
+CM_mut_revalidate_count                     362        221      1  violated:CountExact        violated:CountExact        yes
+CM_mut_two_step_replace                     162         80      2  violated:AbsIsContent      violated:AbsIsContent      yes
+CM_mut_two_step_replace_iter                808        372      1  violated:WalkExact         violated:WalkExact         yes
+CM_mut_check_addr                        181083      58532     21  violated:Termination       violated:Termination       yes
+CM_wit_failed_snip                         4877       1824      1  violated:NoFailedSnip      violated:NoFailedSnip      yes
+CM_wit_frozen                               323        161      1  violated:NoFrozenMeet      violated:NoFrozenMeet      yes
+CM_wit_validation                          3280       1239      2  violated:NoValidationPass  violated:NoValidationPass  yes
+CM_wit_resize_under_write                   262        131      1  violated:NoResizeUnderWrite violated:NoResizeUnderWrite yes
+CM_wit_replace                              170         87      1  violated:NoReplace         violated:NoReplace         yes
+CM_big_claims                          10611125    3260753     40  pass                       pass                       yes
+CM_big_iter                            26484542    7974721    116  pass                       pass                       yes
+CM_live_reader                           930609     291912     35  pass                       pass                       yes
+CM_live_walker                          1129311     355406     38  pass                       pass                       yes
+CM_mut_validate_current                  954769     299300     61  violated:ReaderEnds        violated:ReaderEnds        yes
+CM_mut_validate_current_iter             737744     247852     66  violated:ReaderEnds        violated:ReaderEnds        yes
+
+results matching EXPECTED.txt: 30 of 30

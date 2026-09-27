@@ -4,7 +4,7 @@
 //! not ported.
 //!
 //! Not ported (race-only):
-//! - `test_concurrent_get_or_insert` — 10 threads race to call
+//! - `test_concurrent_get_or_insert` - 10 threads race to call
 //!   `get_or_insert("shared_key", ...)`, checking every thread's returned
 //!   `Arc` points at the same allocation (i.e. exactly one insert wins even
 //!   under contention). Run from one thread there is no race to win: the

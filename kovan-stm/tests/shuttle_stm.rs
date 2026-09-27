@@ -85,3 +85,50 @@ fn conflicting_increments_serialize() {
 fn shuttle_stm_conflicting_increments_serialize() {
     shuttle::check_pct(conflicting_increments_serialize, 5000, 5);
 }
+
+const TRANSFERS: i64 = 3;
+
+/// A transfer writes two `TVar`s while two other threads each write one of them. Commit locks a
+/// write set in address order, so some schedule has the transfer holding its first lock when it
+/// meets the second locked by the single-variable writer. That abort must release the first
+/// lock: one kept is never released, every transaction touching its `TVar` retries forever, and
+/// the schedule runs out of steps instead of finishing with the exact totals.
+fn transfer_aborting_on_a_held_lock_releases_its_locks() {
+    let stm = &Stm::new();
+    let a = stm.tvar(0i64);
+    let b = stm.tvar(0i64);
+
+    shuttle::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..TRANSFERS {
+                stm.atomically(|tx| {
+                    let (x, y) = (tx.load(&a)?, tx.load(&b)?);
+                    tx.store(&a, x - 1)?;
+                    tx.store(&b, y + 1)
+                });
+            }
+        });
+        for var in [&a, &b] {
+            scope.spawn(move || {
+                for _ in 0..TRANSFERS {
+                    stm.atomically(|tx| {
+                        let v = tx.load(var)?;
+                        tx.store(var, v + 1)
+                    });
+                }
+            });
+        }
+    });
+
+    let totals = stm.atomically(|tx| Ok((tx.load(&a)?, tx.load(&b)?)));
+    assert_eq!(
+        totals,
+        (0, 2 * TRANSFERS),
+        "a transfer or an increment was lost"
+    );
+}
+
+#[test]
+fn shuttle_stm_transfer_aborting_on_a_held_lock_releases_its_locks() {
+    shuttle::check_pct(transfer_aborting_on_a_held_lock_releases_its_locks, 5000, 5);
+}

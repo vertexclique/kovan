@@ -1,0 +1,274 @@
+//! Walking the map: a borrowed walk that keeps the table it started on and yields a key once
+//! (it recognizes a key a displacement carried ahead of it), and the owned walk that consumes
+//! the map.
+
+extern crate alloc;
+
+use super::table::{Entry, Table, Walk, Word};
+use super::{HopscotchMap, NEIGHBORHOOD_SIZE};
+use alloc::boxed::Box;
+use core::hash::{BuildHasher, Hash};
+use core::marker::PhantomData;
+use core::sync::atomic::Ordering;
+use kovan::pin;
+
+// Construction: none of `iter`/`keys`/`values` hashes or clones a value (the walk that does
+// lives in `Iterator for HopscotchIter` below). `K: Eq` is captured here as the walk's key
+// comparison (how it recognizes a key it already met), so the `Iterator` impls keep the bounds
+// they have always had, `K: Clone` and `V: Clone`.
+impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
+    /// Returns an iterator over the map entries.
+    ///
+    /// The iterator walks the table that is current when it is created, to
+    /// its end, even when a resize replaces that table meanwhile (the walk's
+    /// position means nothing in another table, whose layout differs). An
+    /// entry present from the iterator's creation to its end is yielded
+    /// exactly once: a resize neither skips nor repeats it, and a
+    /// displacement, which moves an entry to a higher slot of its
+    /// neighborhood, links it there before unlinking it from its old slot (so
+    /// the walk meets it) and the walk recognizes a key it already met there
+    /// (so it is not repeated). An insert publishes its entry's hop bit before
+    /// it links the entry, so an entry the walk finds in a slot is one a
+    /// lookup finds too. An entry inserted, removed or updated concurrently may
+    /// or may not be reflected, and no key is yielded twice.
+    pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
+        let guard = pin();
+        let table = self.table.load(Ordering::Acquire, &guard).as_raw();
+        // SAFETY: loaded under `guard`, which the iterator keeps.
+        let current = unsafe { &*table };
+        let (slots, mask) = (current.buckets.len(), current.home_mask());
+        HopscotchIter {
+            table,
+            slots,
+            mask,
+            bucket_idx: 0,
+            recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
+            recent_hash: [0; NEIGHBORHOOD_SIZE],
+            same_key: <K as PartialEq>::eq,
+            guard,
+            _map: PhantomData,
+        }
+    }
+
+    /// Returns an iterator over the map keys.
+    pub fn keys(&self) -> HopscotchKeys<'_, K, V, S> {
+        HopscotchKeys { iter: self.iter() }
+    }
+
+    /// Returns an iterator over the map values (clones `V`).
+    pub fn values(&self) -> HopscotchValues<'_, K, V, S> {
+        HopscotchValues { iter: self.iter() }
+    }
+}
+
+/// Iterator over HopscotchMap entries ([`HopscotchMap::iter`]).
+pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
+    /// The table the walk started on, loaded under `guard`.
+    table: *const Table<K, V>,
+    /// `table`'s slot count and home mask, read once: the walk never reloads them.
+    slots: usize,
+    mask: usize,
+    bucket_idx: usize,
+    /// The entry the walk read in each of its last `NEIGHBORHOOD_SIZE` slots (slot `i` at
+    /// `i % NEIGHBORHOOD_SIZE`, null for a free slot),
+    /// loaded under `guard`: how the walk recognizes a key it already met.
+    recent: [*const Entry<K, V>; NEIGHBORHOOD_SIZE],
+    /// The hash of the entry in each slot of `recent` (meaningless for a free slot): the walk
+    /// compares hashes here, in its own memory, and reads an earlier entry only on a match.
+    recent_hash: [u64; NEIGHBORHOOD_SIZE],
+    /// `K`'s equality, taken where `iter` is built.
+    same_key: fn(&K, &K) -> bool,
+    guard: kovan::Guard,
+    _map: PhantomData<&'a HopscotchMap<K, V, S>>,
+}
+
+impl<K, V, S> HopscotchIter<'_, K, V, S> {
+    /// Whether the walk already met the key of `entry`, read at slot `idx`, in a lower slot of
+    /// the key's neighborhood (which starts at `home`). A move carries an entry to a higher slot
+    /// of its neighborhood, so the walk can meet it a second time there (or a newer entry of its
+    /// key, after an update or a re-insert). Every slot of that neighborhood below `idx` is still
+    /// in `recent`: the neighborhood spans `NEIGHBORHOOD_SIZE` slots.
+    fn met_before(&self, home: usize, idx: usize, entry: &Entry<K, V>) -> bool {
+        let lowest = home.max(idx.saturating_sub(NEIGHBORHOOD_SIZE - 1));
+        (lowest..idx).any(|seen_idx| {
+            let slot = seen_idx % NEIGHBORHOOD_SIZE;
+            if self.recent_hash[slot] != entry.hash {
+                return false;
+            }
+            let seen = self.recent[slot];
+            // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
+            // being freed.
+            unsafe { seen.as_ref() }.is_some_and(|seen| {
+                core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key)
+            })
+        })
+    }
+}
+
+impl<'a, K, V, S> Iterator for HopscotchIter<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // SAFETY: owned by this iterator's `guard`, which was pinned before
+        // `table` was loaded and dies with the iterator: a resize that
+        // retires the table cannot free it (or its entries) while the guard
+        // is held.
+        let table = unsafe { &*self.table };
+
+        while self.bucket_idx < self.slots {
+            let idx = self.bucket_idx;
+            self.bucket_idx += 1;
+            let entry_ptr: *const Entry<K, V> = table
+                .get_bucket(idx)
+                .load(Ordering::Acquire, &self.guard)
+                .ptr();
+            // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
+            // being freed.
+            let Some(entry) = (unsafe { entry_ptr.as_ref() }) else {
+                // A free slot leaves its cell as it was. A stale cell (an entry met at least
+                // `NEIGHBORHOOD_SIZE` slots back) never matches: an entry's two slots in a move,
+                // or two entries of one key, share a home and so lie within one neighborhood,
+                // and `met_before` reads no cell below the home. The walk's guard keeps a stale
+                // entry allocated.
+                continue;
+            };
+            self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
+            self.recent_hash[idx % NEIGHBORHOOD_SIZE] = entry.hash;
+            if !self.met_before((entry.hash as usize) & self.mask, idx, entry) {
+                return Some((entry.key.clone(), entry.value.clone()));
+            }
+        }
+        None
+    }
+}
+
+/// Iterator over HopscotchMap keys.
+pub struct HopscotchKeys<'a, K: 'static, V: 'static, S> {
+    iter: HopscotchIter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for HopscotchKeys<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(k, _)| k)
+    }
+}
+
+/// Iterator over HopscotchMap values (clones `V`).
+pub struct HopscotchValues<'a, K: 'static, V: 'static, S> {
+    iter: HopscotchIter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S> Iterator for HopscotchValues<'a, K, V, S>
+where
+    K: Clone,
+    V: Clone,
+{
+    type Item = V;
+
+    #[inline]
+    fn next(&mut self) -> Option<V> {
+        self.iter.next().map(|(_, v)| v)
+    }
+}
+
+/// Owned iterator yielding `(K, V)` by value - moves out of the entries, no
+/// clone. Each drained slot is nulled so the table destructor stays a no-op.
+pub struct HopscotchIntoIter<K: 'static, V: 'static> {
+    table: *mut Table<K, V>,
+    walk: Walk<K, V>,
+    guard: kovan::Guard,
+}
+
+impl<K, V> Iterator for HopscotchIntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        let table = unsafe { &*self.table };
+        while let Some((idx, entry)) = self.walk.next(table, &self.guard) {
+            if !entry.is_null() {
+                table.get_bucket(idx).store(Word::free(), Ordering::Relaxed);
+                let k = unsafe { core::ptr::read(&(*entry).key) };
+                let v = unsafe { core::ptr::read(&(*entry).value) };
+                unsafe {
+                    alloc::alloc::dealloc(
+                        entry as *mut u8,
+                        core::alloc::Layout::new::<Entry<K, V>>(),
+                    );
+                }
+                return Some((k, v));
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> Drop for HopscotchIntoIter<K, V> {
+    fn drop(&mut self) {
+        while self.next().is_some() {}
+        // All slots nulled above; Table::drop frees only the bucket array.
+        unsafe { drop(Box::from_raw(self.table)) };
+    }
+}
+
+impl<K, V, S> IntoIterator for HopscotchMap<K, V, S>
+where
+    K: 'static,
+    V: 'static,
+{
+    type Item = (K, V);
+    type IntoIter = HopscotchIntoIter<K, V>;
+
+    fn into_iter(self) -> HopscotchIntoIter<K, V> {
+        let mut me = core::mem::ManuallyDrop::new(self);
+        let guard = pin();
+        let table = me.table.load(Ordering::Relaxed, &guard).as_raw();
+        unsafe { core::ptr::drop_in_place(&mut me.hasher) };
+        // SAFETY: the map is consumed, so the table is this iterator's alone.
+        let walk = Walk::new(unsafe { &*table }, &guard);
+        HopscotchIntoIter { table, walk, guard }
+    }
+}
+
+// `K: Send, V: Send`: an entry an insert replaces is retired, and its destructor may run on
+// another thread.
+impl<K, V, S> core::iter::FromIterator<(K, V)> for HopscotchMap<K, V, S>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
+    S: BuildHasher + Default,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let map = Self::with_hasher(S::default());
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
+    }
+}
+
+// A concurrent walk yields owned clones (`K: Clone`, `V: Clone`) and recognizes a key it already
+// met (`K: Eq`, taken by `iter`), so these bounds are unavoidable here, unlike std's
+// unconstrained `IntoIterator for &HashMap`, which yields borrowed `(&K, &V)` and hashes nothing
+// at this bound-checked level either.
+impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>
+where
+    K: Eq + Clone + 'static,
+    V: Clone + 'static,
+{
+    type Item = (K, V);
+    type IntoIter = HopscotchIter<'a, K, V, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}

@@ -1,0 +1,28 @@
+name: API compatibility
+
+# `cargo semver-checks` compares every published crate in the workspace
+# against its latest release on crates.io with no per-crate listing here:
+# `check-release` with no arguments walks the whole workspace on its own, so
+# a new crate is covered the moment it is added to Cargo.toml's `members`
+# and published once.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  semver-checks:
+    name: cargo-semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check semver
+        uses: obi1kenobi/cargo-semver-checks-action@v2

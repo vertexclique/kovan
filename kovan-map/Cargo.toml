@@ -36,9 +36,18 @@ wasm-bindgen-test = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 shuttle = "0.9.1"
+proptest = "1.11"
+# Proves both maps work with a BuildHasher other than the built-in one; tests
+# and benches only, never a normal dependency (see the S: BuildHasher note on
+# HopscotchMap and HashMap).
+rapidhash = "4.5.1"
 
 [[bench]]
 name = "perf"
+harness = false
+
+[[bench]]
+name = "hopscotch_ops"
 harness = false
 
 # Single-threaded adaptations of the tests/*.rs integration tests, kept
@@ -74,3 +83,7 @@ path = "tests/wasm/resize_leak_probe.rs"
 [[test]]
 name = "wasm_stress_test"
 path = "tests/wasm/stress_test.rs"
+
+[[bench]]
+name = "hopscotch"
+harness = false

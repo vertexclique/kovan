@@ -47,9 +47,14 @@ jobs:
         run: cargo build --workspace --target wasm32-unknown-unknown
 
       # `--no-default-features` is what proves the no_std + alloc path still
-      # builds at 32 bits; `std` is on by default.
+      # builds at 32 bits; `std` is on by default. kovan-map carries the same
+      # `std` feature (it stores its table behind `kovan::Atomic<T>`), so it
+      # gets the same check; the other crates have no `std` feature to drop.
       - name: Build kovan (no_std, no default features)
         run: cargo build -p kovan --target wasm32-unknown-unknown --no-default-features
+
+      - name: Build kovan-map (no_std, no default features)
+        run: cargo build -p kovan-map --target wasm32-unknown-unknown --no-default-features
 
       # `--lib` deliberately: `--all-targets` would also build the pristine
       # tests/*.rs, which are native-only by design (threads, and native-only

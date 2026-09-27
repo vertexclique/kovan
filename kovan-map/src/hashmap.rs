@@ -6,74 +6,59 @@
 //! 2. **Resizable bucket table**: the bucket array lives in a single
 //!    allocation (header + inline buckets) swapped atomically on resize and
 //!    reclaimed through kovan. The map grows when the load factor exceeds
-//!    3/4 and shrinks below 1/4 (never under its initial capacity),
-//!    mirroring `HopscotchMap`'s resize protocol.
-//! 3. **Optimized Node Layout**: fields ordered `hash -> key -> value -> next`
-//!    to optimize cache line usage during checks.
+//!    3/4 and shrinks below 1/4 (never under its initial capacity), the
+//!    same thresholds as `HopscotchMap`.
+//! 3. **Node layout**: `hash` and `next` side by side, so a walk passing a
+//!    node reads one cache line of it.
 //!
 //! # Architecture
 //! - **Table**: kovan-retired object holding the bucket array (atomic head
-//!   pointers). Readers snapshot the table under a guard and never block.
-//! - **Nodes**: singly linked chains, CAS-based lock-free insert/remove.
-//! - **Resize**: a single resizer (CAS on `resizing`) clones all entries
-//!   into a new table, swaps the table pointer, and retires the old table;
-//!   the old table's destructor frees its remaining chains exactly once at
-//!   reclamation time. Writers wait out an active resize and re-validate
-//!   after success so no update is lost to a concurrent migration.
+//!   pointers) and its entry count. Readers snapshot the table under a guard
+//!   and never block.
+//! - **Chains**: singly linked, lock-free. Every change of the map's content
+//!   is one CAS on one link word (`node`): an insert links a new node at the
+//!   tail, a remove marks the node's own `next`, a replace marks it naming
+//!   the new node, which names the old successor. That CAS is the
+//!   operation's linearization point, and the answer the operation gives is
+//!   exact: `insert_if_absent` answers `None` exactly when its CAS linked
+//!   the key's node, and otherwise the value of the node it found live.
+//! - **Reclamation**: a node is retired only by the thread whose CAS unlinked
+//!   it, never while a table can reach it, and a walk steps past a deleted
+//!   node only after checking the link it came through still names it
+//!   (`walk`), so every node a walk reads is protected by its guard.
+//! - **Resize**: a single resizer (latch `resizing`) freezes every link of
+//!   the old table in chain order while it copies the live nodes, then
+//!   publishes the new table and retires the old one (`resize`). A write
+//!   whose CAS landed is final; a write that meets a frozen link waits for
+//!   the new table and writes there.
+//!
+//! The protocol is modelled in `tla/chained/ChainedMap.tla` and checked by TLC
+//! with every rule 0.1.20 had put back one at a time (`tla/README.md`).
 
 extern crate alloc;
 
 #[cfg(feature = "std")]
 extern crate std;
 
+use crate::sync::AtomicBool;
 use alloc::boxed::Box;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
-use core::sync::atomic::{AtomicBool, AtomicIsize, Ordering, fence};
+use core::sync::atomic::Ordering;
 use foldhash::fast::FixedState;
-use kovan::{Atomic, RetiredNode, Shared, pin, retire};
+use kovan::{Atomic, Guard, pin, retire};
+use node::{MARK, Node, with, word};
+use table::{TableHeader, TableRef};
+use walk::Found;
 
-// vertexia: `resizing` gates `try_resize` (CAS to claim the resize) and is
-// spun on by every other writer via `wait_for_resize`/`clear`'s CAS-retry
-// while a resize is in flight. That spin has no *other* yield point in it,
-// which is a problem under shuttle two levels deep:
-//
-// 1. Without any instrumented op in the loop, shuttle can't preempt out of
-//    it at all -- a genuine hang once a writer observes `resizing == true`.
-// 2. Instrumenting the field itself (an earlier version of this fix swapped
-//    `AtomicBool` for shuttle's) fixes (1) but isn't enough for *fairness*:
-//    PCT keeps a thread's priority fixed except at a handful of preselected
-//    "change points" or an explicit yield, so a plain instrumented `.load()`
-//    in a spin loop can still be rescheduled indefinitely if it happens to
-//    hold the higher priority, starving the resizer and running out
-//    shuttle's step budget ("exceeded max_steps bound", an unfair schedule,
-//    not a real bug).
-//
-// The fix needs a *yield*, not an instrumented load: `resize_spin_hint`
-// (below) calls `shuttle::hint::spin_loop`, which also calls
-// `shuttle::thread::yield_now`, which PCT treats as an explicit change
-// point, demoting the spinner's priority so the resizer is guaranteed a
-// turn -- independent of whether the *condition* it's spinning on is
-// instrumented. So `resizing` itself stays a plain `AtomicBool` under every
-// build, shuttle included: swapping its type is unnecessary for either
-// correctness or fairness here, and empirically, doing so anyway
-// introduced its own unrelated shuttle-only heap corruption in this crate's
-// shuttle test (reproduced independent of any resize ever triggering,
-// isolated by bisection, still unexplained -- plausibly a layout hazard
-// from shuttle's `AtomicBool` being a much larger `RefCell`-based type
-// instead of a 1-byte one; not chased further since the type swap was
-// never actually required).
-#[inline(always)]
-fn resize_spin_hint() {
-    #[cfg(feature = "shuttle")]
-    {
-        shuttle::hint::spin_loop();
-    }
-    #[cfg(not(feature = "shuttle"))]
-    {
-        core::hint::spin_loop();
-    }
-}
+pub use iter::{IntoIter, Iter, Keys, Values};
+
+mod iter;
+mod node;
+mod resize;
+mod std_traits;
+mod table;
+mod walk;
 
 /// Default number of buckets for `new()`. Matches the previous fixed-table
 /// sizing (zero collisions for ~100k items, fits in L3); maps created with
@@ -111,304 +96,11 @@ impl Backoff {
     }
 }
 
-/// Node in the lock-free linked list.
-#[repr(C)]
-struct Node<K, V> {
-    retired: RetiredNode,
-    hash: u64,
-    key: K,
-    value: V,
-    next: Atomic<Node<K, V>>,
-}
-
-// SAFETY (kovan retirement rule): a retired Node's destructor may run on
-// any thread, and nodes (with K and V inside) move between threads — hence
-// `K: Send, V: Send` for Send. Unlike exclusive-transfer containers,
-// lookups DO produce `&K`/`&V` from a shared `&Node` (get() clones V
-// through &V under concurrent readers), so Sync additionally requires
-// `K: Sync, V: Sync` — the same bounds the map-level Sync impl below has
-// always required for sharing the map.
-unsafe impl<K: Send, V: Send> Send for Node<K, V> {}
-unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Node<K, V> {}
-
-// ---------------------------------------------------------------------------
-// Harris-style logical deletion
-// ---------------------------------------------------------------------------
-//
-// Removing (or replacing) a node first TAGS the victim's `next` pointer
-// (low bit set) — the logical delete — and only then unlinks it from its
-// predecessor. The thread whose tag-CAS succeeded exclusively owns the node
-// and is the only one to `retire()` it. This closes two races a plain
-// unlink-CAS protocol has:
-//
-//  * insert-after-removed-tail: a tail insert CASes `tail.next: null -> new`;
-//    if the tail was concurrently unlinked and retired, the new node is
-//    spliced onto dead memory — the insert is lost and the node leaks.
-//    With tagging, the remover first turns the tail's `next` into
-//    tagged-null, so the insert's CAS (expecting untagged null) fails.
-//
-//  * adjacent removes: removing B (A->B->C) and C (B->C->D) concurrently
-//    can unlink C from the already-detached B while C is still reachable
-//    through A, retiring a reachable node (use-after-free for later
-//    readers). With tagging, C's remover owns C via the tag; walkers
-//    observe `B.next` tagged and never operate relative to deleted nodes.
-//
-// Invariants:
-//  * tags appear only on `Node.next` fields, never on bucket heads
-//    (snipping stores the untagged successor);
-//  * a node whose `next` is tagged has been retired by its tag owner —
-//    `clear()`, the migration sweep, and `Table::drop` must skip it;
-//  * every traversal untags before following a `next` pointer.
-
-#[inline(always)]
-fn tagged<K, V>(p: *mut Node<K, V>) -> *mut Node<K, V> {
-    (p as usize | 1) as *mut Node<K, V>
-}
-
-#[inline(always)]
-fn untag<K, V>(p: *mut Node<K, V>) -> *mut Node<K, V> {
-    (p as usize & !1) as *mut Node<K, V>
-}
-
-#[inline(always)]
-fn is_tagged<K, V>(p: *const Node<K, V>) -> bool {
-    (p as usize) & 1 != 0
-}
-
-// ---------------------------------------------------------------------------
-// Single-allocation table: [TableHeader][Atomic<Node>; capacity]
-// ---------------------------------------------------------------------------
-//
-// The header and the bucket array share one allocation, so the read path is
-// `table ptr -> header line (mask, hot in cache) -> bucket line` — the same
-// number of cold dereferences as a fixed embedded array. The table pointer
-// itself is swapped atomically on resize.
-//
-// Reclamation goes through a tiny boxed `TableProxy` (RetiredNode at offset
-// 0, as `retire()` requires): retiring the proxy defers until every guard
-// that could observe the old table has been released; the proxy's destructor
-// then frees the table's remaining chains and the allocation itself.
-//
-// The proxy is built eagerly, in `TableRef::alloc`, at the SAME time as the
-// table it guards, not lazily when the table is finally retired. See the
-// long comment on `alloc` for why: a proxy built at retire time stamps its
-// birth_epoch too late, and kovan can then judge a straggler writer as not
-// needing protection for a table it is still actively CASing into.
-
-#[repr(C)]
-struct TableHeader {
-    mask: usize,
-    capacity: usize,
-    /// Type-erased `*mut TableProxy<K, V>` for this table's eventual
-    /// retirement (see `TableRef::alloc`). Zero means already taken/freed.
-    proxy: usize,
-}
-
-/// Borrowed view of a table allocation.
-struct TableRef<K: 'static, V: 'static> {
-    header: *mut TableHeader,
-    _marker: core::marker::PhantomData<(K, V)>,
-}
-
-impl<K, V> Clone for TableRef<K, V> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<K, V> Copy for TableRef<K, V> {}
-
-impl<K: 'static, V: 'static> TableRef<K, V> {
-    #[inline(always)]
-    fn from_raw(header: *mut TableHeader) -> Self {
-        Self {
-            header,
-            _marker: core::marker::PhantomData,
-        }
-    }
-
-    fn layout(capacity: usize) -> (core::alloc::Layout, usize) {
-        let header = core::alloc::Layout::new::<TableHeader>();
-        let buckets = core::alloc::Layout::array::<Atomic<Node<K, V>>>(capacity)
-            .expect("bucket array layout overflow");
-        let (layout, offset) = header.extend(buckets).expect("table layout overflow");
-        (layout.pad_to_align(), offset)
-    }
-
-    /// Allocate a zero-initialized table (`Atomic` buckets zero == null) and
-    /// eagerly build its retirement proxy.
-    ///
-    /// The proxy is built *here*, at the table's own birth, not lazily at
-    /// `try_resize` time. `RetiredNode::new()` stamps `birth_epoch` from the
-    /// calling thread's cached epoch at construction time (kovan's
-    /// contract: "birth_epoch must be set at allocation time, not
-    /// retirement time" (see `kovan::RetiredNode::new`). A table can live
-    /// through many other threads' operations before it is ever resized
-    /// away; if its proxy were only constructed when the resizer finally
-    /// retires it, the proxy's birth_epoch would be the *resizer's* current
-    /// epoch, which can be arbitrarily newer than the epoch a straggler
-    /// writer published the last time it observed this table via
-    /// `self.table.load()`. kovan's eligibility check
-    /// (`slot.epoch >= min_epoch`) would then wrongly judge that straggler
-    /// as not needing protection, and its `TableProxy` could be reclaimed
-    /// while the straggler is still mid-CAS on the table's own memory.
-    /// Stamping the proxy at the table's own allocation predates every
-    /// straggler that could ever see this table, closing the gap: the
-    /// same guarantee `HopscotchMap::try_resize` gets for free by retiring
-    /// its table struct directly (`RetiredNode` embedded at construction).
-    fn alloc(capacity: usize) -> Self {
-        let capacity = capacity.next_power_of_two().max(MIN_CAPACITY);
-        let (layout, _) = Self::layout(capacity);
-        // SAFETY: layout is non-zero sized; zeroed AtomicUsize == null bucket.
-        let header = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut TableHeader };
-        assert!(!header.is_null(), "table allocation failed");
-        unsafe {
-            (*header).mask = capacity - 1;
-            (*header).capacity = capacity;
-        }
-        let table = Self::from_raw(header);
-        let proxy = Box::into_raw(Box::new(TableProxy {
-            retired: RetiredNode::new(),
-            table,
-        }));
-        unsafe { (*header).proxy = proxy as usize };
-        table
-    }
-
-    /// Take this table's pre-built retirement proxy, for a single upcoming
-    /// `retire()` call. Must be called at most once per table.
-    #[inline(always)]
-    fn take_proxy(self) -> *mut TableProxy<K, V> {
-        let proxy = unsafe { (*self.header).proxy };
-        assert_ne!(proxy, 0, "kovan-map: table proxy already taken");
-        unsafe { (*self.header).proxy = 0 };
-        proxy as *mut TableProxy<K, V>
-    }
-
-    /// Free this table's proxy directly (without running its `Drop`, which
-    /// would call back into `free`/`free_array_only` on this same table) if
-    /// it was never retired. Used on every path where a table dies without
-    /// ever being resized away: `HashMap::drop`, `IntoIter`, and a
-    /// discarded, never-published resize target. No-op if `take_proxy` was
-    /// already called (the normal resize-retirement path).
-    #[inline(always)]
-    unsafe fn drop_unused_proxy(self) {
-        let proxy = unsafe { (*self.header).proxy };
-        if proxy != 0 {
-            unsafe {
-                (*self.header).proxy = 0;
-                alloc::alloc::dealloc(
-                    proxy as *mut u8,
-                    core::alloc::Layout::new::<TableProxy<K, V>>(),
-                );
-            }
-        }
-    }
-
-    /// Free remaining chains (skipping tagged nodes — already retired by
-    /// their tag owners) and the allocation itself.
-    ///
-    /// Free only the table allocation, not the chains (caller already drained
-    /// the live nodes, e.g. `IntoIter`). Tagged nodes remain kovan-owned.
-    ///
-    /// # Safety
-    /// Exclusive access; the chains must already be drained.
-    unsafe fn free_array_only(self) {
-        unsafe { self.drop_unused_proxy() };
-        let capacity = unsafe { (*self.header).capacity };
-        let (layout, _) = Self::layout(capacity);
-        unsafe { alloc::alloc::dealloc(self.header as *mut u8, layout) };
-    }
-
-    /// # Safety
-    /// Caller must have exclusive access (map drop, or proxy reclamation
-    /// after guard quiescence).
-    unsafe fn free(self) {
-        unsafe { self.drop_unused_proxy() };
-        let capacity = unsafe { (*self.header).capacity };
-        let guard = pin();
-        for i in 0..capacity {
-            let mut current = self.bucket(i).load(Ordering::Relaxed, &guard).as_raw();
-            while !current.is_null() {
-                unsafe {
-                    let next = (*current).next.load(Ordering::Relaxed, &guard).as_raw();
-                    if !is_tagged(next) {
-                        drop(Box::from_raw(current));
-                    }
-                    current = untag(next);
-                }
-            }
-        }
-        drop(guard);
-        let (layout, _) = Self::layout(capacity);
-        unsafe { alloc::alloc::dealloc(self.header as *mut u8, layout) };
-    }
-
-    #[inline(always)]
-    fn as_raw(self) -> *mut TableHeader {
-        self.header
-    }
-
-    #[inline(always)]
-    fn capacity(self) -> usize {
-        unsafe { (*self.header).capacity }
-    }
-
-    #[inline(always)]
-    fn buckets(self) -> *const Atomic<Node<K, V>> {
-        let (_, offset) = Self::layout_offset();
-        unsafe { (self.header as *const u8).add(offset) as *const Atomic<Node<K, V>> }
-    }
-
-    /// Header/bucket offset is capacity-independent; compute it once.
-    #[inline(always)]
-    fn layout_offset() -> ((), usize) {
-        let header = core::alloc::Layout::new::<TableHeader>();
-        let one = core::alloc::Layout::new::<Atomic<Node<K, V>>>();
-        let (_, offset) = header.extend(one).expect("layout");
-        ((), offset)
-    }
-
-    #[inline(always)]
-    fn bucket_index(self, hash: u64) -> usize {
-        (hash as usize) & unsafe { (*self.header).mask }
-    }
-
-    #[inline(always)]
-    fn bucket(self, idx: usize) -> &'static Atomic<Node<K, V>> {
-        // SAFETY: idx is masked or bounded by capacity; the 'static is a
-        // lie scoped by the caller's guard (same discipline as Shared).
-        unsafe { &*self.buckets().add(idx) }
-    }
-}
-
-/// Reclamation proxy for a table allocation (RetiredNode at offset 0).
-#[repr(C)]
-struct TableProxy<K: 'static, V: 'static> {
-    retired: RetiredNode,
-    table: TableRef<K, V>,
-}
-
-// SAFETY (kovan retirement rule): the proxy's destructor (running on any
-// thread) frees the table's nodes, hence K, V: Send.
-unsafe impl<K: Send, V: Send> Send for TableProxy<K, V> {}
-unsafe impl<K: Send + Sync, V: Send + Sync> Sync for TableProxy<K, V> {}
-
-impl<K, V> Drop for TableProxy<K, V> {
-    fn drop(&mut self) {
-        // SAFETY: kovan reclaimed the proxy only after every guard that
-        // could observe the old table has been released.
-        unsafe { self.table.free() };
-    }
-}
-
 /// High-Performance Lock-Free Map with automatic grow/shrink.
 pub struct HashMap<K: 'static, V: 'static, S = FixedState> {
     table: Atomic<TableHeader>,
-    /// Approximate live-entry count driving the resize thresholds.
-    /// Signed: a transient negative under racing removes is harmless and
-    /// avoids a CAS loop (fetch_update) on the hot remove path.
-    count: AtomicIsize,
-    /// Single-resizer latch; writers wait while a resize is in flight.
+    /// Single-resizer latch, held by a resize or a clear from before it
+    /// freezes the first link until after it publishes the new table.
     resizing: AtomicBool,
     /// Shrink floor: the initial capacity. The map never shrinks below the
     /// size it was created with, preserving the caller's sizing intent (and
@@ -418,12 +110,112 @@ pub struct HashMap<K: 'static, V: 'static, S = FixedState> {
     _marker: core::marker::PhantomData<(K, V)>,
 }
 
+/// The node an insert links: its key and value until an attempt needs the allocation, then that
+/// allocation, carried across the attempts that fail to link it, so a retry neither clones the
+/// key and value nor allocates again, and a losing call drops them exactly once.
+enum Pending<K, V> {
+    Parts { key: K, value: V },
+    Built(Box<Node<K, V>>),
+}
+
+impl<K, V> Pending<K, V> {
+    #[inline(always)]
+    fn key(&self) -> &K {
+        match self {
+            Self::Parts { key, .. } => key,
+            Self::Built(node) => &node.key,
+        }
+    }
+
+    /// The node, allocated the first time an attempt needs it, its `next` set to `next`.
+    #[inline]
+    fn into_node(self, hash: u64, next: *mut Node<K, V>) -> *mut Node<K, V> {
+        let node = match self {
+            Self::Parts { key, value } => Box::new(Node::new(hash, key, value)),
+            Self::Built(node) => node,
+        };
+        // Relaxed: the node is private until the CAS that links it releases it.
+        node.next.store(word(next), Ordering::Relaxed);
+        Box::into_raw(node)
+    }
+
+    /// The node an attempt failed to link, back for the next attempt.
+    #[inline]
+    fn back(node: *mut Node<K, V>) -> Self {
+        // SAFETY: the CAS that would have published `node` failed, so it is still the
+        // allocation `into_node` gave this call.
+        Self::Built(unsafe { Box::from_raw(node) })
+    }
+}
+
+/// How a conditional insert ended.
+enum Claim<R, V> {
+    /// This call linked the key's node; what the caller asked of the value it linked.
+    Inserted(R),
+    /// The key was present; its value.
+    Present(V),
+}
+
+// Small accessors that never hash: only the struct's own `'static` bound, as std's equivalent
+// block for `with_hasher`/`with_capacity_and_hasher`/`capacity`/`len`/`is_empty`/`hasher` needs
+// no `Hash`, `Eq`, `Clone` or `BuildHasher`. A method that hashes or clones a value lives in the
+// bound impl block below instead.
+impl<K: 'static, V: 'static, S> HashMap<K, V, S> {
+    /// Creates a new hash map with custom hasher.
+    pub fn with_hasher(hasher: S) -> Self {
+        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+    }
+
+    /// Creates a new hash map with at least `capacity` buckets and a custom hasher.
+    ///
+    /// The map grows when its load factor exceeds 0.75 and shrinks when it
+    /// falls below 0.25 - but never below `capacity`.
+    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
+        let table = TableRef::<K, V>::alloc(capacity);
+        let floor = table.capacity();
+        Self {
+            table: Atomic::new(table.as_raw()),
+            resizing: AtomicBool::new(false),
+            floor,
+            hasher,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    /// Returns the current number of buckets.
+    pub fn capacity(&self) -> usize {
+        let guard = pin();
+        self.table_ref(&guard).capacity()
+    }
+
+    /// Returns true if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the number of elements in the map.
+    ///
+    /// O(1): the current table's count, kept by insert/remove and set exactly
+    /// by a resize. Approximate while concurrent updates are in flight (a
+    /// write counts itself right after its CAS), exact in quiescence.
+    pub fn len(&self) -> usize {
+        let guard = pin();
+        self.table_ref(&guard)
+            .count()
+            .load(Ordering::Relaxed)
+            .max(0) as usize
+    }
+
+    /// Get the underlying hasher itself.
+    pub fn hasher(&self) -> &S {
+        &self.hasher
+    }
+}
+
+// Construction with the built-in hasher never hashes either: the struct's own `'static` only,
+// as std's `HashMap::new`/`with_capacity` carry no bound.
 #[cfg(feature = "std")]
-impl<K, V> HashMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
+impl<K: 'static, V: 'static> HashMap<K, V, FixedState> {
     /// Creates a new empty hash map with FoldHash (FixedState).
     pub fn new() -> Self {
         Self::with_hasher(FixedState::default())
@@ -441,45 +233,12 @@ where
     V: Clone + 'static,
     S: BuildHasher,
 {
-    /// Creates a new hash map with custom hasher.
-    pub fn with_hasher(hasher: S) -> Self {
-        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
-    }
-
-    /// Creates a new hash map with at least `capacity` buckets and a custom hasher.
+    /// Returns the value of `key`. Never blocks: reads the current table
+    /// under a guard, even while a resize is in flight.
     ///
-    /// The map grows when its load factor exceeds 0.75 and shrinks when it
-    /// falls below 0.25 — but never below `capacity`.
-    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
-        let table = TableRef::<K, V>::alloc(capacity);
-        let floor = table.capacity();
-        Self {
-            table: Atomic::new(table.as_raw()),
-            count: AtomicIsize::new(0),
-            resizing: AtomicBool::new(false),
-            floor,
-            hasher,
-            _marker: core::marker::PhantomData,
-        }
-    }
-
-    /// Returns the current number of buckets.
-    pub fn capacity(&self) -> usize {
-        let guard = pin();
-        let table = TableRef::<K, V>::from_raw(self.table.load(Ordering::Acquire, &guard).as_raw());
-        table.capacity()
-    }
-
-    /// Spin until any in-flight resize completes.
-    #[inline]
-    fn wait_for_resize(&self) {
-        while self.resizing.load(Ordering::Acquire) {
-            resize_spin_hint();
-        }
-    }
-
-    /// Optimized get operation. Never blocks — reads the current table
-    /// snapshot under a guard, even while a resize is in flight.
+    /// Linearizable: the answer is the value of a node that was not deleted
+    /// at the moment its `next` was read, or `None` when the key's chain
+    /// held no such node.
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -487,232 +246,84 @@ where
     {
         let hash = self.hasher.hash_one(key);
         let guard = pin();
-        let table = TableRef::<K, V>::from_raw(self.table.load(Ordering::Acquire, &guard).as_raw());
-        let bucket = table.bucket(table.bucket_index(hash));
-
-        let mut current = bucket.load(Ordering::Acquire, &guard).as_raw();
-        while !current.is_null() {
-            unsafe {
-                let node = &*current;
-                // Check hash first (integer compare is fast). Matching a
-                // logically-deleted node is linearizable (the read happened
-                // before the delete), so no tag check on the match path.
-                if node.hash == hash && node.key.borrow() == key {
-                    return Some(node.value.clone());
-                }
-                // Untag: the pointer may carry the deletion tag.
-                current = untag(node.next.load(Ordering::Acquire, &guard).as_raw());
-            }
-        }
-        None
+        self.lookup(hash, key, &guard)
+            .map(|node| node.value.clone())
     }
 
-    /// Checks if the key exists.
+    /// Checks if the key exists (without cloning its value).
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.get(key).is_some()
+        let hash = self.hasher.hash_one(key);
+        let guard = pin();
+        self.lookup(hash, key, &guard).is_some()
     }
 
-    /// Insert a key-value pair.
+    /// Inserts a key-value pair, returning the value it replaced.
+    ///
+    /// Linearizable at the one CAS that links the new node (a new key) or
+    /// marks the old node naming the new one (a present key); the answer is
+    /// exactly the value that CAS replaced.
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let hash = self.hasher.hash_one(&key);
+        let mut pending = Pending::Parts { key, value };
         let mut backoff = Backoff::new();
-        // Count a new key exactly once across re-validation retries
-        // (mirrors HopscotchMap: prevents both under-count, which causes
-        // cascading resizes, and double-count).
-        let mut counted = false;
-        // The first successful op's previous value is the linearized result;
-        // re-validation retries may replace a migrated clone of it.
-        let mut result: Option<Option<V>> = None;
-
-        'outer: loop {
-            self.wait_for_resize();
-
+        loop {
             let guard = pin();
-            let table_raw = self.table.load(Ordering::Acquire, &guard).as_raw();
-            let table = TableRef::<K, V>::from_raw(table_raw);
-            if self.resizing.load(Ordering::Acquire) {
-                continue;
-            }
-
-            let bucket = table.bucket(table.bucket_index(hash));
-
-            // 1. Search for existing key to update (snip-walk: physically
-            //    unlink logically-deleted nodes as we pass them).
-            let mut prev_link = bucket;
-            let mut current = prev_link.load(Ordering::Acquire, &guard).as_raw();
-
-            while !current.is_null() {
-                unsafe {
-                    let node = &*current;
-                    let next = node.next.load(Ordering::Acquire, &guard).as_raw();
-
-                    if is_tagged(next) {
-                        // Logically deleted: snip it out (its tag owner has
-                        // already retired it). On contention restart the scan.
-                        if prev_link
-                            .compare_exchange(
-                                Shared::from_raw(current),
-                                Shared::from_raw(untag(next)),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                                &guard,
-                            )
-                            .is_err()
-                        {
-                            backoff.spin();
-                            continue 'outer;
-                        }
-                        current = untag(next);
-                        continue;
-                    }
-
-                    if node.hash == hash && node.key == key {
-                        // Replace: logically delete the old node (tag-CAS
-                        // makes us its exclusive owner), then swing the
-                        // predecessor to the replacement in one step.
-                        let old_value = node.value.clone();
-                        if node
-                            .next
-                            .compare_exchange(
-                                Shared::from_raw(next),
-                                Shared::from_raw(tagged(next)),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                                &guard,
-                            )
-                            .is_err()
-                        {
-                            // Someone else deleted/replaced it first.
-                            backoff.spin();
-                            continue 'outer;
-                        }
-                        // We own the old node now — we retire it, exactly once.
-                        let new_node = Box::into_raw(Box::new(Node {
-                            retired: RetiredNode::new(),
-                            hash,
-                            key: key.clone(),
-                            value: value.clone(),
-                            next: Atomic::new(next),
-                        }));
-                        let swapped = prev_link
-                            .compare_exchange(
-                                Shared::from_raw(current),
-                                Shared::from_raw(new_node),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                                &guard,
-                            )
-                            .is_ok();
-                        // SAFETY: tag ownership; Node is #[repr(C)] with
-                        // RetiredNode at offset 0.
-                        retire(current);
-                        if result.is_none() {
-                            result = Some(Some(old_value));
-                        }
-                        if !swapped {
-                            // A helper snipped the old node before our swing;
-                            // the replacement is not installed — retry the
-                            // whole op (the removal already linearized).
-                            drop(Box::from_raw(new_node));
-                            backoff.spin();
-                            continue 'outer;
-                        }
-                        // Dekker/SB fence: pairs with the matching fence in
-                        // `try_resize`, placed right after it claims
-                        // `resizing`. Without both fences, the swing-CAS
-                        // above (a store) and the resizing/table loads just
-                        // below are this thread's store-then-load half of a
-                        // race against the resizer's own store-then-load
-                        // half (claim `resizing`, then read this bucket
-                        // during the sweep): plain AcqRel/Acquire lets both
-                        // sides observe the pre-update value of the other's
-                        // write (the classic store-buffering litmus test),
-                        // so the sweep could miss this mutation while we
-                        // simultaneously miss that a resize is in flight,
-                        // silently orphaning the update in the table being
-                        // retired. The fence forces this CAS and the
-                        // resizer's `resizing` claim into the same SeqCst
-                        // total order, so at least one side is guaranteed to
-                        // observe the other. x86 TSO hides the gap (every
-                        // CAS there is already a full fence); ARM's AcqRel
-                        // is not.
-                        fence(Ordering::SeqCst);
-                        // Re-validate: if a resize started (or completed)
-                        // since we loaded the table, the migration may have
-                        // cloned the entry before our update — redo the op
-                        // on the new table so the update is not lost.
-                        if self.resizing.load(Ordering::SeqCst)
-                            || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
-                        {
-                            continue 'outer;
-                        }
-                        return result.unwrap();
-                    }
-
-                    prev_link = &node.next;
-                    current = next;
+            let (table, found) = self.find(hash, pending.key(), &guard);
+            match found {
+                Found::Frozen => {
+                    drop(guard);
+                    self.wait_for_resize();
                 }
-            }
-
-            // 2. Key not found. Insert at TAIL (prev_link). The CAS expects
-            //    an untagged null, so it fails if the tail node was
-            //    concurrently logically deleted.
-            let new_node_ptr = Box::into_raw(Box::new(Node {
-                retired: RetiredNode::new(),
-                hash,
-                key: key.clone(),
-                value: value.clone(),
-                next: Atomic::null(),
-            }));
-
-            match prev_link.compare_exchange(
-                unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                unsafe { Shared::from_raw(new_node_ptr) },
-                Ordering::Release,
-                Ordering::Relaxed,
-                &guard,
-            ) {
-                Ok(_) => {
-                    if !counted {
-                        counted = true;
-                        self.count.fetch_add(1, Ordering::Relaxed);
+                Found::Miss { tail } => {
+                    let node = pending.into_node(hash, core::ptr::null_mut());
+                    // Release: a reader that acquires the link sees the node's fields.
+                    match tail.compare_exchange(
+                        word(core::ptr::null_mut()),
+                        word(node),
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                        &guard,
+                    ) {
+                        Ok(_) => {
+                            self.landed(table, guard);
+                            return None;
+                        }
+                        Err(_) => {
+                            pending = Pending::back(node);
+                            backoff.spin();
+                        }
                     }
-                    if result.is_none() {
-                        result = Some(None);
-                    }
-                    // Dekker/SB fence pairing with try_resize's claim-side
-                    // fence (full justification on the replace path above):
-                    // the tail-append CAS above is this thread's store-side
-                    // of the same store-load race.
-                    fence(Ordering::SeqCst);
-                    // Re-validate against a concurrent migration (see above).
-                    if self.resizing.load(Ordering::SeqCst)
-                        || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
-                    {
-                        continue 'outer;
-                    }
-
-                    // Grow check (only when we actually added an entry).
-                    let new_count = self.count.load(Ordering::Relaxed).max(0) as usize;
-                    let capacity = table.capacity();
-                    // Integer load-factor check: count/cap > 3/4.
-                    if 4 * new_count > 3 * capacity {
-                        drop(guard);
-                        self.try_resize(capacity * 2);
-                    }
-                    return result.unwrap();
                 }
-                Err(_) => {
-                    // Contention at the tail — retry the search/append loop.
-                    unsafe {
-                        drop(Box::from_raw(new_node_ptr));
+                Found::Hit {
+                    prev,
+                    node: old,
+                    next,
+                } => {
+                    // Cloned before the CAS: a panicking clone leaves the map as it was.
+                    let previous = old.value.clone();
+                    let node = pending.into_node(hash, next);
+                    // The replace: the old node deleted, naming the new node, in one CAS.
+                    // AcqRel: releases the new node; acquires what the old word carried.
+                    match old.next.compare_exchange(
+                        word(next),
+                        word(with(node, MARK)),
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                        &guard,
+                    ) {
+                        Ok(_) => {
+                            self.unlink(prev, old, node, hash, &old.key, &guard);
+                            return Some(previous);
+                        }
+                        Err(_) => {
+                            pending = Pending::back(node);
+                            backoff.spin();
+                        }
                     }
-                    backoff.spin();
-                    continue 'outer;
                 }
             }
         }
@@ -720,150 +331,79 @@ where
 
     /// Insert a key-value pair only if the key does not exist.
     /// Returns `None` if inserted, `Some(existing_value)` if the key already exists.
+    ///
+    /// Exact: `None` exactly when this call linked the key's node (its CAS is
+    /// the linearization point), `Some` with the value of the node it found
+    /// live otherwise; never both, and a resize in flight changes neither.
+    /// A call that finds the key present drops its own key and value, once.
     pub fn insert_if_absent(&self, key: K, value: V) -> Option<V> {
-        let hash = self.hasher.hash_one(&key);
-        let mut backoff = Backoff::new();
-        let mut counted = false;
-
-        'outer: loop {
-            self.wait_for_resize();
-
-            let guard = pin();
-            let table_raw = self.table.load(Ordering::Acquire, &guard).as_raw();
-            let table = TableRef::<K, V>::from_raw(table_raw);
-            if self.resizing.load(Ordering::Acquire) {
-                continue;
-            }
-
-            let bucket = table.bucket(table.bucket_index(hash));
-
-            // 1. Search for existing key (snip-walk).
-            let mut prev_link = bucket;
-            let mut current = prev_link.load(Ordering::Acquire, &guard).as_raw();
-
-            while !current.is_null() {
-                unsafe {
-                    let node = &*current;
-                    let next = node.next.load(Ordering::Acquire, &guard).as_raw();
-
-                    if is_tagged(next) {
-                        if prev_link
-                            .compare_exchange(
-                                Shared::from_raw(current),
-                                Shared::from_raw(untag(next)),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                                &guard,
-                            )
-                            .is_err()
-                        {
-                            backoff.spin();
-                            continue 'outer;
-                        }
-                        current = untag(next);
-                        continue;
-                    }
-
-                    if node.hash == hash && node.key == key {
-                        // Found on a retry. This may be our own migrated
-                        // clone OR another caller's entry that landed while
-                        // the table swapped - the two are indistinguishable
-                        // here, and reporting None for someone else's entry
-                        // would admit a second winner. Return the canonical
-                        // value either way (for our own clone that is a
-                        // clone of the value we just inserted), matching
-                        // HopscotchMap's retry semantics: under a concurrent
-                        // resize a successful insert may report
-                        // Some(its own value); callers must treat the
-                        // returned value as canonical.
-                        return Some(node.value.clone());
-                    }
-                    prev_link = &node.next;
-                    current = next;
-                }
-            }
-
-            // 2. Key not found (or our pre-migration insert was not carried
-            //    over) — insert at TAIL. Untagged-null expectation makes the
-            //    CAS fail if the tail was concurrently logically deleted.
-            let new_node_ptr = Box::into_raw(Box::new(Node {
-                retired: RetiredNode::new(),
-                hash,
-                key: key.clone(),
-                value: value.clone(),
-                next: Atomic::null(),
-            }));
-
-            match prev_link.compare_exchange(
-                unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                unsafe { Shared::from_raw(new_node_ptr) },
-                Ordering::Release,
-                Ordering::Relaxed,
-                &guard,
-            ) {
-                Ok(_) => {
-                    if !counted {
-                        counted = true;
-                        self.count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // Dekker/SB fence pairing with try_resize's claim-side
-                    // fence (full justification in HashMap::insert's replace
-                    // path): the tail-append CAS above is this thread's
-                    // store-side of the same store-load race.
-                    fence(Ordering::SeqCst);
-                    // Re-validate against a concurrent migration.
-                    if self.resizing.load(Ordering::SeqCst)
-                        || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
-                    {
-                        continue 'outer;
-                    }
-
-                    let new_count = self.count.load(Ordering::Relaxed).max(0) as usize;
-                    let capacity = table.capacity();
-                    // Integer load-factor check: count/cap > 3/4.
-                    if 4 * new_count > 3 * capacity {
-                        drop(guard);
-                        self.try_resize(capacity * 2);
-                    }
-                    return None;
-                }
-                Err(actual_val) => {
-                    // Contention at the tail.
-                    unsafe {
-                        let appended_ptr = actual_val.as_raw();
-                        drop(Box::from_raw(new_node_ptr));
-                        if !is_tagged(appended_ptr) && !appended_ptr.is_null() {
-                            let appended = &*appended_ptr;
-                            if appended.hash == hash && appended.key == key {
-                                // Race lost, key exists now. Same canonical-
-                                // value rule as the retry-found path above:
-                                // even if a pre-migration attempt of ours
-                                // inserted, the surviving entry is what
-                                // every caller must converge on.
-                                return Some(appended.value.clone());
-                            }
-                        }
-                    }
-                    backoff.spin();
-                    continue 'outer;
-                }
-            }
+        match self.claim(key, value, |_| ()) {
+            Claim::Inserted(()) => None,
+            Claim::Present(existing) => Some(existing),
         }
     }
 
     /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
     ///
-    /// This is linearizable: concurrent callers for the same key are guaranteed to
-    /// agree on which value was inserted (exactly one thread's CAS succeeds at the
-    /// list tail, and all others see that node on retry).
+    /// Linearizable and exact: of the callers racing for an absent key, the
+    /// one whose CAS links the key's node gets its own value back, and every
+    /// other gets the value it found live (the winner's, unless a later
+    /// write already replaced it). One clone of the value either way.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
-        match self.insert_if_absent(key, value.clone()) {
-            Some(existing) => existing,
-            None => value,
+        match self.claim(key, value, V::clone) {
+            Claim::Inserted(own) | Claim::Present(own) => own,
         }
     }
 
-    /// Remove a key-value pair.
+    /// The conditional insert both `insert_if_absent` and `get_or_insert`
+    /// are: link the key's node unless the key is present. `on_insert` reads
+    /// the value this call linked, under its guard.
+    fn claim<R>(&self, key: K, value: V, on_insert: impl FnOnce(&V) -> R) -> Claim<R, V> {
+        let hash = self.hasher.hash_one(&key);
+        let mut pending = Pending::Parts { key, value };
+        let mut backoff = Backoff::new();
+        loop {
+            let guard = pin();
+            let (table, found) = self.find(hash, pending.key(), &guard);
+            match found {
+                Found::Frozen => {
+                    drop(guard);
+                    self.wait_for_resize();
+                }
+                // Present: the node was not deleted when the walk read its `next`.
+                Found::Hit { node, .. } => return Claim::Present(node.value.clone()),
+                Found::Miss { tail } => {
+                    let node = pending.into_node(hash, core::ptr::null_mut());
+                    // Release: a reader that acquires the link sees the node's fields.
+                    match tail.compare_exchange(
+                        word(core::ptr::null_mut()),
+                        word(node),
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                        &guard,
+                    ) {
+                        Ok(_) => {
+                            // SAFETY: this call allocated and linked it under `guard`, which
+                            // keeps it from being freed.
+                            let answer = on_insert(unsafe { &(*node).value });
+                            self.landed(table, guard);
+                            return Claim::Inserted(answer);
+                        }
+                        Err(_) => {
+                            pending = Pending::back(node);
+                            backoff.spin();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove a key-value pair, returning its value.
+    ///
+    /// Linearizable at the CAS that marks the key's node deleted; the answer
+    /// is that node's value, and a later `get` of the key (with no insert of
+    /// it in between) answers `None`.
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -871,145 +411,53 @@ where
     {
         let hash = self.hasher.hash_one(key);
         let mut backoff = Backoff::new();
-        // First successful removal's value is the linearized result;
-        // re-validation retries only evict migrated clones.
-        let mut result: Option<V> = None;
-
-        'outer: loop {
-            self.wait_for_resize();
-
+        loop {
             let guard = pin();
-            let table_raw = self.table.load(Ordering::Acquire, &guard).as_raw();
-            let table = TableRef::<K, V>::from_raw(table_raw);
-            if self.resizing.load(Ordering::Acquire) {
-                continue;
-            }
-
-            let bucket = table.bucket(table.bucket_index(hash));
-
-            let mut prev_link = bucket;
-            let mut current = prev_link.load(Ordering::Acquire, &guard).as_raw();
-
-            while !current.is_null() {
-                unsafe {
-                    let node = &*current;
-                    let next = node.next.load(Ordering::Acquire, &guard).as_raw();
-
-                    if is_tagged(next) {
-                        // Logically deleted by someone else: snip and move on.
-                        if prev_link
-                            .compare_exchange(
-                                Shared::from_raw(current),
-                                Shared::from_raw(untag(next)),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                                &guard,
-                            )
-                            .is_err()
-                        {
-                            backoff.spin();
-                            continue 'outer;
-                        }
-                        current = untag(next);
-                        continue;
-                    }
-
-                    if node.hash == hash && node.key.borrow() == key {
-                        let old_value = node.value.clone();
-
-                        // Logical delete: tag the victim's next. The tag
-                        // owner — and only the tag owner — retires the node,
-                        // and the tag makes concurrent tail-inserts onto
-                        // this node fail.
-                        if node
-                            .next
-                            .compare_exchange(
-                                Shared::from_raw(next),
-                                Shared::from_raw(tagged(next)),
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                                &guard,
-                            )
-                            .is_err()
-                        {
-                            backoff.spin();
-                            continue 'outer;
-                        }
-
-                        // Physical unlink (best effort — if it fails, a
-                        // later walker snips it).
-                        let _ = prev_link.compare_exchange(
-                            Shared::from_raw(current),
-                            Shared::from_raw(next),
+            let (table, found) = self.find(hash, key, &guard);
+            match found {
+                Found::Frozen => {
+                    drop(guard);
+                    self.wait_for_resize();
+                }
+                Found::Miss { .. } => return None,
+                Found::Hit { prev, node, next } => {
+                    // Cloned before the CAS: a panicking clone leaves the map as it was.
+                    let value = node.value.clone();
+                    // The removal: the node's own word marked, keeping its successor.
+                    if node
+                        .next
+                        .compare_exchange(
+                            word(next),
+                            word(with(next, MARK)),
                             Ordering::AcqRel,
                             Ordering::Relaxed,
                             &guard,
-                        );
-
-                        // SAFETY: tag ownership; Node is #[repr(C)] with
-                        // RetiredNode at offset 0.
-                        retire(current);
-                        if result.is_none() {
-                            result = Some(old_value);
-                        }
-
-                        // Single atomic decrement (signed counter — cannot
-                        // wrap; a transient negative just clamps to 0 below).
-                        let new_count =
-                            (self.count.fetch_sub(1, Ordering::Relaxed) - 1).max(0) as usize;
-                        // Integer load-factor check: count/cap < 1/4.
-                        let shrink_to = (4 * new_count < table.capacity()
-                            && table.capacity() > self.floor)
-                            .then_some(table.capacity() / 2);
-
-                        // Dekker/SB fence pairing with try_resize's
-                        // claim-side fence (full justification in
-                        // HashMap::insert's replace path): the tag-CAS above
-                        // is this thread's store-side of the same
-                        // store-load race, so the same "sweep misses the
-                        // mutation and we miss the resize" window applies
-                        // here, and the resurrection this re-validation
-                        // exists to catch would otherwise go undetected.
-                        fence(Ordering::SeqCst);
-                        // Re-validate: a concurrent migration may have cloned
-                        // this entry into the new table before we deleted it
-                        // here — redo the removal on the current table so the
-                        // key does not resurrect.
-                        if self.resizing.load(Ordering::SeqCst)
-                            || self.table.load(Ordering::SeqCst, &guard).as_raw() != table_raw
-                        {
-                            continue 'outer;
-                        }
-
-                        if let Some(cap) = shrink_to {
-                            drop(guard);
-                            self.try_resize(cap);
-                        }
-                        return result;
+                        )
+                        .is_err()
+                    {
+                        backoff.spin();
+                        continue;
                     }
-
-                    prev_link = &node.next;
-                    current = next;
+                    let remaining = table.count().fetch_sub(1, Ordering::Relaxed) - 1;
+                    self.unlink(prev, node, next, hash, key, &guard);
+                    let capacity = table.capacity();
+                    // Integer load-factor check: count/cap < 1/4.
+                    if 4 * (remaining.max(0) as usize) < capacity && capacity > self.floor {
+                        drop(guard);
+                        self.try_resize(capacity / 2);
+                    }
+                    return Some(value);
                 }
             }
-
-            // Key not present in the current table.
-            return result;
         }
     }
 
-    /// Remove **all** nodes matching `key`, returning the most recent value
-    /// if the key was present.
+    /// Remove the key's entry, returning its value if the key was present.
     ///
-    /// [`remove`](Self::remove) unlinks only the first matching entry.
-    /// Insert/remove races can transiently leave more than one entry for
-    /// the same key ("versions"); after a plain `remove()` an older version
-    /// would become visible again. This method keeps removing until a full
-    /// scan finds no match, so the key is guaranteed absent at the
-    /// linearization point of the final scan.
-    ///
-    /// Use `remove()` for single-version removal semantics and
-    /// `force_remove()` when the key must be fully evicted.
+    /// A key has at most one live node, so this removes what [`remove`](Self::remove)
+    /// removes; it keeps removing until a call answers `None` (the key is
+    /// absent at that call's linearization point), and it is kept for
+    /// parity with `HopscotchMap::force_remove`.
     ///
     /// Note: a concurrent `insert` of the same key can land after the final
     /// scan, as with any removal under contention.
@@ -1022,8 +470,6 @@ where
         loop {
             match self.remove(key) {
                 Some(v) => {
-                    // The first removal unlinks the first match in scan
-                    // order — the live (most recent) version.
                     if newest.is_none() {
                         newest = Some(v);
                     }
@@ -1033,203 +479,6 @@ where
         }
     }
 
-    /// Clear the map.
-    pub fn clear(&self) {
-        // Take the resize latch so the table cannot be swapped (and no
-        // writer is mid-migration) while we unlink the chains.
-        while self
-            .resizing
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            resize_spin_hint();
-        }
-
-        let guard = pin();
-        let table = TableRef::<K, V>::from_raw(self.table.load(Ordering::Acquire, &guard).as_raw());
-
-        for i in 0..table.capacity() {
-            let bucket = table.bucket(i);
-            loop {
-                let head = bucket.load(Ordering::Acquire, &guard);
-                if head.is_null() {
-                    break;
-                }
-
-                // Try to unlink the whole chain at once
-                match bucket.compare_exchange(
-                    head,
-                    unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                    &guard,
-                ) {
-                    Ok(_) => {
-                        // Retire the chain's live nodes. Tagged nodes were
-                        // already retired by their tag owners — skip them.
-                        unsafe {
-                            let mut current = head.as_raw();
-                            while !current.is_null() {
-                                let next = (*current).next.load(Ordering::Relaxed, &guard).as_raw();
-                                if !is_tagged(next) {
-                                    // SAFETY: allocated via Box::into_raw;
-                                    // Node is #[repr(C)], RetiredNode first.
-                                    retire(current);
-                                }
-                                current = untag(next);
-                            }
-                        }
-                        break;
-                    }
-                    Err(_) => {
-                        // Contention, retry
-                        continue;
-                    }
-                }
-            }
-        }
-
-        self.count.store(0, Ordering::Release);
-        self.resizing.store(false, Ordering::Release);
-    }
-
-    /// Returns true if the map is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns the number of elements in the map.
-    ///
-    /// O(1): maintained by insert/remove. Approximate while concurrent
-    /// updates are in flight (exact in quiescence), like `HopscotchMap`.
-    pub fn len(&self) -> usize {
-        self.count.load(Ordering::Relaxed).max(0) as usize
-    }
-
-    /// Resize the table to `new_capacity` buckets (single resizer wins).
-    ///
-    /// Clones every entry into a new table, swaps the table pointer, then
-    /// retires the old table. The old table's destructor frees whatever
-    /// nodes remain in its chains at reclamation time — entries removed or
-    /// replaced in the meantime were unlinked and retired individually, so
-    /// nothing is freed twice and nothing leaks.
-    fn try_resize(&self, new_capacity: usize) {
-        if self
-            .resizing
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-
-        // Dekker/SB fence: pairs with the matching fence every writer
-        // (insert/insert_if_absent/remove) executes right before its
-        // resizing/table re-validation check. This claim-CAS and the
-        // migration sweep's bucket reads below are this thread's
-        // store-then-load half of the same store-load race a writer's
-        // data-mutating CAS and its own re-validation load form the other
-        // half of; without a fence on both sides, AcqRel/Acquire permits
-        // both this sweep and that writer's check to observe the pre-update
-        // value of the other's write (the classic store-buffering litmus
-        // test), silently losing the writer's update to the table being
-        // retired. x86 TSO hides the gap (every CAS there is already a full
-        // fence); ARM's AcqRel is not.
-        fence(Ordering::SeqCst);
-
-        let new_capacity = new_capacity
-            .next_power_of_two()
-            .max(MIN_CAPACITY)
-            .max(self.floor);
-        let guard = pin();
-        let old_raw = self.table.load(Ordering::Acquire, &guard).as_raw();
-        let old_table = TableRef::<K, V>::from_raw(old_raw);
-
-        if old_table.capacity() == new_capacity {
-            self.resizing.store(false, Ordering::Release);
-            return;
-        }
-
-        let new_table = TableRef::<K, V>::alloc(new_capacity);
-
-        // Migrate: clone every live entry (logically-deleted nodes — tagged
-        // next — are skipped). We are the only writer of the new table (it
-        // is unpublished), so plain stores are sufficient.
-        for i in 0..old_table.capacity() {
-            let bucket = old_table.bucket(i);
-            let mut current = bucket.load(Ordering::Acquire, &guard).as_raw();
-            while !current.is_null() {
-                let node = unsafe { &*current };
-                let next = node.next.load(Ordering::Acquire, &guard).as_raw();
-                if !is_tagged(next) {
-                    let dst = new_table.bucket(new_table.bucket_index(node.hash));
-                    let head = dst.load(Ordering::Relaxed, &guard);
-                    let clone = Box::into_raw(Box::new(Node {
-                        retired: RetiredNode::new(),
-                        hash: node.hash,
-                        key: node.key.clone(),
-                        value: node.value.clone(),
-                        next: Atomic::new(head.as_raw()),
-                    }));
-                    dst.store(unsafe { Shared::from_raw(clone) }, Ordering::Relaxed);
-                }
-                current = untag(next);
-            }
-        }
-
-        match self.table.compare_exchange(
-            unsafe { Shared::from_raw(old_raw) },
-            unsafe { Shared::from_raw(new_table.as_raw()) },
-            Ordering::Release,
-            Ordering::Relaxed,
-            &guard,
-        ) {
-            Ok(_) => {
-                // Retire the old table through its proxy (built eagerly
-                // back when this table was allocated, see `TableRef::alloc`,
-                // so its birth_epoch predates every straggler that could
-                // have observed this table): reclamation (which frees the
-                // remaining chains and the allocation) is deferred until
-                // every guard that could observe it is gone.
-                let proxy = old_table.take_proxy();
-                // SAFETY: TableProxy is #[repr(C)] with RetiredNode at
-                // offset 0, allocated via Box::into_raw.
-                unsafe { retire(proxy) };
-            }
-            Err(_) => {
-                // Table changed under us (cannot normally happen — we hold
-                // the resize latch). Discard the unpublished new table.
-                unsafe { new_table.free() };
-            }
-        }
-
-        self.resizing.store(false, Ordering::Release);
-    }
-
-    /// Returns an iterator over the map entries.
-    /// Yields (K, V) clones from a table snapshot taken at creation.
-    pub fn iter(&self) -> Iter<'_, K, V, S> {
-        let guard = pin();
-        let table = TableRef::<K, V>::from_raw(self.table.load(Ordering::Acquire, &guard).as_raw());
-        Iter {
-            _map: self,
-            table,
-            bucket_idx: 0,
-            current: core::ptr::null(),
-            guard,
-        }
-    }
-
-    /// Returns an iterator over the map keys.
-    /// Yields K clones.
-    pub fn keys(&self) -> Keys<'_, K, V, S> {
-        Keys { iter: self.iter() }
-    }
-
-    /// Returns an iterator over the map values (clones `V`).
-    pub fn values(&self) -> Values<'_, K, V, S> {
-        Values { iter: self.iter() }
-    }
-
     /// Insert all `(K, V)` pairs from `iter`. Takes `&self` (concurrent map).
     pub fn extend<I: IntoIterator<Item = (K, V)>>(&self, iter: I) {
         for (k, v) in iter {
@@ -1237,209 +486,54 @@ where
         }
     }
 
-    /// Get the underlying hasher itself.
-    pub fn hasher(&self) -> &S {
-        &self.hasher
-    }
-}
-
-/// Iterator over HashMap entries.
-///
-/// Field ordering matters for drop safety.
-/// Rust drops struct fields in declaration order.
-/// The `guard` must be dropped *after* `current`/`table` so that the epoch
-/// pin covering the snapshot is not released before we're done with the raw
-/// pointers.
-pub struct Iter<'a, K: 'static, V: 'static, S> {
-    _map: &'a HashMap<K, V, S>,
-    table: TableRef<K, V>,
-    bucket_idx: usize,
-    current: *const Node<K, V>,
-    guard: kovan::Guard,
-}
-
-impl<'a, K, V, S> Iterator for Iter<'a, K, V, S>
-where
-    K: Clone,
-    V: Clone,
-{
-    type Item = (K, V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if !self.current.is_null() {
-                unsafe {
-                    let node = &*self.current;
-                    let next = node.next.load(Ordering::Acquire, &self.guard).as_raw();
-                    // Advance current (the pointer may carry a deletion tag).
-                    self.current = untag(next);
-                    if is_tagged(next) {
-                        // Logically deleted — do not yield.
-                        continue;
-                    }
-                    return Some((node.key.clone(), node.value.clone()));
-                }
-            }
-
-            // Move to next bucket
-            let table = self.table;
-            if self.bucket_idx >= table.capacity() {
-                return None;
-            }
-
-            let bucket = table.bucket(self.bucket_idx);
-            self.bucket_idx += 1;
-            self.current = bucket.load(Ordering::Acquire, &self.guard).as_raw();
-        }
-    }
-}
-
-/// Iterator over HashMap keys.
-pub struct Keys<'a, K: 'static, V: 'static, S> {
-    iter: Iter<'a, K, V, S>,
-}
-
-impl<'a, K, V, S> Iterator for Keys<'a, K, V, S>
-where
-    K: Clone,
-    V: Clone,
-{
-    type Item = K;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|(k, _)| k)
-    }
-}
-
-impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-    S: BuildHasher,
-{
-    type Item = (K, V);
-    type IntoIter = Iter<'a, K, V, S>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-/// Iterator over HashMap values (clones `V`).
-pub struct Values<'a, K: 'static, V: 'static, S> {
-    iter: Iter<'a, K, V, S>,
-}
-
-impl<'a, K, V, S> Iterator for Values<'a, K, V, S>
-where
-    K: Clone,
-    V: Clone,
-{
-    type Item = V;
-
+    /// A new key landed in `table`: count it there, and grow the table past three quarters.
     #[inline]
-    fn next(&mut self) -> Option<V> {
-        self.iter.next().map(|(_, v)| v)
-    }
-}
-
-/// Owned iterator yielding `(K, V)` by value — moves out of the nodes, no
-/// clone. Consuming the map gives exclusive access, so no guard protection of
-/// the yielded values is needed.
-pub struct IntoIter<K: 'static, V: 'static> {
-    table: TableRef<K, V>,
-    bucket_idx: usize,
-    current: *mut Node<K, V>,
-    guard: kovan::Guard,
-}
-
-impl<K, V> Iterator for IntoIter<K, V> {
-    type Item = (K, V);
-
-    fn next(&mut self) -> Option<(K, V)> {
-        loop {
-            if !self.current.is_null() {
-                let node = self.current;
-                let next = unsafe { (*node).next.load(Ordering::Acquire, &self.guard).as_raw() };
-                self.current = untag(next);
-                if is_tagged(next) {
-                    continue; // logically deleted, owned by kovan
-                }
-                // Move K and V out, then free the shell without running drop.
-                let k = unsafe { core::ptr::read(&(*node).key) };
-                let v = unsafe { core::ptr::read(&(*node).value) };
-                unsafe {
-                    alloc::alloc::dealloc(
-                        node as *mut u8,
-                        core::alloc::Layout::new::<Node<K, V>>(),
-                    );
-                }
-                return Some((k, v));
-            }
-            if self.bucket_idx >= self.table.capacity() {
-                return None;
-            }
-            let bucket = self.table.bucket(self.bucket_idx);
-            self.bucket_idx += 1;
-            self.current = bucket.load(Ordering::Acquire, &self.guard).as_raw();
+    fn landed(&self, table: TableRef<K, V>, guard: Guard) {
+        let count = table.count().fetch_add(1, Ordering::Relaxed) + 1;
+        let capacity = table.capacity();
+        // Integer load-factor check: count/cap > 3/4.
+        if 4 * (count.max(0) as usize) > 3 * capacity {
+            drop(guard);
+            self.try_resize(capacity * 2);
         }
     }
-}
 
-impl<K, V> Drop for IntoIter<K, V> {
-    fn drop(&mut self) {
-        while self.next().is_some() {} // drop remaining live K/V + free shells
-        unsafe { self.table.free_array_only() };
-    }
-}
-
-impl<K, V, S> IntoIterator for HashMap<K, V, S>
-where
-    K: 'static,
-    V: 'static,
-{
-    type Item = (K, V);
-    type IntoIter = IntoIter<K, V>;
-
-    fn into_iter(self) -> IntoIter<K, V> {
-        let mut me = core::mem::ManuallyDrop::new(self);
-        let guard = pin();
-        let table = TableRef::<K, V>::from_raw(me.table.load(Ordering::Relaxed, &guard).as_raw());
-        // Suppress HashMap::drop (we own the table now); drop only the hasher —
-        // the remaining fields are atomics / usize / ZST marker.
-        unsafe { core::ptr::drop_in_place(&mut me.hasher) };
-        IntoIter {
-            table,
-            bucket_idx: 0,
-            current: core::ptr::null_mut(),
-            guard,
+    /// Unlink the deleted `node` from `prev`, which named it unmarked, in favour of `succ`. The
+    /// thread whose CAS unlinks a node retires it; when this CAS fails (another snip, or the
+    /// predecessor deleted too), the cleanup walk makes sure the node is unlinked before the
+    /// caller returns.
+    #[inline]
+    fn unlink<Q>(
+        &self,
+        prev: &Atomic<Node<K, V>>,
+        node: &Node<K, V>,
+        succ: *mut Node<K, V>,
+        hash: u64,
+        key: &Q,
+        guard: &Guard,
+    ) where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let raw = node as *const Node<K, V> as *mut Node<K, V>;
+        // AcqRel: as a snip (see `walk::find`).
+        if prev
+            .compare_exchange(
+                word(raw),
+                word(succ),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+                guard,
+            )
+            .is_ok()
+        {
+            // SAFETY: this CAS unlinked it, so no other thread retires it and no link names it
+            // again; a walker that loaded it holds a guard that keeps it. Node is #[repr(C)]
+            // with its RetiredNode at offset 0.
+            unsafe { retire(raw) };
+        } else {
+            self.cleanup(hash, key, guard);
         }
-    }
-}
-
-impl<K, V, S> core::iter::FromIterator<(K, V)> for HashMap<K, V, S>
-where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
-    S: BuildHasher + Default,
-{
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let map = Self::with_capacity_and_hasher(MIN_CAPACITY, S::default());
-        for (k, v) in iter {
-            map.insert(k, v);
-        }
-        map
-    }
-}
-
-#[cfg(feature = "std")]
-impl<K, V> Default for HashMap<K, V, FixedState>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1453,9 +547,9 @@ unsafe impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> Sync for HashMap<K, 
 
 impl<K: 'static, V: 'static, S> Drop for HashMap<K, V, S> {
     fn drop(&mut self) {
-        // SAFETY: `drop(&mut self)` guarantees exclusive ownership — no concurrent
-        // readers can exist.  Rust's type system enforces this: `Iter<'a, …>` borrows
-        // `&'a HashMap`, so it cannot outlive the `HashMap`.  The Table's destructor
+        // SAFETY: `drop(&mut self)` guarantees exclusive ownership - no concurrent
+        // readers can exist. Rust's type system enforces this: `Iter<'a, ...>` borrows
+        // `&'a HashMap`, so it cannot outlive the `HashMap`. The Table's destructor
         // frees its chains.
         let guard = pin();
         let table = TableRef::<K, V>::from_raw(self.table.load(Ordering::Relaxed, &guard).as_raw());
@@ -1469,132 +563,4 @@ impl<K: 'static, V: 'static, S> Drop for HashMap<K, V, S> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_insert_and_get() {
-        let map = HashMap::new();
-        assert_eq!(map.insert(1, 100), None);
-        assert_eq!(map.get(&1), Some(100));
-        assert_eq!(map.get(&2), None);
-    }
-
-    #[test]
-    fn test_insert_replace() {
-        let map = HashMap::new();
-        assert_eq!(map.insert(1, 100), None);
-        assert_eq!(map.insert(1, 200), Some(100));
-        assert_eq!(map.get(&1), Some(200));
-    }
-
-    #[test]
-    fn test_grow() {
-        let map = HashMap::with_capacity(64);
-        assert_eq!(map.capacity(), 64);
-        for i in 0..1000u64 {
-            map.insert(i, i * 2);
-        }
-        assert!(map.capacity() > 64, "map should have grown");
-        for i in 0..1000u64 {
-            assert_eq!(map.get(&i), Some(i * 2));
-        }
-        assert_eq!(map.len(), 1000);
-    }
-
-    #[test]
-    fn test_shrink() {
-        let map = HashMap::with_capacity(64);
-        for i in 0..1000u64 {
-            map.insert(i, i);
-        }
-        let grown = map.capacity();
-        assert!(grown > 64);
-        for i in 0..1000u64 {
-            map.remove(&i);
-        }
-        assert!(
-            map.capacity() < grown,
-            "map should have shrunk (capacity {} -> {})",
-            grown,
-            map.capacity()
-        );
-        assert!(map.capacity() >= 64, "never below the initial capacity");
-        assert_eq!(map.len(), 0);
-    }
-
-    #[test]
-    fn test_no_shrink_below_floor() {
-        let map = HashMap::with_capacity(4096);
-        for i in 0..100u64 {
-            map.insert(i, i);
-        }
-        for i in 0..100u64 {
-            map.remove(&i);
-        }
-        assert_eq!(map.capacity(), 4096, "floor preserves sizing intent");
-    }
-
-    #[test]
-    fn test_concurrent_inserts() {
-        use alloc::sync::Arc;
-        extern crate std;
-        use std::thread;
-
-        let map = Arc::new(HashMap::new());
-        let mut handles = alloc::vec::Vec::new();
-
-        for thread_id in 0..4 {
-            let map_clone = Arc::clone(&map);
-            let handle = thread::spawn(move || {
-                for i in 0..1000 {
-                    let key = thread_id * 1000 + i;
-                    map_clone.insert(key, key * 2);
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        for thread_id in 0..4 {
-            for i in 0..1000 {
-                let key = thread_id * 1000 + i;
-                assert_eq!(map.get(&key), Some(key * 2));
-            }
-        }
-    }
-
-    #[test]
-    fn test_concurrent_grow() {
-        use alloc::sync::Arc;
-        extern crate std;
-        use std::thread;
-
-        let map = Arc::new(HashMap::with_capacity(64));
-        let mut handles = alloc::vec::Vec::new();
-
-        for thread_id in 0..8u64 {
-            let map_clone = Arc::clone(&map);
-            handles.push(thread::spawn(move || {
-                for i in 0..2000u64 {
-                    let key = thread_id * 10_000 + i;
-                    map_clone.insert(key, key);
-                }
-            }));
-        }
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        for thread_id in 0..8u64 {
-            for i in 0..2000u64 {
-                let key = thread_id * 10_000 + i;
-                assert_eq!(map.get(&key), Some(key), "lost key {key} during growth");
-            }
-        }
-        assert!(map.capacity() >= 16_000);
-    }
-}
+mod tests;

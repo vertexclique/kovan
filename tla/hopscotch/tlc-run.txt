@@ -1,0 +1,38 @@
+TLC run of every configuration in tla/hopscotch, 2026-09-27 19:11 UTC.
+Written by tla/run_tlc.sh, not by hand. Version 2.19 of 08 August 2024.
+Java -Xmx8g; -workers 8, or 1 worker where a violation is expected. Limit: 3600 s each.
+
+configuration                         generated   distinct    sec  result                     expected                   match
+HS_disp_get                                3787       1636      1  pass                       pass                       yes
+HS_disp_rem                                2712       1184      1  pass                       pass                       yes
+HS_disp_claim                             32474      10354      2  pass                       pass                       yes
+HS_disp_iter                               1850        808      2  pass                       pass                       yes
+HS_same_home                               2201        978      1  pass                       pass                       yes
+HS_rem_ins                                 4964       2194      1  pass                       pass                       yes
+HS_claim_grow                              5026       2224      2  pass                       pass                       yes
+HS_rem_grow                                8063       3379      1  pass                       pass                       yes
+HS_iter_grow                               6482       2652      2  pass                       pass                       yes
+HS_iter_shrink                             9147       3668      2  pass                       pass                       yes
+HS_clear                                 109048      46958      2  pass                       pass                       yes
+HS_stale                                   2387       1040      1  pass                       pass                       yes
+HS_live                                    2712       1184      1  pass                       pass                       yes
+HS_mut_unguarded_remove                     468        242      1  violated:AbsIsContent      violated:AbsIsContent      yes
+HS_mut_unguarded_remove_moved              1012        480      1  violated:Linearizable      violated:Linearizable      yes
+HS_mut_move_clear_first                     734        337      1  violated:Linearizable      violated:Linearizable      yes
+HS_mut_no_stamp                            1046        485      1  violated:Linearizable      violated:Linearizable      yes
+HS_mut_resize_retry                         481        297      1  violated:Exactness         violated:Exactness         yes
+HS_mut_iter_index                          7916       3378      2  violated:WalkExact         violated:WalkExact         yes
+HS_mut_iter_no_recent                       699        318      1  violated:WalkExact         violated:WalkExact         yes
+HS_wit_move                                 310        145      1  violated:NoMove            violated:NoMove            yes
+HS_wit_stamp_rescan                         768        357      1  violated:NoStampRescan     violated:NoStampRescan     yes
+HS_wit_resize_waits                          47         33      1  violated:NoResizeWaitsForWriter violated:NoResizeWaitsForWriter yes
+HS_wit_held_home                           2161        745      1  violated:NoHeldHomeSkip    violated:NoHeldHomeSkip    yes
+HS_wit_walk_skip                            515        230      1  violated:NoWalkSkip        violated:NoWalkSkip        yes
+HS_big_disp                            14326841    4400666     57  pass                       pass                       yes
+HS_big_claims                            896690     294170      9  pass                       pass                       yes
+HS_mut_link_then_publish                   1133        534      1  violated:Linearizable      violated:Linearizable      yes
+HS_mut_link_then_publish_iter              1554        702      1  violated:WalkExact         violated:WalkExact         yes
+HS_live_reader                             3787       1636      2  pass                       pass                       yes
+HS_live_walker                             1850        808      1  pass                       pass                       yes
+
+results matching EXPECTED.txt: 31 of 31

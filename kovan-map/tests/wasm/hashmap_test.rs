@@ -4,22 +4,22 @@
 //! not ported.
 //!
 //! Not ported (race-only):
-//! - `test_concurrent_insert_read` — 4 writer threads each insert a
+//! - `test_concurrent_insert_read` - 4 writer threads each insert a
 //!   disjoint 1000-key range while 4 reader threads concurrently poll one
 //!   key. The keys never overlap across writers, so the only thing under
 //!   test is that reads happening *at the same time* as writes from real
 //!   OS threads don't crash or corrupt state; sequentially there is no
 //!   concurrent access to survive, and the write half reduces to
 //!   `test_many_entries` below.
-//! - `test_concurrent_remove` — 4 threads remove disjoint key ranges from a
+//! - `test_concurrent_remove` - 4 threads remove disjoint key ranges from a
 //!   pre-populated map; same shape as above (disjoint keys, no actual
 //!   contention to resolve). Sequentially this is just `test_remove` run
 //!   4000 times.
-//! - `test_concurrent_mixed_operations` — 8 threads doing
+//! - `test_concurrent_mixed_operations` - 8 threads doing
 //!   insert/get/remove on disjoint keys, with no assertion beyond "doesn't
 //!   crash". Its entire value is real concurrent access to shared map
 //!   internals; nothing survives without real threads.
-//! - `test_insert_replace_concurrent` — 8 threads race to `insert` the
+//! - `test_insert_replace_concurrent` - 8 threads race to `insert` the
 //!   SAME key with different values, then check the final value is one of
 //!   the 8 thread IDs. The property under test is CAS correctness under a
 //!   same-key race; sequentially the last writer always wins deterministically,
@@ -32,7 +32,7 @@
 //! registers zero tests (which would report a false green).
 //!
 //! Not ported (race-only), all 3:
-//! - `concurrent_insert_if_absent_loses_no_increments` — 16 threads race
+//! - `concurrent_insert_if_absent_loses_no_increments` - 16 threads race
 //!   `insert_if_absent` on the same key, each routing 250 increments through
 //!   whichever `Arc` counter the call resolves to; the assertion is that no
 //!   increment is lost to two racing callers claiming *different* slots for
@@ -40,17 +40,17 @@
 //!   always wins and every later call always resolves to the same `Arc`, so
 //!   the counter total is trivially correct. The non-atomicity failure mode
 //!   this test exists to catch cannot occur without concurrent callers.
-//! - `concurrent_insert_if_absent_has_exactly_one_winner` — same shape,
+//! - `concurrent_insert_if_absent_has_exactly_one_winner` - same shape,
 //!   stated directly: across concurrent same-key callers, at most one may
 //!   be told "absent". With one caller there is exactly one call, so
 //!   "exactly one winner" is true by construction and proves nothing about
 //!   the atomicity of the CAS under contention.
-//! - `insert_if_absent_survives_concurrent_resizes` — pairs churn threads
+//! - `insert_if_absent_survives_concurrent_resizes` - pairs churn threads
 //!   (forcing repeated table grows) against counter threads contending on
 //!   one hot key, checking the counter isn't lost or double-claimed during
 //!   a live migration. Sequentially there is no concurrent migration to
-//!   race against — inserts and the `insert_if_absent` calls just happen in
-//!   program order — so the property under test (the resolved entry stays
+//!   race against - inserts and the `insert_if_absent` calls just happen in
+//!   program order - so the property under test (the resolved entry stays
 //!   reachable through a resize that is happening *at the same time* as the
 //!   claim) has no single-threaded analogue. Basic `insert_if_absent`
 //!   semantics and basic resize-survives-inserted-keys behavior are already

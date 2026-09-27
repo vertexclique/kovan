@@ -102,6 +102,7 @@
 
 mod hashmap;
 mod hopscotch;
+mod sync;
 
 pub use hashmap::*;
 pub use hopscotch::*;

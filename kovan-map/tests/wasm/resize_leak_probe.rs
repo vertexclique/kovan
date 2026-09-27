@@ -7,8 +7,8 @@
 //! `hopscotch_concurrent_resize_accounting`) are adapted to run the same
 //! total number of create/drop-tracked inserts and removes from one thread
 //! instead of across `CONCURRENT_THREADS` real threads. The property under
-//! test — exact create/drop parity across grows, shrinks, and retires, with
-//! no leak and no double-free — doesn't depend on concurrency to hold; what
+//! test - exact create/drop parity across grows, shrinks, and retires, with
+//! no leak and no double-free - doesn't depend on concurrency to hold; what
 //! is lost is coverage of a resize racing with several writers touching
 //! *different* keys at the same time (accounting staying exact under that
 //! interleaving specifically), which has no single-threaded analogue. The
@@ -142,7 +142,7 @@ fn hashmap_resize_frees_old_entries() {
 /// The original spread the same total insert/remove workload across
 /// `CONCURRENT_THREADS` real threads to drive a grow while several writers
 /// raced on different keys. This runs the identical total number of
-/// operations (`LOAD_THREADS_EQUIVALENT * LOAD_ITERS`) from one thread — it
+/// operations (`LOAD_THREADS_EQUIVALENT * LOAD_ITERS`) from one thread - it
 /// still forces the same growth pattern and checks the same exact
 /// create/drop parity, just without a resize racing concurrent writers.
 #[test]
