@@ -434,15 +434,6 @@ impl<K, V> Table<K, V> {
         unsafe { self.buckets.get_unchecked(idx) }
     }
 
-    /// Prefetch the entry of slot `idx`, if the table has that slot, for a walk that gets there
-    /// soon.
-    #[inline(always)]
-    pub(super) fn prefetch_slot(&self, idx: usize, guard: &kovan::Guard) {
-        if idx < self.buckets.len() {
-            self.read_ahead(idx, guard);
-        }
-    }
-
     /// Slot `idx`'s entry for a [`Walk`], prefetched (a free slot prefetches the table itself,
     /// which keeps the prefetch free of a branch). Acquire: pairs with the release that linked
     /// the entry, so its fields are visible.

@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use super::table::{Entry, Table, WALK_AHEAD, Walk, Word};
+use super::table::{Entry, Table, Walk, Word};
 use super::{HopscotchMap, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
@@ -38,6 +38,7 @@ impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
             table,
             bucket_idx: 0,
             recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
+            recent_hash: [0; NEIGHBORHOOD_SIZE],
             same_key: <K as PartialEq>::eq,
             guard,
             _map: PhantomData,
@@ -64,6 +65,9 @@ pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
     /// `i % NEIGHBORHOOD_SIZE`, null for a free slot),
     /// loaded under `guard`: how the walk recognizes a key it already met.
     recent: [*const Entry<K, V>; NEIGHBORHOOD_SIZE],
+    /// The hash of the entry in each slot of `recent` (meaningless for a free slot): the walk
+    /// compares hashes here, in its own memory, and reads an earlier entry only on a match.
+    recent_hash: [u64; NEIGHBORHOOD_SIZE],
     /// `K`'s equality, taken where `iter` is built.
     same_key: fn(&K, &K) -> bool,
     guard: kovan::Guard,
@@ -79,12 +83,15 @@ impl<K, V, S> HopscotchIter<'_, K, V, S> {
     fn met_before(&self, home: usize, idx: usize, entry: &Entry<K, V>) -> bool {
         let lowest = home.max(idx.saturating_sub(NEIGHBORHOOD_SIZE - 1));
         (lowest..idx).any(|seen_idx| {
-            let seen = self.recent[seen_idx % NEIGHBORHOOD_SIZE];
+            let slot = seen_idx % NEIGHBORHOOD_SIZE;
+            if self.recent_hash[slot] != entry.hash {
+                return false;
+            }
+            let seen = self.recent[slot];
             // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
             // being freed.
             unsafe { seen.as_ref() }.is_some_and(|seen| {
-                seen.hash == entry.hash
-                    && (core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key))
+                core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key)
             })
         })
     }
@@ -107,10 +114,6 @@ where
         while self.bucket_idx < table.buckets.len() {
             let idx = self.bucket_idx;
             self.bucket_idx += 1;
-            // The entry of a slot ahead reaches the cache while this walk works on the slots in
-            // between. Only a prefetch: the walk reads that slot again when it gets there, so it
-            // meets what the slot holds then, as a walk without the prefetch does.
-            table.prefetch_slot(idx + WALK_AHEAD, &self.guard);
             let entry_ptr: *const Entry<K, V> = table
                 .get_bucket(idx)
                 .load(Ordering::Acquire, &self.guard)
@@ -121,6 +124,7 @@ where
             let Some(entry) = (unsafe { entry_ptr.as_ref() }) else {
                 continue;
             };
+            self.recent_hash[idx % NEIGHBORHOOD_SIZE] = entry.hash;
             if !self.met_before(table.bucket_index(entry.hash), idx, entry) {
                 return Some((entry.key.clone(), entry.value.clone()));
             }
