@@ -29,6 +29,13 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --release
 
+      # Every `[[bench]]` target here sets `harness = false` (criterion owns
+      # its own main), so `cargo test` never builds them and `clippy
+      # --all-targets` only type-checks them without full codegen. Build them
+      # for real so a bench-only compile error has a job that catches it.
+      - name: Build benches
+        run: cargo build --workspace --benches --release
+
   test-debug:
     name: Test debug (overflow checks, debug assertions)
     runs-on: ubuntu-latest
