@@ -45,6 +45,15 @@ struct WriteEntry {
     lock_atomic: *const AtomicU64,
 }
 
+/// Clear the lock bit of every entry an aborting commit locked, leaving each version as it was.
+fn unlock<'e>(locked: impl Iterator<Item = &'e WriteEntry>) {
+    for entry in locked {
+        // SAFETY: the committer closure of the same entry holds an `Arc` of the `TVarInner`
+        // this points into, so the atomic lives as long as the write set does.
+        unsafe { &*entry.lock_atomic }.fetch_and(!1, Ordering::Release);
+    }
+}
+
 /// Representation of a transaction in STM.
 pub struct Transaction<'a> {
     stm: &'a Stm,
@@ -259,8 +268,10 @@ impl<'a> Transaction<'a> {
             let mut current = lock_atomic.load(Ordering::Acquire);
             loop {
                 if current & 1 == 1 {
-                    // Locked by someone else -> Abort
+                    // Locked by another committer: abort, releasing the locks already taken.
+                    // One kept is never released, and no transaction touching it could commit.
                     // self is dropped here, committed is false -> rollback hooks run
+                    unlock(write_set.range(..*id).map(|(_, e)| e));
                     return false;
                 }
                 match lock_atomic.compare_exchange_weak(
@@ -276,32 +287,11 @@ impl<'a> Transaction<'a> {
 
             // Check if we read this variable. If so, validate version.
             if let Some(read_entry) = self.read_set.get(id) {
-                // current is the value before we set bit 1
-                let locked_version = current;
-                if locked_version > read_entry.version {
-                    // Version changed since we read it -> Abort
-                    // We must release locks we already acquired!
-                    // But wait, we are in the middle of acquiring locks.
-                    // We need to release THIS lock and ALL PREVIOUS locks.
-
-                    // Release THIS lock
-                    lock_atomic.store(current, Ordering::Release);
-
-                    // Release PREVIOUS locks
-                    // We need to iterate write_set again up to this point?
-                    // Or just iterate all and release if locked by us?
-                    // Since we are iterating BTreeMap, order is deterministic.
-                    // We can iterate from start until `id`.
-
-                    for (prev_id, prev_entry) in &write_set {
-                        if prev_id == id {
-                            break;
-                        }
-                        let prev_lock = unsafe { &*prev_entry.lock_atomic };
-                        // Unlock: clear bit 1.
-                        prev_lock.fetch_and(!1, Ordering::Release);
-                    }
-
+                // current is the value before we set bit 0
+                if current > read_entry.version {
+                    // Version changed since we read it: abort, releasing this lock and
+                    // every one taken before it.
+                    unlock(write_set.range(..=*id).map(|(_, e)| e));
                     return false;
                 }
             }
@@ -348,10 +338,7 @@ impl<'a> Transaction<'a> {
 
         if !valid {
             // Release locks and abort
-            for entry in write_set.values() {
-                let lock_atomic = unsafe { &*entry.lock_atomic };
-                lock_atomic.fetch_and(!1, Ordering::Release);
-            }
+            unlock(write_set.values());
             // self dropped here -> rollback hooks run
             return false;
         }
@@ -418,5 +405,46 @@ mod tests {
 
         let result = stm.atomically(|tx| tx.load(&var));
         assert_eq!(result, 42);
+    }
+
+    /// A commit that meets a write-set variable locked by another committer aborts and
+    /// releases every lock it already took. A lock kept there is never released: every later
+    /// transaction touching that variable retries forever.
+    #[test]
+    fn commit_aborting_on_a_held_lock_releases_the_locks_it_took() {
+        use super::Transaction;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let stm = Stm::new();
+        let (a, b) = (stm.tvar(1i64), stm.tvar(2i64));
+        // Commit locks in address order: hold the later variable's lock, as a concurrent
+        // committer would, so the earlier one is taken first.
+        let (first, second) = if Arc::as_ptr(&a.0) < Arc::as_ptr(&b.0) {
+            (&a, &b)
+        } else {
+            (&b, &a)
+        };
+        second.0.version_lock.fetch_or(1, Ordering::AcqRel);
+        {
+            let guard = kovan::pin();
+            let mut tx = Transaction::new(&stm, &guard);
+            tx.store(first, 10).unwrap();
+            tx.store(second, 20).unwrap();
+            assert!(!tx.commit(), "a commit meeting a held lock must abort");
+        }
+        assert_eq!(
+            first.0.load_version_lock(),
+            (false, 0),
+            "the aborted commit kept the lock it took"
+        );
+        second.0.version_lock.fetch_and(!1, Ordering::AcqRel);
+
+        stm.atomically(|tx| {
+            tx.store(first, 11)?;
+            tx.store(second, 21)
+        });
+        let both = stm.atomically(|tx| Ok((tx.load(first)?, tx.load(second)?)));
+        assert_eq!(both, (11, 21));
     }
 }
