@@ -175,17 +175,19 @@ IC(p) ==
                /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h), ![p].pc = "IS"]
     /\ UNCHANGED <<ent, cur, latch, count, abs, hist, err, prot>>
 
-\* The key's entry under the guard (a stable scan): answered, replaced, or absent.
+\* The key's entry under the guard (a stable scan): answered, replaced, or absent. As RS, the
+\* scan reads the entries its bits name unprotected (`find_held`), so every one must be live.
 IS(p) ==
     /\ ts[p].pc = "IS"
     /\ LET t == ts[p].t
            h == ts[p].h
            found == {o \in ts[p].hw.hops : tb.slot[t][h + o] # 0 /\ ent.key[tb.slot[t][h + o]] = K(p)}
            e == IF found = {} THEN 0 ELSE tb.slot[t][h + Min(found)]
+           held == HeldScan(t, h, ts[p].hw.hops)
        IN CASE e # 0 /\ Op(p).op \in {"iia", "goi"} ->
                  /\ ts' = [ts EXCEPT ![p].res = ent.val[e], ![p].out = "exists", ![p].pc = "IR"]
-                 /\ prot' = [prot EXCEPT ![p] = Protect(@, e)]
-                 /\ UNCHANGED <<ent, tb, abs, hist, err>>
+                 /\ err' = held
+                 /\ UNCHANGED <<ent, tb, abs, hist, prot>>
             [] e # 0 /\ FreeEnts = {} ->
                  /\ err' = Fail("pool")
                  /\ ts' = Go(p, "done")
@@ -197,10 +199,12 @@ IS(p) ==
                  /\ abs' = [abs EXCEPT ![K(p)] = V(p)]
                  /\ hist' = Append(hist, <<K(p), V(p)>>)
                  /\ ts' = [ts EXCEPT ![p].res = ent.val[e], ![p].out = "replaced", ![p].pc = "IR"]
-                 /\ UNCHANGED <<err, prot>>
+                 /\ err' = held
+                 /\ UNCHANGED prot
             [] OTHER ->
                  /\ ts' = [ts EXCEPT ![p].off = 0, ![p].pc = "IFr"]
-                 /\ UNCHANGED <<ent, tb, abs, hist, err, prot>>
+                 /\ err' = held
+                 /\ UNCHANGED <<ent, tb, abs, hist, prot>>
     /\ UNCHANGED <<cur, latch, count>>
 
 Late == Mutation = "link_then_publish"

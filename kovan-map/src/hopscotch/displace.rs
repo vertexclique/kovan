@@ -35,11 +35,12 @@ where
         let hash = pending.key_hash();
 
         // 1. The key's entry. The scan is stable: only this guard's holder links, replaces,
-        // unlinks or moves an entry of the home.
-        let existing = table.find(home.idx, home.hops(), hash, pending.key(), guard);
+        // unlinks or moves an entry of the home, so it reads the entries unprotected.
+        let existing = table.find_held(home, hash, pending.key(), guard);
         if let Some((offset, found_word)) = existing {
             let found_ptr = found_word.ptr();
-            // SAFETY: loaded under `guard`, which keeps it from being freed.
+            // SAFETY: an entry of the home this call holds the guard of, so no other thread
+            // unlinks or retires it.
             let found = unsafe { &*found_ptr };
             if only_if_absent {
                 return InsertResult::Exists(found.value.clone());

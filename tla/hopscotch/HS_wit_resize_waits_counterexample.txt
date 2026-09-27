@@ -20,12 +20,12 @@ State 1: <Initial predicate>
 /\ count = 2
 /\ tb = [ cap |-> <<2, 0>>,
   st |-> <<"current", "unused">>,
-  slot |->
-      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
-         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   hops |->
       << (0 :> {0} @@ 1 :> {0} @@ 2 :> {} @@ 3 :> {}),
          (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {}) >>,
+  slot |->
+      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
+         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   stamp |->
       << (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
          (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0) >>,
@@ -140,7 +140,7 @@ State 1: <Initial predicate>
 /\ latch = FALSE
 /\ err = "none"
 
-State 2: <Dispatch line 135, col 5 to line 146, col 69 of module HopscotchMap>
+State 2: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -160,12 +160,12 @@ State 2: <Dispatch line 135, col 5 to line 146, col 69 of module HopscotchMap>
 /\ count = 2
 /\ tb = [ cap |-> <<2, 0>>,
   st |-> <<"current", "unused">>,
-  slot |->
-      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
-         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   hops |->
       << (0 :> {0} @@ 1 :> {0} @@ 2 :> {} @@ 3 :> {}),
          (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {}) >>,
+  slot |->
+      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
+         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   stamp |->
       << (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
          (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0) >>,
@@ -280,7 +280,7 @@ State 2: <Dispatch line 135, col 5 to line 146, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 3: <IW line 157, col 5 to line 160, col 69 of module HopscotchMap>
+State 3: <IW line 161, col 5 to line 164, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -300,12 +300,12 @@ State 3: <IW line 157, col 5 to line 160, col 69 of module HopscotchMap>
 /\ count = 2
 /\ tb = [ cap |-> <<2, 0>>,
   st |-> <<"current", "unused">>,
-  slot |->
-      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
-         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   hops |->
       << (0 :> {0} @@ 1 :> {0} @@ 2 :> {} @@ 3 :> {}),
          (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {}) >>,
+  slot |->
+      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
+         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   stamp |->
       << (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
          (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0) >>,
@@ -420,7 +420,7 @@ State 3: <IW line 157, col 5 to line 160, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 4: <IC line 164, col 5 to line 172, col 65 of module HopscotchMap>
+State 4: <IC line 168, col 5 to line 176, col 65 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -440,12 +440,12 @@ State 4: <IC line 164, col 5 to line 172, col 65 of module HopscotchMap>
 /\ count = 2
 /\ tb = [ cap |-> <<2, 0>>,
   st |-> <<"current", "unused">>,
-  slot |->
-      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
-         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   hops |->
       << (0 :> {0} @@ 1 :> {0} @@ 2 :> {} @@ 3 :> {}),
          (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {}) >>,
+  slot |->
+      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
+         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   stamp |->
       << (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
          (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0) >>,
@@ -560,7 +560,7 @@ State 4: <IC line 164, col 5 to line 172, col 65 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 5: <Z0 line 681, col 5 to line 689, col 62 of module HopscotchMap>
+State 5: <Z0 line 694, col 5 to line 702, col 62 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -580,12 +580,12 @@ State 5: <Z0 line 681, col 5 to line 689, col 62 of module HopscotchMap>
 /\ count = 2
 /\ tb = [ cap |-> <<2, 0>>,
   st |-> <<"current", "unused">>,
-  slot |->
-      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
-         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   hops |->
       << (0 :> {0} @@ 1 :> {0} @@ 2 :> {} @@ 3 :> {}),
          (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {}) >>,
+  slot |->
+      << (0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0),
+         (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0 @@ 4 :> 0 @@ 5 :> 0) >>,
   stamp |->
       << (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
          (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0) >>,
