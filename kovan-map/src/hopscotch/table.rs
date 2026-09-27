@@ -78,6 +78,23 @@ impl<K, V> Bucket<K, V> {
         Word(self.slot.load(order, guard))
     }
 
+    /// This bucket's slot, read by the holder of the writer guard of the home whose hop bits
+    /// name it: `guard` need not protect the entry, as only that holder unlinks or retires it.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the writer guard of a home of a live table whose hop bits name this
+    /// slot, and uses the entry only while it holds that guard (or after unlinking it itself).
+    #[inline(always)]
+    pub(super) unsafe fn load_held<'g>(
+        &self,
+        order: Ordering,
+        guard: &'g kovan::Guard,
+    ) -> Word<'g, K, V> {
+        // SAFETY: the caller's contract: no other thread retires the entry meanwhile.
+        Word(unsafe { self.slot.load_unprotected(order, guard) })
+    }
+
     /// Store `word` in this bucket's slot.
     #[inline(always)]
     pub(super) fn store(&self, word: Word<'_, K, V>, order: Ordering) {
@@ -532,7 +549,7 @@ impl<K, V> Table<K, V> {
     }
 
     /// The entry of `key` among the slots `hops` names past the home `home`, and its offset
-    /// there. An entry whose tag differs from `hash`'s is skipped without being read.
+    /// there, for a reader: every entry read is protected by `guard`.
     #[inline]
     pub(super) fn find<'g, Q>(
         &self,
@@ -546,15 +563,56 @@ impl<K, V> Table<K, V> {
         K: Borrow<Q>,
         Q: Eq + ?Sized,
     {
+        // Acquire: pairs with the release that linked the entry, so its fields are visible.
+        self.scan(home, hops, hash, key, |bucket| {
+            bucket.load(Ordering::Acquire, guard)
+        })
+    }
+
+    /// [`find`](Self::find) for the holder of the home's writer guard `held`, the one thread
+    /// that unlinks or retires an entry of the home until it releases the guard: the entries
+    /// read need no protection of `guard`.
+    #[inline]
+    pub(super) fn find_held<'g, Q>(
+        &self,
+        held: &HomeGuard<'_>,
+        hash: u64,
+        key: &Q,
+        guard: &'g kovan::Guard,
+    ) -> Option<(usize, Word<'g, K, V>)>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        // Acquire: pairs with the release that linked the entry, so its fields are visible.
+        // SAFETY: `held` is the guard of the home whose bits name every slot read, of this
+        // table, which is live while its guard is held (a resize takes every guard first).
+        self.scan(held.idx, held.hops(), hash, key, |bucket| unsafe {
+            bucket.load_held(Ordering::Acquire, guard)
+        })
+    }
+
+    /// The scan of [`find`](Self::find) and [`find_held`](Self::find_held), reading a slot with
+    /// `load`. An entry whose tag differs from `hash`'s is skipped without being read.
+    #[inline(always)]
+    fn scan<'g, Q>(
+        &self,
+        home: usize,
+        hops: u32,
+        hash: u64,
+        key: &Q,
+        load: impl Fn(&Bucket<K, V>) -> Word<'g, K, V>,
+    ) -> Option<(usize, Word<'g, K, V>)>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let tag = tag(hash);
         let mut rest = hops;
         while rest != 0 {
             let offset = rest.trailing_zeros() as usize;
             rest &= rest - 1;
-            // Acquire: pairs with the release that linked the entry, so its fields are visible.
-            let word = self
-                .get_bucket(home + offset)
-                .load(Ordering::Acquire, guard);
+            let word = load(self.get_bucket(home + offset));
             if word.has_tag(tag)
                 && let Some(entry) = word.entry()
                 && entry.hash == hash

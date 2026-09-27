@@ -184,6 +184,9 @@ The run recorded in `chained/tlc-run.txt` (8 workers, beside other work on a 36-
   the release), DL (the link into the freed slot, through IL), ICnt, IR (the guard released,
   `table.rs:125`), IA, and NR (no room: the writer resizes itself, `hopscotch.rs:199`).
 - `hopscotch.rs:351` `remove`: RW, RC, RS (the key's entry unlinked under the guard), RN, RR, RT.
+  RS reads the entries its bits name without protecting them (`table.rs` `find_held`): the
+  guard's holder is the only thread that unlinks or retires an entry of the home, so RS checks
+  that every entry it reads is live (`HeldScan`, a use after free otherwise).
 - `hopscotch/iter.rs:97` `next` and `:77` `met_before`: T0, T1, T9 (the walk keeps its table and
   skips a key it met in the lower slots of the key's neighborhood).
 - `hopscotch/resize.rs:103` `try_resize`, `:32` `hold_writers`, `:170` `copy_into`: Z0 to Z4 (every

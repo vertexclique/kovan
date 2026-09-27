@@ -80,6 +80,10 @@ Protect(P, e) == IF e # 0 /\ ent.st[e] = "live" THEN P \cup {e} ELSE P
 FreeEnts == {e \in Ents : ent.st[e] = "free"}
 Alloc(en, e, k, v) == [en EXCEPT !.st[e] = "live", !.key[e] = k, !.val[e] = v]
 Fail(e) == IF err = "none" THEN e ELSE err
+\* A scan by the holder of home h's guard in table t reads the entries of the slots `hops` names
+\* without protecting them: a use after free unless every one is live.
+HeldScan(t, h, hops) == IF \A o \in hops : tb.slot[t][h + o] = 0 \/ ent.st[tb.slot[t][h + o]] = "live"
+                        THEN err ELSE Fail("uaf")
 
 Op(p) == Prog[p][ts[p].i]
 K(p) == Op(p).k
@@ -496,7 +500,9 @@ RC(p) ==
                         /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h), ![p].pc = "RS"]
     /\ UNCHANGED <<ent, cur, latch, count, abs, hist, err, prot>>
 
-\* The key's entry under the guard, unlinked by a store (0.1.20: found, then a CAS).
+\* The key's entry under the guard, unlinked by a store (0.1.20: found, then a CAS). The scan
+\* reads the entries its bits name unprotected (`find_held`): the guard's holder is the only
+\* thread that unlinks or retires an entry of the home, so every entry read must be live.
 RS(p) ==
     /\ ts[p].pc = "RS"
     /\ LET t == ts[p].t
@@ -504,26 +510,29 @@ RS(p) ==
            found == {o \in ts[p].hw.hops : tb.slot[t][h + o] # 0 /\ ent.key[tb.slot[t][h + o]] = K(p)}
            o == IF found = {} THEN 0 ELSE Min(found)
            e == IF found = {} THEN 0 ELSE tb.slot[t][h + o]
+           held == HeldScan(t, h, ts[p].hw.hops)
        IN CASE e = 0 /\ Unguarded ->
                  /\ ts' = Go(p, "R9")
-                 /\ UNCHANGED <<tb, abs, hist, prot>>
+                 /\ UNCHANGED <<tb, abs, hist, prot, err>>
             [] e = 0 ->
                  /\ tb' = [tb EXCEPT !.grd[t][h] = FALSE]
                  /\ ts' = Go(p, "R9")
+                 /\ err' = held
                  /\ UNCHANGED <<abs, hist, prot>>
             [] Unguarded ->
                  /\ ts' = [ts EXCEPT ![p].e = e, ![p].off = o, ![p].pc = "RX"]
                  /\ prot' = [prot EXCEPT ![p] = Protect(@, e)]
-                 /\ UNCHANGED <<tb, abs, hist>>
+                 /\ UNCHANGED <<tb, abs, hist, err>>
             [] OTHER ->
                  /\ tb' = [tb EXCEPT !.slot[t][h + o] = 0]
                  /\ abs' = [abs EXCEPT ![K(p)] = None]
                  /\ hist' = Append(hist, <<K(p), None>>)
-                 /\ prot' = [prot EXCEPT ![p] = Protect(@, e)]
+                 /\ err' = held
                  /\ ts' = [ts EXCEPT ![p].e = e, ![p].hw.hops = @ \ {o},
                                      ![p].res = IF ts[p].res # None THEN @ ELSE ent.val[e],
                                      ![p].rmv = TRUE, ![p].pc = "RN"]
-    /\ UNCHANGED <<ent, cur, latch, count, err>>
+                 /\ UNCHANGED prot
+    /\ UNCHANGED <<ent, cur, latch, count>>
 
 \* 0.1.20: the unlink CAS; an entry moved meanwhile makes the call answer None.
 RX(p) ==

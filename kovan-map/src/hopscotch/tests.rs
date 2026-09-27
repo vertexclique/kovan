@@ -663,3 +663,47 @@ fn a_displacement_moves_another_entry_when_one_home_is_held() {
     }
     assert_eq!(walked_keys(&map), keys_and(&[64, 66]));
 }
+
+/// The identity hash of a key with the tag `tag` (the hash's top bits) and the low bits `low`.
+fn tagged(tag: u64, low: u64) -> u64 {
+    (tag << 60) | low
+}
+
+/// The scan a writer makes under its home's guard (`find_held`, which protects no entry it reads)
+/// answers what a reader's scan (`find`) answers: each key of the home at its slot, past entries
+/// of the home with another tag or with the same tag and another key, and nothing for an absent
+/// key, whether its tag matches an entry's or none. Home 0's keys sit in slots 0..4 and key 1 of
+/// home 1 in slot 4, which home 0's bits do not name.
+#[test]
+fn a_scan_under_the_home_guard_answers_as_a_reader_scan() {
+    let map = HopscotchMap::<u64, u64, Identity>::with_capacity_and_hasher(64, Identity);
+    let home_0 = [tagged(0, 0), tagged(1, 64), tagged(1, 128), tagged(2, 0)];
+    for k in home_0.into_iter().chain([1]) {
+        assert_eq!(map.insert(k, k), None);
+    }
+    let guard = pin();
+    let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
+    let home = table.home_guard(0).expect("no writer holds home 0");
+    assert_eq!(home.hops(), 0b1111, "home 0's keys in slots 0..4");
+    let key_of = |found: Option<(usize, Word<'_, u64, u64>)>| {
+        found.map(|(offset, word)| (offset, word.entry().map(|entry| entry.key)))
+    };
+    for (offset, k) in home_0.into_iter().enumerate() {
+        let held = key_of(table.find_held(&home, k, &k, &guard));
+        assert_eq!(held, Some((offset, Some(k))), "key {k:#x}");
+        assert_eq!(held, key_of(table.find(0, home.hops(), k, &k, &guard)));
+    }
+    for k in [tagged(1, 192), tagged(3, 0), 64] {
+        assert_eq!(
+            key_of(table.find_held(&home, k, &k, &guard)),
+            None,
+            "absent key {k:#x}"
+        );
+        assert_eq!(key_of(table.find(0, home.hops(), k, &k, &guard)), None);
+    }
+    drop(home);
+    for k in home_0.into_iter().chain([1]) {
+        assert_eq!(map.remove(&k), Some(k), "key {k:#x}");
+    }
+    assert!(map.is_empty());
+}

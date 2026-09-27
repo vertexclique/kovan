@@ -401,9 +401,12 @@ where
                 spin_hint();
                 continue;
             };
-            let (offset, word) = table.find(home_idx, home.hops(), hash, key, &guard)?;
+            // The scan reads the home's entries without protecting them: only the holder of
+            // `home` unlinks or retires one.
+            let (offset, word) = table.find_held(&home, hash, key, &guard)?;
             let entry_ptr = word.ptr();
-            // SAFETY: loaded under `guard`, which keeps it from being freed.
+            // SAFETY: an entry of the home this call holds the guard of, so no other thread
+            // unlinks or retires it.
             let old_value = unsafe { &*entry_ptr }.value.clone();
             // A store, not a CAS: no other thread writes an occupied slot of a home whose guard
             // this call holds. Release: a reader that acquires the free slot sees everything this
