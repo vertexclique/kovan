@@ -1,0 +1,29 @@
+name: TLA+
+
+# Model-checking scripts are DISCOVERED, never hand-listed: `tla.sh` picks up
+# any `tla/<name>/run_tlc.sh` from `cargo metadata`-independent globbing, so a
+# new model directory needs no change here. The job passes trivially until
+# the first model lands.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tla:
+    name: TLA+ model checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Run TLA+ models
+        run: .github/workflows/tla.sh
