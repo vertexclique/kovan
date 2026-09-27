@@ -34,9 +34,10 @@ where
     }
 }
 
-/// A snapshot copy: a new map with the same capacity and a clone of the hasher, populated by
-/// inserting a clone of every entry this map held at some point during the walk. Like `iter`, a
-/// concurrent write to `self` during the clone may or may not be reflected in the result.
+/// A snapshot copy: a new map with the same capacity, the same shrink floor and a clone of the
+/// hasher, populated by inserting a clone of every entry this map held at some point during the
+/// walk. Like `iter`, a concurrent write to `self` during the clone may or may not be reflected
+/// in the result.
 impl<K, V, S> Clone for HashMap<K, V, S>
 where
     K: Hash + Eq + Clone + 'static,
@@ -44,7 +45,10 @@ where
     S: BuildHasher + Clone,
 {
     fn clone(&self) -> Self {
-        let cloned = Self::with_capacity_and_hasher(self.capacity(), self.hasher().clone());
+        let mut cloned = Self::with_capacity_and_hasher(self.capacity(), self.hasher().clone());
+        // The source's floor, not its current size: sized for the entries it holds now, the
+        // clone still shrinks back as far as the source would once they are removed.
+        cloned.floor = self.floor;
         for (k, v) in self.iter() {
             cloned.insert(k, v);
         }

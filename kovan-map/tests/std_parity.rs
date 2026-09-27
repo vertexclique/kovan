@@ -229,6 +229,48 @@ fn hashmap_clone_is_an_independent_snapshot() {
     assert_ne!(map.len(), cloned.len());
 }
 
+/// A clone of a grown map is sized like its source and, once emptied, shrinks back exactly as
+/// far as the source does, never holding the grown table forever.
+#[test]
+fn hopscotch_clone_of_a_grown_map_shrinks_like_its_source() {
+    let map: HopscotchMap<u64, u64> = HopscotchMap::with_capacity(64);
+    for i in 0..10_000 {
+        map.insert(i, i);
+    }
+    let cloned = map.clone();
+    assert_eq!(cloned.capacity(), map.capacity());
+    for i in 0..10_000 {
+        assert_eq!(map.remove(&i), Some(i));
+        assert_eq!(cloned.remove(&i), Some(i));
+    }
+    assert_eq!(cloned.capacity(), map.capacity());
+}
+
+#[test]
+fn hashmap_clone_of_a_grown_map_shrinks_like_its_source() {
+    let map: KHashMap<u64, u64> = (0..10_000).map(|i| (i, i)).collect();
+    let grown = map.capacity();
+    let cloned = map.clone();
+    assert_eq!(cloned.capacity(), grown);
+    for i in 0..10_000 {
+        assert_eq!(map.remove(&i), Some(i));
+        assert_eq!(cloned.remove(&i), Some(i));
+    }
+    assert!(map.capacity() < grown, "the source shrinks back");
+    assert_eq!(cloned.capacity(), map.capacity());
+
+    // A sized map's floor survives the clone too.
+    let sized: KHashMap<u64, u64> = KHashMap::with_capacity(4096);
+    for i in 0..100 {
+        sized.insert(i, i);
+    }
+    let cloned = sized.clone();
+    for i in 0..100 {
+        assert_eq!(cloned.remove(&i), Some(i));
+    }
+    assert_eq!(cloned.capacity(), 4096);
+}
+
 #[test]
 fn hopscotch_extend_matches_std_owned_and_borrowed() {
     let mut map: HopscotchMap<i32, i32> = HopscotchMap::new();
