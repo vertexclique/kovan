@@ -427,6 +427,12 @@ impl<K, V> Table<K, V> {
         (hash as usize) & self.mask
     }
 
+    /// The mask [`bucket_index`](Self::bucket_index) applies to a hash.
+    #[inline(always)]
+    pub(super) fn home_mask(&self) -> usize {
+        self.mask
+    }
+
     #[inline(always)]
     pub(super) fn get_bucket(&self, idx: usize) -> &Bucket<K, V> {
         // SAFETY: Internal indices are calculated via mask or bounded offset loops.

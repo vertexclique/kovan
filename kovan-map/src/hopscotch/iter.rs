@@ -34,8 +34,13 @@ impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
     pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
         let guard = pin();
         let table = self.table.load(Ordering::Acquire, &guard).as_raw();
+        // SAFETY: loaded under `guard`, which the iterator keeps.
+        let current = unsafe { &*table };
+        let (slots, mask) = (current.buckets.len(), current.home_mask());
         HopscotchIter {
             table,
+            slots,
+            mask,
             bucket_idx: 0,
             recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
             recent_hash: [0; NEIGHBORHOOD_SIZE],
@@ -60,6 +65,9 @@ impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
 pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
     /// The table the walk started on, loaded under `guard`.
     table: *const Table<K, V>,
+    /// `table`'s slot count and home mask, read once: the walk never reloads them.
+    slots: usize,
+    mask: usize,
     bucket_idx: usize,
     /// The entry the walk read in each of its last `NEIGHBORHOOD_SIZE` slots (slot `i` at
     /// `i % NEIGHBORHOOD_SIZE`, null for a free slot),
@@ -111,21 +119,26 @@ where
         // is held.
         let table = unsafe { &*self.table };
 
-        while self.bucket_idx < table.buckets.len() {
+        while self.bucket_idx < self.slots {
             let idx = self.bucket_idx;
             self.bucket_idx += 1;
             let entry_ptr: *const Entry<K, V> = table
                 .get_bucket(idx)
                 .load(Ordering::Acquire, &self.guard)
                 .ptr();
-            self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
             // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
             // being freed.
             let Some(entry) = (unsafe { entry_ptr.as_ref() }) else {
+                // A free slot leaves its cell as it was. A stale cell (an entry met at least
+                // `NEIGHBORHOOD_SIZE` slots back) never matches: an entry's two slots in a move,
+                // or two entries of one key, share a home and so lie within one neighborhood,
+                // and `met_before` reads no cell below the home. The walk's guard keeps a stale
+                // entry allocated.
                 continue;
             };
+            self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
             self.recent_hash[idx % NEIGHBORHOOD_SIZE] = entry.hash;
-            if !self.met_before(table.bucket_index(entry.hash), idx, entry) {
+            if !self.met_before((entry.hash as usize) & self.mask, idx, entry) {
                 return Some((entry.key.clone(), entry.value.clone()));
             }
         }
