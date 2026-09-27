@@ -24,10 +24,10 @@
 extern crate alloc;
 
 use crate::sync::spin_hint;
+use crate::sync::{AtomicBool, AtomicUsize};
 use alloc::boxed::Box;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
-use crate::sync::{AtomicBool, AtomicUsize};
 use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;

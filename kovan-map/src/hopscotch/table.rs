@@ -7,10 +7,10 @@
 extern crate alloc;
 
 use super::{MIN_CAPACITY, NEIGHBORHOOD_SIZE};
+use crate::sync::AtomicU64;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
-use crate::sync::AtomicU64;
 use core::sync::atomic::Ordering;
 use kovan::{Atomic, RetiredNode, Shared, pin};
 

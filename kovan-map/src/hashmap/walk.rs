@@ -129,7 +129,12 @@ where
     /// The readers' walk: the node of `key`, not deleted when its `next` was loaded (the
     /// answer's linearization point), or `None` when the walk reached the chain's end.
     #[inline]
-    pub(super) fn lookup<'g, Q>(&self, hash: u64, key: &Q, guard: &'g Guard) -> Option<&'g Node<K, V>>
+    pub(super) fn lookup<'g, Q>(
+        &self,
+        hash: u64,
+        key: &Q,
+        guard: &'g Guard,
+    ) -> Option<&'g Node<K, V>>
     where
         K: Borrow<Q>,
         Q: Eq + ?Sized,
@@ -166,7 +171,11 @@ where
 /// so `cur` was reachable when the successor its deleted `next` names was loaded before this,
 /// and that successor, reachable through it, was not retired then: stepping to it is safe.
 #[inline]
-pub(super) fn still_links<K, V>(prev: &Atomic<Node<K, V>>, cur: *mut Node<K, V>, guard: &Guard) -> bool {
+pub(super) fn still_links<K, V>(
+    prev: &Atomic<Node<K, V>>,
+    cur: *mut Node<K, V>,
+    guard: &Guard,
+) -> bool {
     let w = prev.load(Ordering::Acquire, guard).as_raw();
     ptr(w) == cur && !is_marked(w)
 }

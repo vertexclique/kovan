@@ -218,7 +218,8 @@ where
     {
         let hash = self.hasher.hash_one(key);
         let guard = pin();
-        self.lookup(hash, key, &guard).map(|node| node.value.clone())
+        self.lookup(hash, key, &guard)
+            .map(|node| node.value.clone())
     }
 
     /// Checks if the key exists (without cloning its value).
@@ -269,7 +270,11 @@ where
                         }
                     }
                 }
-                Found::Hit { prev, node: old, next } => {
+                Found::Hit {
+                    prev,
+                    node: old,
+                    next,
+                } => {
                     // Cloned before the CAS: a panicking clone leaves the map as it was.
                     let previous = old.value.clone();
                     let node = pending.into_node(hash, next);
@@ -458,7 +463,10 @@ where
     /// write counts itself right after its CAS), exact in quiescence.
     pub fn len(&self) -> usize {
         let guard = pin();
-        self.table_ref(&guard).count().load(Ordering::Relaxed).max(0) as usize
+        self.table_ref(&guard)
+            .count()
+            .load(Ordering::Relaxed)
+            .max(0) as usize
     }
 
     /// Insert all `(K, V)` pairs from `iter`. Takes `&self` (concurrent map).
@@ -505,7 +513,13 @@ where
         let raw = node as *const Node<K, V> as *mut Node<K, V>;
         // AcqRel: as a snip (see `walk::find`).
         if prev
-            .compare_exchange(word(raw), word(succ), Ordering::AcqRel, Ordering::Relaxed, guard)
+            .compare_exchange(
+                word(raw),
+                word(succ),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+                guard,
+            )
             .is_ok()
         {
             // SAFETY: this CAS unlinked it, so no other thread retires it and no link names it

@@ -97,7 +97,13 @@ where
             let frozen = with(w, FROZEN);
             // AcqRel: the copy below reads the fields of the node the word names.
             if link
-                .compare_exchange(word(w), word(frozen), Ordering::AcqRel, Ordering::Relaxed, guard)
+                .compare_exchange(
+                    word(w),
+                    word(frozen),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                    guard,
+                )
                 .is_ok()
             {
                 return frozen;
@@ -127,7 +133,8 @@ where
                     let dst = new.bucket(new.bucket_index(node.hash));
                     let copy = Node::new(node.hash, node.key.clone(), node.value.clone());
                     // Relaxed: `new` is private to this thread until its publication releases it.
-                    copy.next.store(dst.load(Ordering::Relaxed, guard), Ordering::Relaxed);
+                    copy.next
+                        .store(dst.load(Ordering::Relaxed, guard), Ordering::Relaxed);
                     dst.store(word(Box::into_raw(Box::new(copy))), Ordering::Relaxed);
                     copied += 1;
                 }
