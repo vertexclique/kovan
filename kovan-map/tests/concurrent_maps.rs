@@ -6,17 +6,21 @@
 //! histories linearize. Resizes run in the middle of all of it (maps start at 64 buckets and
 //! grow and shrink under the writes). `KOVAN_STRESS_SCALE` multiplies the rounds.
 
-mod common;
+#[path = "support/lin.rs"]
+mod lin;
+#[path = "support/maps.rs"]
+mod maps;
+#[path = "support/stress.rs"]
+mod stress;
 
-use common::{
-    Call, Constant, Counts, Event, Identity, Map, Rng, Tracked, linearizable, scaled, serial,
-    settle,
-};
 use kovan_map::{HashMap, HopscotchMap};
+use lin::{Call, Event, linearizable};
+use maps::{Constant, Identity, Map};
 use std::collections::HashMap as StdMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use stress::{Counts, Rng, Tracked, scaled, serial, settle};
 
 type Fold = foldhash::fast::FixedState;
 
@@ -496,14 +500,17 @@ fn hopscotch_a_key_being_moved_stays_findable_and_removable() {
     }
 }
 
-/// Recorded concurrent histories of every writing and reading call on two keys, with a thread
-/// churning other keys so the table grows and shrinks under them, are linearizable per key.
+/// Recorded concurrent histories of every writing and reading call (clear included) on two keys,
+/// with a thread churning other keys so the table grows and shrinks under them, are
+/// linearizable per key.
 mod histories_linearize_across_resizes {
     use super::*;
 
     const CALLERS: usize = 4;
     const CALLS: usize = 6;
     const KEYS: u64 = 2;
+    /// The key a clear is recorded under: it belongs to every key's history.
+    const ALL: u64 = u64::MAX;
 
     fn run<M: Map<u64, u64>>() {
         let _serial = serial();
@@ -531,12 +538,13 @@ mod histories_linearize_across_resizes {
                     .map(|i| {
                         let k = rng.below(KEYS);
                         let v = (t * CALLS + i) as u64 + 1;
-                        let call = match rng.below(5) {
-                            0 => Call::Insert(v),
-                            1 => Call::InsertIfAbsent(v),
-                            2 => Call::GetOrInsert(v),
-                            3 => Call::Remove,
-                            _ => Call::Get,
+                        let call = match rng.below(21) {
+                            0..=3 => Call::Insert(v),
+                            4..=7 => Call::InsertIfAbsent(v),
+                            8..=11 => Call::GetOrInsert(v),
+                            12..=15 => Call::Remove,
+                            16..=19 => Call::Get,
+                            _ => Call::Clear,
                         };
                         let invoked = c.fetch_add(1, Ordering::SeqCst);
                         let answer = match call {
@@ -545,10 +553,14 @@ mod histories_linearize_across_resizes {
                             Call::GetOrInsert(v) => Some(m.get_or_insert(k, v)),
                             Call::Remove => m.remove(&k),
                             Call::Get => m.get(&k),
+                            Call::Clear => {
+                                m.clear();
+                                None
+                            }
                         };
                         let answered = c.fetch_add(1, Ordering::SeqCst);
                         (
-                            k,
+                            if call == Call::Clear { ALL } else { k },
                             Event {
                                 call,
                                 answer,
@@ -565,7 +577,7 @@ mod histories_linearize_across_resizes {
                 let history: Vec<Event> = logs
                     .iter()
                     .flatten()
-                    .filter(|(key, _)| *key == k)
+                    .filter(|(key, _)| *key == k || *key == ALL)
                     .map(|(_, e)| *e)
                     .collect();
                 assert!(
