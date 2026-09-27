@@ -37,6 +37,10 @@ wasm-bindgen-test = "0.3"
 criterion = { version = "0.5", features = ["html_reports"] }
 shuttle = "0.9.1"
 proptest = "1.11"
+# Proves both maps work with a BuildHasher other than the built-in one; tests
+# and benches only, never a normal dependency (see the S: BuildHasher note on
+# HopscotchMap and HashMap).
+rapidhash = "4.5.1"
 
 [[bench]]
 name = "perf"
