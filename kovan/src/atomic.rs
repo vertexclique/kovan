@@ -106,6 +106,37 @@ impl<T> Atomic<T> {
         }
     }
 
+    /// Loads a pointer from the atomic without era tracking: the guard does not protect it.
+    ///
+    /// For a caller that keeps the pointee alive by an exclusion of its own, where the era check
+    /// of [`load`](Atomic::load) buys nothing: a writer holding a lock that every retirement of a
+    /// value this atomic names takes.
+    ///
+    /// # Safety
+    ///
+    /// Until the caller's last use of the returned pointer, no thread retires the pointee.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kovan::{Atomic, pin};
+    /// use std::sync::atomic::Ordering;
+    ///
+    /// let atomic = Atomic::new(Box::into_raw(Box::new(42)));
+    /// let guard = pin();
+    /// // SAFETY: no thread retires the value.
+    /// let ptr = unsafe { atomic.load_unprotected(Ordering::Acquire, &guard) };
+    /// assert_eq!(unsafe { *ptr.deref() }, 42);
+    /// drop(unsafe { Box::from_raw(ptr.as_raw()) });
+    /// ```
+    #[inline]
+    pub unsafe fn load_unprotected<'g>(&self, order: Ordering, _guard: &'g Guard) -> Shared<'g, T> {
+        Shared {
+            data: self.data.load(order) as *mut T,
+            marker,
+        }
+    }
+
     /// Stores a pointer into the atomic.
     ///
     /// Unlike [`load`](Atomic::load), this does not require a `Guard`
