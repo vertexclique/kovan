@@ -272,6 +272,91 @@ unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Entry<K, V> {}
 
 const _: () = assert!(core::mem::align_of::<Entry<(), ()>>() == 1 << TAG_BITS);
 
+/// How many slots ahead of the one it yields a [`Walk`] reads. The entries of consecutive slots
+/// sit anywhere in memory, so a walk that reads each entry when it reaches its slot waits out a
+/// cache miss per entry; reading the slot this far ahead and prefetching its entry overlaps those
+/// misses with the work on the slots in between.
+pub(super) const WALK_AHEAD: usize = 16;
+
+const _: () = assert!(MIN_CAPACITY + NEIGHBORHOOD_SIZE >= WALK_AHEAD);
+
+/// Ask the cache for the line at `ptr` ahead of a read of it.
+#[inline(always)]
+fn prefetch<T>(ptr: *const T) {
+    // SAFETY: a prefetch is a hint: it reads nothing architecturally and never faults, whatever
+    // the address. `sse` is part of the x86_64 baseline.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(ptr.cast());
+    }
+    // SAFETY: as above, on the x86 targets built with `sse`.
+    #[cfg(all(target_arch = "x86", target_feature = "sse"))]
+    unsafe {
+        core::arch::x86::_mm_prefetch::<{ core::arch::x86::_MM_HINT_T0 }>(ptr.cast());
+    }
+    // SAFETY: as above.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "prfm pldl1keep, [{0}]",
+            in(reg) ptr,
+            options(nostack, readonly, preserves_flags)
+        );
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "x86", target_feature = "sse"),
+        target_arch = "aarch64"
+    )))]
+    let _ = ptr;
+}
+
+/// A walk over the slots of a table no writer changes (a resize's copy of a table whose writers
+/// it holds, a table being dropped or drained), in increasing index order. It reads each slot
+/// once, `WALK_AHEAD` slots before it yields it, and prefetches the entry the slot names: with
+/// the slots unchanging, the same answers as reading each slot when it is yielded, only the
+/// entries' lines arrive earlier. Every call passes the same table and the same guard, which
+/// keeps the entries yielded from being freed.
+pub(super) struct Walk<K, V> {
+    /// The next slot to yield.
+    next: usize,
+    /// The entries read for the slots `next..next + WALK_AHEAD` (slot `i` at `i % WALK_AHEAD`),
+    /// null for a free slot.
+    ahead: [*mut Entry<K, V>; WALK_AHEAD],
+}
+
+impl<K, V> Walk<K, V> {
+    /// A walk of `table` from its first slot.
+    pub(super) fn new(table: &Table<K, V>, guard: &kovan::Guard) -> Self {
+        let mut ahead = [core::ptr::null_mut(); WALK_AHEAD];
+        for (idx, entry) in ahead.iter_mut().enumerate() {
+            *entry = table.read_ahead(idx, guard);
+        }
+        Self { next: 0, ahead }
+    }
+
+    /// The next slot of `table` and the entry read there, null for a free slot.
+    #[inline]
+    pub(super) fn next(
+        &mut self,
+        table: &Table<K, V>,
+        guard: &kovan::Guard,
+    ) -> Option<(usize, *mut Entry<K, V>)> {
+        let idx = self.next;
+        let len = table.buckets.len();
+        if idx == len {
+            return None;
+        }
+        self.next = idx + 1;
+        let cell = &mut self.ahead[idx % WALK_AHEAD];
+        let entry = *cell;
+        if idx + WALK_AHEAD < len {
+            *cell = table.read_ahead(idx + WALK_AHEAD, guard);
+        }
+        Some((idx, entry))
+    }
+}
+
 /// Claim the free slot of `bucket` for `entry`: `Ok` with the linked entry when the slot took it
 /// (the table owns it now), `Err` with the entry back when another writer took the slot first.
 pub(super) fn link<K, V>(
@@ -345,6 +430,30 @@ impl<K, V> Table<K, V> {
         // SAFETY: Internal indices are calculated via mask or bounded offset loops.
         // The buckets array has padding to handle overflow up to NEIGHBORHOOD_SIZE.
         unsafe { self.buckets.get_unchecked(idx) }
+    }
+
+    /// Prefetch the entry of slot `idx`, if the table has that slot, for a walk that gets there
+    /// soon.
+    #[inline(always)]
+    pub(super) fn prefetch_slot(&self, idx: usize, guard: &kovan::Guard) {
+        if idx < self.buckets.len() {
+            self.read_ahead(idx, guard);
+        }
+    }
+
+    /// Slot `idx`'s entry for a [`Walk`], prefetched (a free slot prefetches the table itself,
+    /// which keeps the prefetch free of a branch). Acquire: pairs with the release that linked
+    /// the entry, so its fields are visible.
+    #[inline(always)]
+    fn read_ahead(&self, idx: usize, guard: &kovan::Guard) -> *mut Entry<K, V> {
+        let entry = self.get_bucket(idx).load(Ordering::Acquire, guard).ptr();
+        let line: *const u8 = if entry.is_null() {
+            (self as *const Self).cast()
+        } else {
+            entry.cast_const().cast()
+        };
+        prefetch(line);
+        entry
     }
 
     /// Whether slot `idx` looks free. Relaxed: only a hint for where to try, the claim's CAS
@@ -422,8 +531,8 @@ impl<K, V> Drop for Table<K, V> {
         // replaces (and retires) a table. Without this, every resize leaked
         // the old table's entries.
         let guard = pin();
-        for bucket in &self.buckets[..] {
-            let entry_ptr = bucket.load(Ordering::Relaxed, &guard).ptr();
+        let mut walk = Walk::new(self, &guard);
+        while let Some((_, entry_ptr)) = walk.next(self, &guard) {
             if !entry_ptr.is_null() {
                 // SAFETY: the table owns the entries its slots hold (see above).
                 unsafe {

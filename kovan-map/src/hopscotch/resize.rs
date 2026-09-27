@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use super::table::{Entry, GUARD, Table, Word, hop_bit};
+use super::table::{Entry, GUARD, Table, Walk, Word, hop_bit};
 use super::{HopscotchMap, MIN_CAPACITY, NEIGHBORHOOD_SIZE};
 use crate::sync::spin_hint;
 use alloc::boxed::Box;
@@ -165,18 +165,21 @@ where
     /// Copy every entry of `old` (whose writers are held) into `new`, unpublished: `false` when
     /// an entry found its neighborhood in `new` full.
     fn copy_into(&self, old: &Table<K, V>, new: &Table<K, V>, guard: &kovan::Guard) -> bool {
-        (0..(old.capacity + NEIGHBORHOOD_SIZE)).all(|i| {
-            // Loaded under `guard`; the held writers keep the entry in its slot.
-            let word = old.get_bucket(i).load(Ordering::Acquire, guard);
-            word.entry().is_none_or(|entry| {
-                self.insert_into_new_table(
+        let mut walk = Walk::new(old, guard);
+        while let Some((_, entry)) = walk.next(old, guard) {
+            // SAFETY: loaded under `guard`; the held writers keep it in its slot.
+            if let Some(entry) = unsafe { entry.as_ref() }
+                && !self.insert_into_new_table(
                     new,
                     entry.hash,
                     entry.key.clone(),
                     entry.value.clone(),
                     guard,
                 )
-            })
-        })
+            {
+                return false;
+            }
+        }
+        true
     }
 }

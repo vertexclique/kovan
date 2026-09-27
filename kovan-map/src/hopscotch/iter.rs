@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use super::table::{Entry, Table, Word};
+use super::table::{Entry, Table, WALK_AHEAD, Walk, Word};
 use super::{HopscotchMap, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
@@ -104,17 +104,20 @@ where
         while self.bucket_idx < table.buckets.len() {
             let idx = self.bucket_idx;
             self.bucket_idx += 1;
-
+            // The entry of a slot ahead reaches the cache while this walk works on the slots in
+            // between. Only a prefetch: the walk reads that slot again when it gets there, so it
+            // meets what the slot holds then, as a walk without the prefetch does.
+            table.prefetch_slot(idx + WALK_AHEAD, &self.guard);
             let entry_ptr: *const Entry<K, V> = table
                 .get_bucket(idx)
                 .load(Ordering::Acquire, &self.guard)
                 .ptr();
             self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
-            if entry_ptr.is_null() {
+            // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
+            // being freed.
+            let Some(entry) = (unsafe { entry_ptr.as_ref() }) else {
                 continue;
-            }
-            // SAFETY: loaded under `self.guard`, which keeps it from being freed.
-            let entry = unsafe { &*entry_ptr };
+            };
             if !self.met_before(table.bucket_index(entry.hash), idx, entry) {
                 return Some((entry.key.clone(), entry.value.clone()));
             }
@@ -162,7 +165,7 @@ where
 /// clone. Each drained slot is nulled so the table destructor stays a no-op.
 pub struct HopscotchIntoIter<K: 'static, V: 'static> {
     table: *mut Table<K, V>,
-    bucket_idx: usize,
+    walk: Walk<K, V>,
     guard: kovan::Guard,
 }
 
@@ -171,12 +174,9 @@ impl<K, V> Iterator for HopscotchIntoIter<K, V> {
 
     fn next(&mut self) -> Option<(K, V)> {
         let table = unsafe { &*self.table };
-        while self.bucket_idx < table.buckets.len() {
-            let bucket = table.get_bucket(self.bucket_idx);
-            self.bucket_idx += 1;
-            let entry = bucket.load(Ordering::Acquire, &self.guard).ptr();
+        while let Some((idx, entry)) = self.walk.next(table, &self.guard) {
             if !entry.is_null() {
-                bucket.store(Word::free(), Ordering::Relaxed);
+                table.get_bucket(idx).store(Word::free(), Ordering::Relaxed);
                 let k = unsafe { core::ptr::read(&(*entry).key) };
                 let v = unsafe { core::ptr::read(&(*entry).value) };
                 unsafe {
@@ -213,11 +213,9 @@ where
         let guard = pin();
         let table = me.table.load(Ordering::Relaxed, &guard).as_raw();
         unsafe { core::ptr::drop_in_place(&mut me.hasher) };
-        HopscotchIntoIter {
-            table,
-            bucket_idx: 0,
-            guard,
-        }
+        // SAFETY: the map is consumed, so the table is this iterator's alone.
+        let walk = Walk::new(unsafe { &*table }, &guard);
+        HopscotchIntoIter { table, walk, guard }
     }
 }
 
