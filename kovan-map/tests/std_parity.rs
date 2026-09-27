@@ -420,3 +420,72 @@ fn hashmap_correct_under_rapidhash_concurrent_resize() {
         assert_eq!(map.get(&k), Some(k * 2));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The snapshot impls under concurrent writers: a clone taken while writers grow and shrink the
+// map through several resizes holds every key present throughout with its value, nothing torn,
+// no key twice, and equals its source once the writers stop.
+// ---------------------------------------------------------------------------
+
+macro_rules! snapshot_under_churn {
+    ($name:ident, $map:ident) => {
+        #[test]
+        fn $name() {
+            use std::collections::HashSet;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            const STABLE: u64 = 2_000;
+            const CYCLE: u64 = 20_000;
+            let map: Arc<$map<u64, u64, RapidState>> =
+                Arc::new($map::with_capacity_and_hasher(64, RapidState::default()));
+            for k in 0..STABLE {
+                map.insert(k, k * 3);
+            }
+            // A fixed amount of writing (three grow-and-shrink cycles per writer) bounds the
+            // garbage the run retires; the snapshots are taken for as long as the writers run.
+            let writers_left = Arc::new(AtomicUsize::new(4));
+            let writers: Vec<_> = (0..4u64)
+                .map(|t| {
+                    let (map, left) = (Arc::clone(&map), Arc::clone(&writers_left));
+                    thread::spawn(move || {
+                        let base = STABLE + t * CYCLE;
+                        for i in 0..6 * CYCLE {
+                            let k = base + i % CYCLE;
+                            if (i / CYCLE) % 2 == 0 {
+                                map.insert(k, k * 3);
+                            } else {
+                                map.remove(&k);
+                            }
+                        }
+                        left.fetch_sub(1, Ordering::Release);
+                    })
+                })
+                .collect();
+            let mut snapshots = 0;
+            while snapshots == 0 || writers_left.load(Ordering::Acquire) > 0 {
+                snapshots += 1;
+                let cloned = (*map).clone();
+                let mut seen = HashSet::new();
+                for (k, v) in cloned.iter() {
+                    assert!(seen.insert(k), "key {k} yielded twice by a quiescent clone");
+                    assert_eq!(v, k * 3, "key {k} cloned with a value it never held");
+                }
+                assert_eq!(cloned.len(), seen.len());
+                for k in 0..STABLE {
+                    assert_eq!(cloned.get(&k), Some(k * 3), "stable key {k} missing");
+                }
+                assert!(cloned == cloned.clone());
+                assert!(format!("{cloned:?}").starts_with('{'));
+            }
+            for w in writers {
+                w.join().unwrap();
+            }
+            let quiescent = (*map).clone();
+            assert!(*map == quiescent);
+            assert_eq!(quiescent.len(), map.len());
+        }
+    };
+}
+
+snapshot_under_churn!(hopscotch_snapshot_impls_under_churn, HopscotchMap);
+snapshot_under_churn!(hashmap_snapshot_impls_under_churn, KHashMap);
