@@ -406,16 +406,12 @@ where
             // Counted down before the home guard is released, as an insert counts up: a clear
             // resets the count while it holds every home guard, so no decrement for an entry it
             // already cleared lands after the reset and eats the count of a later insert.
-            // Saturating decrement: prevent count from wrapping to usize::MAX which would
-            // trigger catastrophic cascading resizes.
-            let shrink_to = if let Ok(prev) =
-                self.count
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1))
-            {
-                underfull(prev - 1, table.capacity).then_some(table.capacity / 2)
-            } else {
-                None
-            };
+            // One subtract, no saturation: the entry this call unlinked was counted when it was
+            // linked (before its home guard was released) and no clear ran since (a clear holds
+            // every home guard, this one included), so the count is at least one here.
+            let prev = self.count.fetch_sub(1, Ordering::Relaxed);
+            debug_assert!(prev > 0, "an unlinked entry was never counted");
+            let shrink_to = underfull(prev - 1, table.capacity).then_some(table.capacity / 2);
             drop(home);
 
             // SAFETY: unlinked above under its home guard, so no other thread unlinks or
