@@ -472,6 +472,12 @@ impl<K, V> Table<K, V> {
     #[inline]
     pub(super) fn home_guard(&self, idx: usize) -> Option<HomeGuard<'_>> {
         let control = &self.get_bucket(idx).control;
+        // A writer that finds the guard held leaves the word alone: its read shares the
+        // holder's line, where the read-modify-write below would take the line from the holder
+        // in the middle of its write. Relaxed: only a hint, the read-modify-write decides.
+        if control.load(Ordering::Relaxed) & GUARD != 0 {
+            return None;
+        }
         // Acquire: pairs with the previous holder's release, so every slot and hop bit it wrote
         // is visible to this holder.
         let prev = control.fetch_or(GUARD, Ordering::Acquire);
