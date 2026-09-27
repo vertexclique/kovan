@@ -23,11 +23,12 @@
 
 extern crate alloc;
 
-use crate::hashmap::resize_spin_hint;
+use crate::sync::spin_hint;
 use alloc::boxed::Box;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::sync::{AtomicBool, AtomicUsize};
+use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;
 use kovan::{Atomic, Shared, pin, retire};
@@ -126,7 +127,7 @@ where
     #[inline]
     fn wait_for_resize(&self) {
         while self.resizing.load(Ordering::Acquire) {
-            resize_spin_hint();
+            spin_hint();
         }
     }
 
@@ -204,7 +205,7 @@ where
             let Some(mut home) = table.home_guard(table.bucket_index(hash)) else {
                 #[cfg(test)]
                 pause::at(pause::Point::WriterMetHeldGuard);
-                resize_spin_hint();
+                spin_hint();
                 continue;
             };
 
@@ -252,7 +253,7 @@ where
                 }
                 InsertResult::Retry(back) => {
                     pending = back;
-                    resize_spin_hint();
+                    spin_hint();
                 }
             }
         }
@@ -353,7 +354,7 @@ where
             let Some(mut home) = table.home_guard(home_idx) else {
                 #[cfg(test)]
                 pause::at(pause::Point::WriterMetHeldGuard);
-                resize_spin_hint();
+                spin_hint();
                 continue;
             };
             let (offset, entry_ptr) = table.find(home_idx, home.hops(), hash, key, &guard)?;
@@ -406,7 +407,7 @@ where
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            resize_spin_hint();
+            spin_hint();
         }
 
         let guard = pin();

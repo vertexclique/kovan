@@ -10,7 +10,8 @@ use super::{MIN_CAPACITY, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
-use core::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::AtomicU64;
+use core::sync::atomic::Ordering;
 use kovan::{Atomic, RetiredNode, Shared, pin};
 
 // A bucket's control word describes the bucket as a home, in three fields:

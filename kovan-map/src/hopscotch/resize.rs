@@ -6,7 +6,7 @@ extern crate alloc;
 
 use super::table::{Entry, GUARD, Table, hop_bit};
 use super::{HopscotchMap, MIN_CAPACITY, NEIGHBORHOOD_SIZE};
-use crate::hashmap::resize_spin_hint;
+use crate::sync::spin_hint;
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
@@ -37,7 +37,7 @@ where
             while control.fetch_or(GUARD, Ordering::Acquire) & GUARD != 0 {
                 #[cfg(test)]
                 pause::at(pause::Point::ResizerMetHeldGuard);
-                resize_spin_hint();
+                spin_hint();
             }
         }
     }
