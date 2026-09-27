@@ -143,6 +143,9 @@ where
             let table = self.table_ref(guard);
             let mut prev: &'g Atomic<Node<K, V>> = table.bucket(table.bucket_index(hash));
             let mut cur = ptr(prev.load(Ordering::Acquire, guard).as_raw());
+            // The first deleted node of the run of deleted nodes the walk is in (null after a
+            // live node): `prev` naming it unmarked keeps the whole run reachable.
+            let mut run: *mut Node<K, V> = core::ptr::null_mut();
             loop {
                 if cur.is_null() {
                     return None;
@@ -155,10 +158,14 @@ where
                         return Some(node);
                     }
                     prev = &node.next;
+                    run = core::ptr::null_mut();
                     cur = ptr(next);
                     continue;
                 }
-                if !still_links(prev, cur, guard) {
+                if run.is_null() {
+                    run = cur;
+                }
+                if !still_links(prev, run, guard) {
                     continue 'restart;
                 }
                 cur = ptr(next);
@@ -167,15 +174,20 @@ where
     }
 }
 
-/// Whether the link `prev` still names `cur` unmarked. It does only while `cur` is reachable,
-/// so `cur` was reachable when the successor its deleted `next` names was loaded before this,
-/// and that successor, reachable through it, was not retired then: stepping to it is safe.
+/// Whether the link `prev`, the last live node's (or the bucket head), still names `run`, the
+/// first deleted node of the run the walk is in, unmarked. It does only while `run` is reachable,
+/// and a deleted node's `next` never changes, so every node of the run, the one the walk stands
+/// on included, was reachable when the successor its `next` names was loaded before this, and
+/// that successor was not retired then: stepping to it is safe. Checking against the run's first
+/// node rather than the node the walk stands on lets a walk pass any number of adjacent deleted
+/// nodes whose removers have not unlinked them yet, instead of starting over until they do
+/// (`tla/chained`, Mutation "validate_current").
 #[inline]
 pub(super) fn still_links<K, V>(
     prev: &Atomic<Node<K, V>>,
-    cur: *mut Node<K, V>,
+    run: *mut Node<K, V>,
     guard: &Guard,
 ) -> bool {
     let w = prev.load(Ordering::Acquire, guard).as_raw();
-    ptr(w) == cur && !is_marked(w)
+    ptr(w) == run && !is_marked(w)
 }

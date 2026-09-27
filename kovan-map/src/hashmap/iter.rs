@@ -132,6 +132,8 @@ impl<K, V, S> Iter<'_, K, V, S> {
             self.batch.clear();
             let mut prev: &Atomic<Node<K, V>> = self.table.bucket(b);
             let mut cur = ptr(prev.load(Ordering::Acquire, guard).as_raw());
+            // The first deleted node of the run the pass is in (see `walk::still_links`).
+            let mut run: *mut Node<K, V> = core::ptr::null_mut();
             while !cur.is_null() {
                 // SAFETY: loaded under the iterator's guard while reachable (see
                 // `hashmap::walk`); the guard lives as long as the iterator.
@@ -140,8 +142,14 @@ impl<K, V, S> Iter<'_, K, V, S> {
                 if !is_marked(next) {
                     self.batch.push(cur);
                     prev = &node.next;
-                } else if !still_links(prev, cur, guard) {
-                    continue 'bucket;
+                    run = core::ptr::null_mut();
+                } else {
+                    if run.is_null() {
+                        run = cur;
+                    }
+                    if !still_links(prev, run, guard) {
+                        continue 'bucket;
+                    }
                 }
                 cur = ptr(next);
             }
