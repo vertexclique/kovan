@@ -698,6 +698,7 @@ mod a_clear_racing_writers_leaves_a_consistent_map {
 mod matches_std_on_any_sequence {
     use super::*;
     use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
 
     #[derive(Clone, Debug)]
     enum Step {
@@ -724,7 +725,6 @@ mod matches_std_on_any_sequence {
     }
 
     fn check<M: Map<u64, u64>>(steps: &[Step]) {
-        let _serial = serial();
         let map = M::with_capacity(64);
         let mut model: StdMap<u64, u64> = StdMap::new();
         for (i, s) in steps.iter().enumerate() {
@@ -758,28 +758,39 @@ mod matches_std_on_any_sequence {
         assert_eq!(walked, want, "{}: contents", M::NAME);
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(scaled(256) as u32))]
-
-        #[test]
-        fn hashmap(steps in proptest::collection::vec(step(), 0..600)) {
-            check::<HashMap<u64, u64, Fold>>(&steps);
+    /// Every case of one map on this thread, under the suite's lock held for all of them (a
+    /// thread that pinned in one case and then waited for the lock would hold back the
+    /// reclamation another test's drop count waits for).
+    fn cases<M: Map<u64, u64>>(longest: usize) {
+        let _serial = serial();
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(scaled(256) as u32));
+        let result = runner.run(&proptest::collection::vec(step(), 0..longest), |steps| {
+            check::<M>(&steps);
+            Ok(())
+        });
+        if let Err(e) = result {
+            panic!("{}: {e}", M::NAME);
         }
+    }
 
-        #[test]
-        fn hashmap_one_chain(steps in proptest::collection::vec(step(), 0..300)) {
-            check::<HashMap<u64, u64, Constant>>(&steps);
-        }
+    #[test]
+    fn hashmap() {
+        cases::<HashMap<u64, u64, Fold>>(600);
+    }
 
-        #[test]
-        fn hopscotch(steps in proptest::collection::vec(step(), 0..600)) {
-            check::<HopscotchMap<u64, u64, Fold>>(&steps);
-        }
+    #[test]
+    fn hashmap_one_chain() {
+        cases::<HashMap<u64, u64, Constant>>(300);
+    }
 
-        #[test]
-        fn hopscotch_identity(steps in proptest::collection::vec(step(), 0..600)) {
-            check::<HopscotchMap<u64, u64, Identity>>(&steps);
-        }
+    #[test]
+    fn hopscotch() {
+        cases::<HopscotchMap<u64, u64, Fold>>(600);
+    }
+
+    #[test]
+    fn hopscotch_identity() {
+        cases::<HopscotchMap<u64, u64, Identity>>(600);
     }
 }
 
