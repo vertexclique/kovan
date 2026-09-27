@@ -29,6 +29,23 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --release
 
+  test-debug:
+    name: Test debug (overflow checks, debug assertions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (debug)
+        run: cargo build --workspace
+
+      # Debug mode, deliberately: the release job above never turns on
+      # overflow checks or debug_assert!, so a bound that only holds by
+      # accident of release codegen has no other job that catches it.
+      - name: Run tests (debug)
+        run: cargo test --workspace
+
   test-nightly:
     name: Test nightly (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
