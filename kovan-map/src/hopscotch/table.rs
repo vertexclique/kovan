@@ -143,13 +143,13 @@ pub(super) fn null_entry<'g, K, V>() -> Shared<'g, Entry<K, V>> {
     unsafe { Shared::from_raw(core::ptr::null_mut()) }
 }
 
-/// Claim the free slot `slot` for `entry`: `Ok` when the slot took it (the table owns it now),
-/// `Err` with the entry back when another writer took the slot first.
+/// Claim the free slot `slot` for `entry`: `Ok` with the linked entry when the slot took it (the
+/// table owns it now), `Err` with the entry back when another writer took the slot first.
 pub(super) fn link<K, V>(
     slot: &Atomic<Entry<K, V>>,
     entry: Box<Entry<K, V>>,
     guard: &kovan::Guard,
-) -> Result<(), Box<Entry<K, V>>> {
+) -> Result<*const Entry<K, V>, Box<Entry<K, V>>> {
     let raw = Box::into_raw(entry);
     // Release: a reader that acquires the slot sees the entry's fields. Relaxed on failure: the
     // value read is not used.
@@ -160,7 +160,7 @@ pub(super) fn link<K, V>(
         Ordering::Relaxed,
         guard,
     ) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(raw),
         // SAFETY: the CAS failed, so `raw` was never published: it is still the allocation
         // `Box::into_raw` gave this call.
         Err(_) => Err(unsafe { Box::from_raw(raw) }),

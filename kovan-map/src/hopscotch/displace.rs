@@ -52,7 +52,7 @@ where
             // SAFETY: unlinked above under its home guard, so no other thread unlinks or
             // retires it; a reader that loaded it holds a guard that keeps it alive.
             unsafe { retire(found_ptr.as_raw()) };
-            return InsertResult::Success(Some(old_value));
+            return InsertResult::Replaced(old_value);
         }
 
         #[cfg(test)]
@@ -66,9 +66,9 @@ where
                 continue;
             }
             match link(&table.get_bucket(home.idx + offset).slot, entry, guard) {
-                Ok(()) => {
+                Ok(linked) => {
                     home.stage_linked(offset);
-                    return InsertResult::Success(None);
+                    return InsertResult::Linked(linked);
                 }
                 Err(back) => entry = back,
             }
@@ -79,9 +79,9 @@ where
             Freed::Slot(offset) => {
                 let slot = &table.get_bucket(home.idx + offset).slot;
                 match link(slot, entry, guard) {
-                    Ok(()) => {
+                    Ok(linked) => {
                         home.stage_linked(offset);
-                        InsertResult::Success(None)
+                        InsertResult::Linked(linked)
                     }
                     Err(back) => InsertResult::Retry(Pending::Built(back)),
                 }
@@ -240,7 +240,11 @@ impl<K, V> Pending<K, V> {
 }
 
 pub(super) enum InsertResult<K, V> {
-    Success(Option<V>),
+    /// The key was absent: this attempt linked its new entry.
+    Linked(*const Entry<K, V>),
+    /// The key was present: its entry replaced, the old value.
+    Replaced(V),
+    /// The key was present and the attempt only claims an absent key: its value.
     Exists(V),
     NeedResize(Pending<K, V>),
     Retry(Pending<K, V>),

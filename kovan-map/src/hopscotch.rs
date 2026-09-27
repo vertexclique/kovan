@@ -68,6 +68,16 @@ pub struct HopscotchMap<K: 'static, V: 'static, S = FixedState> {
     hasher: S,
 }
 
+/// How a write of `insert_impl` ended.
+enum Outcome<R, V> {
+    /// The key was absent: this call linked its entry; what the caller asked of its value.
+    Linked(R),
+    /// The key was present and this call replaced its entry: the old value.
+    Replaced(V),
+    /// The key was present and this call only claims an absent key: its value.
+    Present(V),
+}
+
 #[cfg(feature = "std")]
 impl<K, V> HopscotchMap<K, V, FixedState>
 where
@@ -172,13 +182,27 @@ where
         }
     }
 
-    /// Inserts a key-value pair into the map.
+    /// Inserts a key-value pair into the map, returning the value it replaced.
+    ///
+    /// Linearizable at the write under the key's home guard; the answer is
+    /// exactly the value that write replaced.
     pub fn insert(&self, key: K, value: V) -> Option<V> {
-        self.insert_impl(key, value, false)
+        match self.insert_impl(key, value, false, |_| ()) {
+            Outcome::Linked(()) => None,
+            Outcome::Replaced(old) | Outcome::Present(old) => Some(old),
+        }
     }
 
-    /// Helper for get_or_insert logic.
-    fn insert_impl(&self, key: K, value: V, only_if_absent: bool) -> Option<V> {
+    /// The one write path of `insert`, `insert_if_absent` and `get_or_insert`: link the key's
+    /// entry, or (unless `only_if_absent`) replace the present one, under the key's home guard.
+    /// `on_insert` reads the value this call linked.
+    fn insert_impl<R>(
+        &self,
+        key: K,
+        value: V,
+        only_if_absent: bool,
+        on_insert: impl FnOnce(&V) -> R,
+    ) -> Outcome<R, V> {
         let hash = self.hasher.hash_one(&key);
         let mut pending = Pending::Parts { hash, key, value };
 
@@ -215,7 +239,7 @@ where
             // (which resets the count while it holds every home guard) never sees the entry
             // without its count.
             let new_count = match outcome {
-                InsertResult::Success(None) => Some(self.count.fetch_add(1, Ordering::Relaxed) + 1),
+                InsertResult::Linked(_) => Some(self.count.fetch_add(1, Ordering::Relaxed) + 1),
                 _ => None,
             };
             // The guard is released (publishing the new entry's hop bit) before the resize arms
@@ -223,7 +247,7 @@ where
             // only safe while the pin keeps the table alive.
             drop(home);
             match outcome {
-                InsertResult::Success(old_val) => {
+                InsertResult::Linked(entry) => {
                     #[cfg(test)]
                     pause::at(pause::Point::AfterLanding);
                     // Final. The write landed in a live table under its home
@@ -231,6 +255,9 @@ where
                     // retry here would meet this call's own migrated entry
                     // and report it as present (`insert_if_absent` answering
                     // `Some(own value)` for an insert that happened).
+                    // SAFETY: linked by this call under `guard`, which keeps it (and its table)
+                    // from being freed even if a writer unlinks it now.
+                    let answer = on_insert(unsafe { &(*entry).value });
                     if let Some(new_count) = new_count {
                         let current_capacity = table.capacity;
                         let load_factor = new_count as f64 / current_capacity as f64;
@@ -240,11 +267,10 @@ where
                             self.try_resize(current_capacity * 2);
                         }
                     }
-                    return old_val;
+                    return Outcome::Linked(answer);
                 }
-                InsertResult::Exists(existing_val) => {
-                    return Some(existing_val);
-                }
+                InsertResult::Replaced(old) => return Outcome::Replaced(old),
+                InsertResult::Exists(existing) => return Outcome::Present(existing),
                 InsertResult::NeedResize(back) => {
                     pending = back;
                     let current_capacity = table.capacity;
@@ -261,31 +287,33 @@ where
 
     /// Returns the value corresponding to the key, or inserts the given value if the key is not present.
     ///
-    /// When multiple threads call this concurrently for the same key (without
-    /// concurrent removes), all callers receive the same value.
+    /// Linearizable and exact: of the callers racing for an absent key, the
+    /// one whose write links the key's entry (under the key's home guard)
+    /// gets its own value back, and every other gets the value it found
+    /// there (the winner's, unless a later write already replaced it). A
+    /// present key is answered by a lookup that takes no guard.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
-        // Fast path: key already exists - no clone, no insert.
         if let Some(v) = self.get(&key) {
             return v;
         }
-        // Slow path: insert_if_absent and use the return value directly.
-        // We must NOT do insert-then-get because a concurrent remove between
-        // the two operations would cause get to return None.
-        let key2 = key.clone();
-        match self.insert_impl(key, value.clone(), true) {
-            None => {
-                // Inserted. The map's current value is the answer: a concurrent
-                // `insert` of the key may have replaced this call's value already.
-                self.get(&key2).unwrap_or(value)
-            }
-            Some(existing) => existing, // Key already existed
+        match self.insert_impl(key, value, true, V::clone) {
+            Outcome::Linked(own) | Outcome::Present(own) | Outcome::Replaced(own) => own,
         }
     }
 
     /// Insert a key-value pair only if the key does not exist.
     /// Returns `None` if inserted, `Some(existing_value)` if the key already exists.
+    ///
+    /// Exact: `None` exactly when this call linked the key's entry, `Some`
+    /// with the value it found under the key's home guard otherwise; never
+    /// both, and a resize in flight changes neither (a write that landed is
+    /// final). A call that finds the key present drops its own key and value,
+    /// once.
     pub fn insert_if_absent(&self, key: K, value: V) -> Option<V> {
-        self.insert_impl(key, value, true)
+        match self.insert_impl(key, value, true, |_| ()) {
+            Outcome::Linked(()) => None,
+            Outcome::Present(existing) | Outcome::Replaced(existing) => Some(existing),
+        }
     }
 
     /// Remove **all** nodes matching `key`, returning the most recent value
