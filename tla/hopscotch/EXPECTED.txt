@@ -28,3 +28,5 @@ HS_big_disp                        MC_HopscotchMap    pass
 HS_big_claims                      MC_HopscotchMap    pass
 HS_mut_link_then_publish           MC_HopscotchMap    violated:Linearizable
 HS_mut_link_then_publish_iter      MC_HopscotchMap    violated:WalkExact
+HS_live_reader                     MC_HopscotchMap    pass
+HS_live_walker                     MC_HopscotchMap    pass

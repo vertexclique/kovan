@@ -65,4 +65,9 @@ P_big_claims == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Iia(2, 1)>>
 P_stale == [w \in {1, 2} |-> IF w = 1 THEN <<Rem(1), Iia(1, 2)>> ELSE <<Get(1)>>]
 \* A remove and a re-claim of one key racing a walk.
 P_stale_iter == [w \in {1, 2} |-> IF w = 1 THEN <<Rem(1), Iia(1, 2)>> ELSE <<Iter>>]
+\* Only the reader (worker 2) is scheduled fairly: a writer may stop anywhere, holding a home
+\* guard or in the middle of a move, and the reader must still end (lookups and walks take no
+\* guard and wait for nobody).
+ReaderSpec == Spec /\ WF_vars(Worker(2))
+ReaderEnds == <>(ts[2].pc = "done")
 =============================================================================

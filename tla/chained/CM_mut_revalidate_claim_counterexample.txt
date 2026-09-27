@@ -16,6 +16,7 @@ State 1: <Initial predicate>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -23,7 +24,6 @@ State 1: <Initial predicate>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -38,9 +38,11 @@ State 1: <Initial predicate>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -48,7 +50,6 @@ State 1: <Initial predicate>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -63,7 +64,8 @@ State 1: <Initial predicate>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -92,6 +94,7 @@ State 2: <Dispatch line 154, col 5 to line 165, col 68 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -99,7 +102,6 @@ State 2: <Dispatch line 154, col 5 to line 165, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -114,9 +116,11 @@ State 2: <Dispatch line 154, col 5 to line 165, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -124,7 +128,6 @@ State 2: <Dispatch line 154, col 5 to line 165, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -139,7 +142,8 @@ State 2: <Dispatch line 154, col 5 to line 165, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -168,6 +172,7 @@ State 3: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F1",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -175,7 +180,6 @@ State 3: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F1",
         tbl |-> 1,
         prev |-> <<0, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -190,9 +194,11 @@ State 3: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -200,7 +206,6 @@ State 3: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -215,7 +220,8 @@ State 3: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -244,6 +250,7 @@ State 4: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F2",
         c |-> 1,
         b |-> 0,
         n |-> 0,
@@ -251,7 +258,6 @@ State 4: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F2",
         tbl |-> 1,
         prev |-> <<0, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -266,9 +272,11 @@ State 4: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -276,7 +284,6 @@ State 4: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -291,7 +298,8 @@ State 4: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -320,6 +328,7 @@ State 5: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F2",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -327,7 +336,6 @@ State 5: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F2",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -342,9 +350,11 @@ State 5: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -352,7 +362,6 @@ State 5: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -367,7 +376,8 @@ State 5: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -396,6 +406,7 @@ State 6: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "FR",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -403,7 +414,6 @@ State 6: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "FR",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -418,9 +428,11 @@ State 6: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -428,7 +440,6 @@ State 6: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -443,7 +454,8 @@ State 6: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -472,6 +484,7 @@ State 7: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "A1",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -479,7 +492,6 @@ State 7: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "A1",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -494,9 +506,11 @@ State 7: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -504,7 +518,6 @@ State 7: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -519,7 +532,8 @@ State 7: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -548,6 +562,7 @@ State 8: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "A2",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -555,7 +570,6 @@ State 8: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "A2",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -570,9 +584,11 @@ State 8: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -580,7 +596,6 @@ State 8: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -595,7 +610,8 @@ State 8: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -624,6 +640,7 @@ State 9: <A2 line 386, col 5 to line 399, col 68 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "A5",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -631,7 +648,6 @@ State 9: <A2 line 386, col 5 to line 399, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "A5",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -646,9 +662,11 @@ State 9: <A2 line 386, col 5 to line 399, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -656,7 +674,6 @@ State 9: <A2 line 386, col 5 to line 399, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -671,7 +688,8 @@ State 9: <A2 line 386, col 5 to line 399, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -684,7 +702,7 @@ State 9: <A2 line 386, col 5 to line 399, col 68 of module ChainedMap>
   key |-> <<2, 1, 0, 0, 0>>,
   val |-> <<1, 1, 0, 0, 0>> ]
 
-State 10: <Z0 line 615, col 5 to line 622, col 61 of module ChainedMap>
+State 10: <Z0 line 622, col 5 to line 629, col 61 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {})
 /\ cur = 1
 /\ gcnt = 1
@@ -700,6 +718,7 @@ State 10: <Z0 line 615, col 5 to line 622, col 61 of module ChainedMap>
   cnt |-> <<1, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "A5",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -707,7 +726,6 @@ State 10: <Z0 line 615, col 5 to line 622, col 61 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "A5",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -722,9 +740,11 @@ State 10: <Z0 line 615, col 5 to line 622, col 61 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z1",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -732,7 +752,6 @@ State 10: <Z0 line 615, col 5 to line 622, col 61 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z1",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -747,7 +766,8 @@ State 10: <Z0 line 615, col 5 to line 622, col 61 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -776,6 +796,7 @@ State 11: <A5 line 402, col 5 to line 406, col 58 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -783,7 +804,6 @@ State 11: <A5 line 402, col 5 to line 406, col 58 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -798,9 +818,11 @@ State 11: <A5 line 402, col 5 to line 406, col 58 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z1",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -808,7 +830,6 @@ State 11: <A5 line 402, col 5 to line 406, col 58 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z1",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -823,7 +844,8 @@ State 11: <A5 line 402, col 5 to line 406, col 58 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 0,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -836,7 +858,7 @@ State 11: <A5 line 402, col 5 to line 406, col 58 of module ChainedMap>
   key |-> <<2, 1, 0, 0, 0>>,
   val |-> <<1, 1, 0, 0, 0>> ]
 
-State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
+State 12: <Z1 line 632, col 5 to line 649, col 52 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {})
 /\ cur = 1
 /\ gcnt = 2
@@ -852,6 +874,7 @@ State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -859,7 +882,6 @@ State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -874,9 +896,11 @@ State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z2",
         c |-> 0,
         b |-> 0,
         n |-> 0,
@@ -884,7 +908,6 @@ State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z2",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -899,7 +922,8 @@ State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -912,7 +936,7 @@ State 12: <Z1 line 625, col 5 to line 642, col 52 of module ChainedMap>
   key |-> <<2, 1, 0, 0, 0>>,
   val |-> <<1, 1, 0, 0, 0>> ]
 
-State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
+State 13: <Z2 line 655, col 5 to line 665, col 58 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {1})
 /\ cur = 1
 /\ gcnt = 2
@@ -928,6 +952,7 @@ State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -935,7 +960,6 @@ State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -950,9 +974,11 @@ State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z3",
         c |-> 1,
         b |-> 0,
         n |-> 0,
@@ -960,7 +986,6 @@ State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z3",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -975,7 +1000,8 @@ State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 0 ] )
+        cp |-> 0,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -988,7 +1014,7 @@ State 13: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
   key |-> <<2, 1, 0, 0, 0>>,
   val |-> <<1, 1, 0, 0, 0>> ]
 
-State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
+State 14: <Z3 line 669, col 5 to line 694, col 48 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {1, 2, 3})
 /\ cur = 1
 /\ gcnt = 2
@@ -1004,6 +1030,7 @@ State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1011,7 +1038,6 @@ State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1026,9 +1052,11 @@ State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z3",
         c |-> 2,
         b |-> 0,
         n |-> 0,
@@ -1036,7 +1064,6 @@ State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z3",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1051,7 +1078,8 @@ State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 1 ] )
+        cp |-> 1,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1064,7 +1092,7 @@ State 14: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
   key |-> <<2, 1, 2, 0, 0>>,
   val |-> <<1, 1, 1, 0, 0>> ]
 
-State 15: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
+State 15: <Z3 line 669, col 5 to line 694, col 48 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {1, 2, 3, 4})
 /\ cur = 1
 /\ gcnt = 2
@@ -1080,6 +1108,7 @@ State 15: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1087,7 +1116,6 @@ State 15: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1102,17 +1130,18 @@ State 15: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
-        c |-> 0,
-        b |-> 0,
-        n |-> 0,
-        i |-> 1,
-        j |-> 1,
-        abs0 |-> <<0, 0>>,
-        inv |-> 0,
         pc |-> "Z3",
+        c |-> 0,
+        b |-> 0,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1127,7 +1156,8 @@ State 15: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1140,7 +1170,7 @@ State 15: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
   key |-> <<2, 1, 2, 1, 0>>,
   val |-> <<1, 1, 1, 1, 0>> ]
 
-State 16: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
+State 16: <Z3 line 669, col 5 to line 694, col 48 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {1, 2, 3, 4})
 /\ cur = 1
 /\ gcnt = 2
@@ -1156,6 +1186,7 @@ State 16: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1163,7 +1194,6 @@ State 16: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1178,17 +1208,18 @@ State 16: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
-        c |-> 0,
-        b |-> 1,
-        n |-> 0,
-        i |-> 1,
-        j |-> 1,
-        abs0 |-> <<0, 0>>,
-        inv |-> 0,
         pc |-> "Z2",
+        c |-> 0,
+        b |-> 1,
+        n |-> 0,
+        i |-> 1,
+        j |-> 1,
+        abs0 |-> <<0, 0>>,
+        inv |-> 0,
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1203,7 +1234,8 @@ State 16: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1216,7 +1248,7 @@ State 16: <Z3 line 662, col 5 to line 687, col 48 of module ChainedMap>
   key |-> <<2, 1, 2, 1, 0>>,
   val |-> <<1, 1, 1, 1, 0>> ]
 
-State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
+State 17: <Z2 line 655, col 5 to line 665, col 58 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {1, 2, 3, 4})
 /\ cur = 1
 /\ gcnt = 2
@@ -1232,6 +1264,7 @@ State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
   cnt |-> <<2, 0>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1239,7 +1272,6 @@ State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1254,9 +1286,11 @@ State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z5",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1264,7 +1298,6 @@ State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z5",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1279,7 +1312,8 @@ State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1292,7 +1326,7 @@ State 17: <Z2 line 648, col 5 to line 658, col 58 of module ChainedMap>
   key |-> <<2, 1, 2, 1, 0>>,
   val |-> <<1, 1, 1, 1, 0>> ]
 
-State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
+State 18: <Z5 line 699, col 5 to line 712, col 42 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {1, 2, 3, 4})
 /\ cur = 2
 /\ gcnt = 2
@@ -1308,6 +1342,7 @@ State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1315,7 +1350,6 @@ State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1330,9 +1364,11 @@ State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "Z6",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1340,7 +1376,6 @@ State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "Z6",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1355,7 +1390,8 @@ State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = TRUE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1368,7 +1404,7 @@ State 18: <Z5 line 692, col 5 to line 705, col 42 of module ChainedMap>
   key |-> <<2, 1, 2, 1, 0>>,
   val |-> <<1, 1, 1, 1, 0>> ]
 
-State 19: <Z6 line 708, col 5 to line 712, col 55 of module ChainedMap>
+State 19: <Z6 line 715, col 5 to line 719, col 55 of module ChainedMap>
 /\ prot = (1 :> {1, 2} @@ 9 :> {})
 /\ cur = 2
 /\ gcnt = 2
@@ -1384,6 +1420,7 @@ State 19: <Z6 line 708, col 5 to line 712, col 55 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F0",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1391,7 +1428,6 @@ State 19: <Z6 line 708, col 5 to line 712, col 55 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F0",
         tbl |-> 1,
         prev |-> <<1, 1, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1406,9 +1442,11 @@ State 19: <Z6 line 708, col 5 to line 712, col 55 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1416,7 +1454,6 @@ State 19: <Z6 line 708, col 5 to line 712, col 55 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1431,7 +1468,8 @@ State 19: <Z6 line 708, col 5 to line 712, col 55 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1460,6 +1498,7 @@ State 20: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F1",
         c |-> 0,
         b |-> 0,
         n |-> 2,
@@ -1467,7 +1506,6 @@ State 20: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F1",
         tbl |-> 2,
         prev |-> <<0, 2, 1>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1482,9 +1520,11 @@ State 20: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1492,7 +1532,6 @@ State 20: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1507,7 +1546,8 @@ State 20: <F0 line 179, col 5 to line 185, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1536,6 +1576,7 @@ State 21: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "F2",
         c |-> 4,
         b |-> 0,
         n |-> 2,
@@ -1543,7 +1584,6 @@ State 21: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "F2",
         tbl |-> 2,
         prev |-> <<0, 2, 1>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1558,9 +1598,11 @@ State 21: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1568,7 +1610,6 @@ State 21: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1583,7 +1624,8 @@ State 21: <F1 line 188, col 5 to line 194, col 62 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1612,6 +1654,7 @@ State 22: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "FR",
         c |-> 4,
         b |-> 0,
         n |-> 2,
@@ -1619,7 +1662,6 @@ State 22: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "FR",
         tbl |-> 2,
         prev |-> <<0, 2, 1>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1634,9 +1676,11 @@ State 22: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1644,7 +1688,6 @@ State 22: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1659,7 +1702,8 @@ State 22: <F2 line 197, col 5 to line 211, col 65 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1688,6 +1732,7 @@ State 23: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "A1",
         c |-> 4,
         b |-> 0,
         n |-> 2,
@@ -1695,7 +1740,6 @@ State 23: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "A1",
         tbl |-> 2,
         prev |-> <<0, 2, 1>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1710,9 +1754,11 @@ State 23: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1720,7 +1766,6 @@ State 23: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1735,7 +1780,8 @@ State 23: <FR line 231, col 5 to line 236, col 68 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1764,6 +1810,7 @@ State 24: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "A9",
         c |-> 4,
         b |-> 0,
         n |-> 2,
@@ -1771,7 +1818,6 @@ State 24: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "A9",
         tbl |-> 2,
         prev |-> <<0, 2, 1>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1786,9 +1832,11 @@ State 24: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1796,7 +1844,6 @@ State 24: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1811,7 +1858,8 @@ State 24: <A1 line 366, col 5 to line 383, col 67 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "none"
 /\ mem = [ nx |->
@@ -1840,6 +1888,7 @@ State 25: <A9 line 411, col 5 to line 416, col 57 of module ChainedMap>
   cnt |-> <<2, 2>> ]
 /\ ts = ( 1 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 4,
         b |-> 0,
         n |-> 2,
@@ -1847,7 +1896,6 @@ State 25: <A9 line 411, col 5 to line 416, col 57 of module ChainedMap>
         j |-> 1,
         abs0 |-> <<0, 1>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 2,
         prev |-> <<0, 2, 1>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1862,9 +1910,11 @@ State 25: <A9 line 411, col 5 to line 416, col 57 of module ChainedMap>
         yv |-> {},
         old |-> 0,
         nt |-> 0,
-        cp |-> 0 ] @@
+        cp |-> 0,
+        rn |-> 0 ] @@
   9 :>
       [ w |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
+        pc |-> "next",
         c |-> 0,
         b |-> 1,
         n |-> 0,
@@ -1872,7 +1922,6 @@ State 25: <A9 line 411, col 5 to line 416, col 57 of module ChainedMap>
         j |-> 2,
         abs0 |-> <<0, 0>>,
         inv |-> 0,
-        pc |-> "next",
         tbl |-> 0,
         prev |-> <<0, 0, 0>>,
         nw |-> [p |-> 0, m |-> FALSE, f |-> FALSE],
@@ -1887,7 +1936,8 @@ State 25: <A9 line 411, col 5 to line 416, col 57 of module ChainedMap>
         yv |-> {},
         old |-> 1,
         nt |-> 2,
-        cp |-> 2 ] )
+        cp |-> 2,
+        rn |-> 0 ] )
 /\ latch = FALSE
 /\ err = "iia_exact"
 /\ mem = [ nx |->

@@ -41,7 +41,9 @@ configuration must report, and a full run of a family rewrites its `tlc-run.txt`
 - `NoLeak`: when every thread is done, every allocated node or entry is freed, retired, or held by
   a table in use.
 - `Termination` (the `*_live` configurations, under weak fairness of every thread): every
-  operation ends.
+  operation ends. `ReaderEnds` (the `*_live_reader` and `*_live_walker` configurations, where
+  only the reader is scheduled fairly and every writer may stop anywhere): a lookup or a walk
+  ends without waiting for any writer.
 - Witnesses (`*_wit_*`): each asserts a case never happens, so TLC's counterexample proves the
   passing configurations reach it and are not vacuous.
 
@@ -60,9 +62,10 @@ Files as of this branch's commit adding the model:
   link word: frozen ends the walk, marked goes to the snip, the key's node is found), F3 (the snip:
   CAS the predecessor from the node to its successor; the thread whose CAS succeeded retires the
   node). `walk.rs:121` `cleanup`, the walk again after a failed unlink (C9).
-- `hashmap/walk.rs:132` `lookup` and `:174` `still_links`, the readers' walk: G0 to G3 (a key's
+- `hashmap/walk.rs:132` `lookup` and `:186` `still_links`, the readers' walk: G0 to G3 (a key's
   node answers when its link word is unmarked; a deleted node is stepped past only when the link
-  the walk came through still names it unmarked, otherwise the walk starts over).
+  the walk came through, the last live node's, still names the first deleted node of the run
+  unmarked, otherwise the walk starts over).
 - `hashmap.rs:241` `insert`: I1 to I6 (a new key appended at the tail by one CAS; a present key
   replaced by one CAS that marks the old node's word naming the new node, which names the old
   successor; then the old node unlinked, or the cleanup walk).
@@ -99,6 +102,8 @@ One bucket (every key in one chain) grown to two, or two shrunk to one; keys 1 t
 | `CM_big_claims` | two claims and a remove of one key (three workers) | grow | 7, 2 | pass |
 | `CM_big_iter` | a walk racing a replace and a claim (three workers) | grow | 8, 2 | pass |
 | `CM_live` | two removes and a lookup behind them, weak fairness | none | 5, 1 | `Termination` holds |
+| `CM_live_reader` | the same, only the lookup scheduled fairly (the removers may stop between a mark and its unlink) | none | 5, 1 | `ReaderEnds` holds |
+| `CM_live_walker` | two removes and a walk, only the walk scheduled fairly | none | 5, 1 | `ReaderEnds` holds |
 | `CM_mut_retire_on_mark` | 0.1.20: the remover retires the node it marked though its unlink failed | none | 5, 1 | `RetiredUnreachable` broken |
 | `CM_mut_no_validate` | 0.1.20: a walk steps past a deleted node without checking it is linked | none | 6, 1 | `NoUseAfterFree` broken |
 | `CM_mut_stale_hit` | 0.1.20 and the merged frozen-edge fix: a lookup answers from a deleted node | none | 6, 1 | `Linearizable` broken |
@@ -106,6 +111,8 @@ One bucket (every key in one chain) grown to two, or two shrunk to one; keys 1 t
 | `CM_mut_revalidate_count` | 0.1.20: the same, for a remove | grow | 5, 2 | `CountExact` broken |
 | `CM_mut_two_step_replace` | 0.1.20: a replace marks the old node, then links the new one by a second CAS | none | 6, 1 | `AbsIsContent` broken |
 | `CM_mut_two_step_replace_iter` | the same, as a walk sees it | none | 6, 1 | `WalkExact` broken |
+| `CM_mut_validate_current` | this branch's first walk: a deleted node validated against the link the walk came through instead of the run's first deleted node, only the lookup fair | none | 5, 1 | `ReaderEnds` broken |
+| `CM_mut_validate_current_iter` | the same for a walk | none | 5, 1 | `ReaderEnds` broken |
 | `CM_mut_check_addr` | the merged frozen-edge fix: a lookup starts over at every deleted node, with 0.1.20's best-effort unlink | none | 5, 1 | `Termination` broken |
 | `CM_wit_failed_snip` | witness: a snip fails and the cleanup walk runs | grow | 6, 2 | `NoFailedSnip` broken |
 | `CM_wit_frozen` | witness: a writer meets a frozen link | grow | 6, 2 | `NoFrozenMeet` broken |
@@ -145,11 +152,21 @@ One bucket (every key in one chain) grown to two, or two shrunk to one; keys 1 t
   unlink a deleted node can stay linked with no writer left to unlink it, and a lookup of a key
   behind it loops forever. Fix: the validated step past a deleted node, and the cleanup walk.
 
+- **A walk waiting for removers** (`CM_mut_validate_current`, a lasso). This branch's first
+  version of the walk validated a deleted node against the link it came through; at the second of
+  two adjacent deleted nodes that link names the first, so the walk started over, and kept
+  starting over until a remover unlinked one of them: a remover preempted between its mark and
+  its unlink held every lookup of the bucket. Found by the shuttle search
+  (`kovan-map/tests/shuttle_maps.rs`, `adjacent_removes::hashmap_one_chain`, which reported the
+  lookup exceeding shuttle's step bound under PCT), then modelled here with only the reader
+  scheduled fairly. Fix: validate against the first deleted node of the run (`walk.rs:186`).
+
 ### TLC results
 
 The run recorded in `chained/tlc-run.txt` (8 workers, beside other work on a 36-core machine):
-26 of 26 configurations match `EXPECTED.txt`; the largest passing ones are `CM_rem_rem` (8,826,783
-distinct states, 75 s), `CM_big_iter` (7,838,977, 82 s) and `CM_big_claims` (3,260,753, 32 s).
+30 of 30 configurations match `EXPECTED.txt`; the largest passing ones are `CM_rem_rem`
+(10,004,502 distinct states, 138 s), `CM_big_iter` (7,974,721, 116 s) and `CM_big_claims`
+(3,260,753, 40 s).
 
 ## The hopscotch map (`hopscotch/HopscotchMap.tla`)
 
@@ -200,6 +217,8 @@ key 2 finds home 0's neighborhood full and moves key 1 to slot 2.
 | `HS_big_disp` | a move, a remove and a re-claim of the moved key, a lookup and a walk (three workers) | grow | pass |
 | `HS_big_claims` | two claims of a key whose insert moves another, a `force_remove` of a third (three workers) | grow | pass |
 | `HS_live` | a move and a remove of the moved key, weak fairness | none | `Termination` holds |
+| `HS_live_reader` | lookups of a key being moved, only the lookups fair (the mover may stop holding a guard or mid-move) | none | `ReaderEnds` holds |
+| `HS_live_walker` | a walk with a move in flight, only the walk fair | none | `ReaderEnds` holds |
 | `HS_mut_unguarded_remove` | 0.1.20: a remove takes no home guard and clears its bit in the live word | none | `AbsIsContent` broken |
 | `HS_mut_unguarded_remove_moved` | the same, racing a move | none | `Linearizable` broken |
 | `HS_mut_move_clear_first` | 0.1.20: a move copies the entry, unlinks the original, clears the old bit, then sets the new one, unguarded and with no stamp | none | `Linearizable` broken |
@@ -243,5 +262,5 @@ key 2 finds home 0's neighborhood full and moves key 1 to slot 2.
 
 ### TLC results
 
-The run recorded in `hopscotch/tlc-run.txt` (8 workers): 29 of 29 configurations match
-`EXPECTED.txt`; the largest passing one is `HS_big_disp` (4,400,666 distinct states, 51 s).
+The run recorded in `hopscotch/tlc-run.txt` (8 workers): 31 of 31 configurations match
+`EXPECTED.txt`; the largest passing one is `HS_big_disp` (4,400,666 distinct states, 57 s).
