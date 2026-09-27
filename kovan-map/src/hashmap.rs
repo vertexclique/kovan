@@ -205,24 +205,38 @@ where
     {
         let hash = self.hasher.hash_one(key);
         let guard = pin();
-        let table = TableRef::<K, V>::from_raw(self.table.load(Ordering::Acquire, &guard).as_raw());
-        let bucket = table.bucket(table.bucket_index(hash));
+        // A tagged `next` means its owner has already retired that node, and
+        // a retired node's `next` is frozen: no unlink is ever stored through
+        // it again. Reclamation protects a pointer loaded from a location the
+        // retirer writes when it unlinks, which is what the Dekker pairing in
+        // `protect_load` covers; a frozen edge is not such a location, so
+        // following one can hand back a node that was unlinked and reclaimed
+        // after this one was retired. Restart from the bucket head, which is
+        // such a location.
+        'restart: loop {
+            let table =
+                TableRef::<K, V>::from_raw(self.table.load(Ordering::Acquire, &guard).as_raw());
+            let bucket = table.bucket(table.bucket_index(hash));
 
-        let mut current = bucket.load(Ordering::Acquire, &guard).as_raw();
-        while !current.is_null() {
-            unsafe {
-                let node = &*current;
-                // Check hash first (integer compare is fast). Matching a
-                // logically-deleted node is linearizable (the read happened
-                // before the delete), so no tag check on the match path.
-                if node.hash == hash && node.key.borrow() == key {
-                    return Some(node.value.clone());
+            let mut current = bucket.load(Ordering::Acquire, &guard).as_raw();
+            while !current.is_null() {
+                unsafe {
+                    let node = &*current;
+                    // Check hash first (integer compare is fast). Matching a
+                    // logically-deleted node is linearizable (the read
+                    // happened before the delete), so no tag check here.
+                    if node.hash == hash && node.key.borrow() == key {
+                        return Some(node.value.clone());
+                    }
+                    let next = node.next.load(Ordering::Acquire, &guard).as_raw();
+                    if is_tagged(next) {
+                        continue 'restart;
+                    }
+                    current = next;
                 }
-                // Untag: the pointer may carry the deletion tag.
-                current = untag(node.next.load(Ordering::Acquire, &guard).as_raw());
             }
+            return None;
         }
-        None
     }
 
     /// Checks if the key exists.
