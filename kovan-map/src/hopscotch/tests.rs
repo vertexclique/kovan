@@ -509,9 +509,9 @@ fn an_abandoned_pause_inside_a_move_leaves_the_map_whole() {
     }
 }
 
-/// A claim of a key whose entry a displacement is moving waits for the move (which holds the
-/// key's home guard) and then finds the key. Before the fix the claim scanned mid-move, missed
-/// the entry and linked a second one.
+/// A claim of a key whose entry a displacement is moving finds the key, at either point of the
+/// move, without waiting for the move's home guard: its lookup rescans when the move stamp
+/// changed. Before the fix the claim scanned mid-move, missed the entry and linked a second one.
 #[test]
 fn a_claim_of_a_key_being_moved_finds_it() {
     for point in [Point::MoveLinkedTwice, Point::MoveUnlinked] {
@@ -523,19 +523,12 @@ fn a_claim_of_a_key_being_moved_finds_it() {
         mover_arrival
             .recv_timeout(MEET)
             .expect("the insert moves key 2");
-        let (claimer, claimer_arrival, claimer_release) = {
-            let map = Arc::clone(&map);
-            stopped_at(Point::WriterMetHeldGuard, move || {
-                map.insert_if_absent(2, 99)
-            })
-        };
-        claimer_arrival
-            .recv_timeout(MEET)
-            .expect("the claim waits for the move, which holds key 2's home guard");
+        // Mid-move, with the move holding key 2's home guard: both claims find key 2 by the
+        // lookup `get` makes and answer without waiting for the guard.
+        assert_eq!(map.insert_if_absent(2, 99), Some(2), "{point:?}");
+        assert_eq!(map.get_or_insert(2, 98), 2, "{point:?}");
         mover_release.send(()).expect("let the move finish");
         assert_eq!(mover.join().expect("the insert"), None);
-        claimer_release.send(()).expect("let the claim go on");
-        assert_eq!(claimer.join().expect("the claim"), Some(2), "{point:?}");
         assert_eq!(map.get(&2), Some(2));
         assert_eq!(map.len(), 34);
         assert_eq!(walked_keys(&map), keys_and(&[64]));

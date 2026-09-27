@@ -201,6 +201,17 @@ where
         let hash = self.hasher.hash_one(&key);
         let mut pending = Pending::Parts { hash, key, value };
 
+        // A claim answers a present key from the lookup `get` makes, before any write step: it
+        // writes nothing then, so it takes effect at that lookup and costs what a `get` costs.
+        if only_if_absent {
+            let guard = pin();
+            // SAFETY: loaded under `guard`, which keeps the table alive while it is read.
+            let table = unsafe { &*self.table.load(Ordering::Acquire, &guard).as_raw() };
+            if let Some(entry) = table.lookup(hash, pending.key(), &guard) {
+                return Outcome::Present(entry.value.clone());
+            }
+        }
+
         loop {
             self.wait_for_resize();
 
@@ -224,9 +235,8 @@ where
             let Some(mut home) = table.home_guard(table.bucket_index(hash)) else {
                 #[cfg(test)]
                 pause::at(pause::Point::WriterMetHeldGuard);
-                // A call that only claims an absent key answers a present one without waiting
-                // for the writer holding its home: from the lookup `get` makes, as
-                // `get_or_insert` answers a present key before it writes.
+                // A claim answers a key the holder linked meanwhile without waiting for the
+                // guard, from the same lookup.
                 if only_if_absent && let Some(entry) = table.lookup(hash, pending.key(), &guard) {
                     return Outcome::Present(entry.value.clone());
                 }
@@ -292,9 +302,6 @@ where
     /// there (the winner's, unless a later write already replaced it). A
     /// present key is answered by a lookup that takes no guard.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
-        if let Some(v) = self.get(&key) {
-            return v;
-        }
         match self.insert_impl(key, value, true, V::clone) {
             Outcome::Linked(own) | Outcome::Present(own) | Outcome::Replaced(own) => own,
         }
