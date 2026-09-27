@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use super::table::{Entry, GUARD, Table, hop_bit};
+use super::table::{Entry, GUARD, Table, Walk, Word, hop_bit};
 use super::{HopscotchMap, MIN_CAPACITY, NEIGHBORHOOD_SIZE};
 use crate::sync::spin_hint;
 use alloc::boxed::Box;
@@ -71,26 +71,26 @@ where
             }
 
             let probe_bucket = table.get_bucket(probe_idx);
-            let slot_ptr = probe_bucket.slot.load(Ordering::Relaxed, guard);
 
-            if slot_ptr.is_null() {
+            if probe_bucket.load(Ordering::Relaxed, guard).is_free() {
                 let offset_from_home = probe_idx - bucket_idx;
 
                 if offset_from_home < NEIGHBORHOOD_SIZE {
-                    let new_entry = Box::into_raw(Box::new(Entry {
+                    let new_entry = Box::new(Entry {
                         retired: RetiredNode::new(),
                         hash,
                         key,
                         value,
-                    }));
-                    probe_bucket
-                        .slot
-                        .store(unsafe { Shared::from_raw(new_entry) }, Ordering::Release);
+                    });
+                    probe_bucket.store(Word::of(new_entry), Ordering::Release);
 
-                    let bucket = table.get_bucket(bucket_idx);
-                    bucket
-                        .control
-                        .fetch_or(hop_bit(offset_from_home), Ordering::Relaxed);
+                    // A read and a store, not a read-modify-write: the new table is this
+                    // resize's alone until it publishes it (the table pointer's release store
+                    // carries this word to every thread that acquires the table), so no other
+                    // thread writes the word meanwhile.
+                    let control = &table.get_bucket(bucket_idx).control;
+                    let word = control.load(Ordering::Relaxed);
+                    control.store(word | hop_bit(offset_from_home), Ordering::Relaxed);
                     return true;
                 } else {
                     return false;
@@ -168,18 +168,21 @@ where
     /// Copy every entry of `old` (whose writers are held) into `new`, unpublished: `false` when
     /// an entry found its neighborhood in `new` full.
     fn copy_into(&self, old: &Table<K, V>, new: &Table<K, V>, guard: &kovan::Guard) -> bool {
-        (0..(old.capacity + NEIGHBORHOOD_SIZE)).all(|i| {
-            let entry_ptr = old.get_bucket(i).slot.load(Ordering::Acquire, guard);
+        let mut walk = Walk::new(old, guard);
+        while let Some((_, entry)) = walk.next(old, guard) {
             // SAFETY: loaded under `guard`; the held writers keep it in its slot.
-            unsafe { entry_ptr.as_raw().as_ref() }.is_none_or(|entry| {
-                self.insert_into_new_table(
+            if let Some(entry) = unsafe { entry.as_ref() }
+                && !self.insert_into_new_table(
                     new,
                     entry.hash,
                     entry.key.clone(),
                     entry.value.clone(),
                     guard,
                 )
-            })
-        })
+            {
+                return false;
+            }
+        }
+        true
     }
 }

@@ -31,8 +31,8 @@ use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;
-use kovan::{Atomic, Shared, pin, retire};
-use table::{HOP_MASK, STAMP_MASK, Table, hop_bits, null_entry};
+use kovan::{Atomic, CachePadded, pin, retire};
+use table::{HOP_MASK, Table, Word, hop_bits};
 
 pub use iter::{HopscotchIntoIter, HopscotchIter, HopscotchKeys, HopscotchValues};
 
@@ -48,11 +48,18 @@ const NEIGHBORHOOD_SIZE: usize = 32;
 /// Initial capacity
 const INITIAL_CAPACITY: usize = 64;
 
-/// Load factor threshold for growing (75%)
-const GROW_THRESHOLD: f64 = 0.75;
+/// Whether `count` entries overfill a table of `capacity`: more than three quarters full.
+#[inline(always)]
+fn overfull(count: usize, capacity: usize) -> bool {
+    4 * count > 3 * capacity
+}
 
-/// Load factor threshold for shrinking (25%)
-const SHRINK_THRESHOLD: f64 = 0.25;
+/// Whether `count` entries underfill a table of `capacity`: less than a quarter full, and the
+/// table larger than the least one.
+#[inline(always)]
+fn underfull(count: usize, capacity: usize) -> bool {
+    4 * count < capacity && capacity > MIN_CAPACITY
+}
 
 /// Minimum capacity to prevent excessive shrinking
 const MIN_CAPACITY: usize = 64;
@@ -63,7 +70,10 @@ const MAX_PROBE_DISTANCE: usize = 512;
 /// A concurrent, lock-free hash map based on Hopscotch Hashing.
 pub struct HopscotchMap<K: 'static, V: 'static, S = FixedState> {
     table: Atomic<Table<K, V>>,
-    count: AtomicUsize,
+    /// The entries in the map, on a cache line of its own: every write that links or unlinks an
+    /// entry bumps it, and every operation reads the table pointer and the resize flag, which
+    /// would otherwise share its line.
+    count: CachePadded<AtomicUsize>,
     /// Prevents concurrent writes during resize migration to avoid lost updates
     resizing: AtomicBool,
     hasher: S,
@@ -94,7 +104,7 @@ impl<K: 'static, V: 'static, S> HopscotchMap<K, V, S> {
         let table = Table::new(capacity);
         Self {
             table: Atomic::new(Box::into_raw(Box::new(table))),
-            count: AtomicUsize::new(0),
+            count: CachePadded::new(AtomicUsize::new(0)),
             resizing: AtomicBool::new(false),
             hasher,
         }
@@ -164,34 +174,9 @@ where
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
         let table = unsafe { &*table_ptr.as_raw() };
 
-        let home = table.bucket_index(hash);
-        let control = &table.get_bucket(home).control;
-        // Acquire: pairs with the release store that set each hop bit, so the entry linked
-        // before it is visible to the scan.
-        let mut word = control.load(Ordering::Acquire);
-        loop {
-            let hops = hop_bits(word);
-            if hops == 0 {
-                return None;
-            }
-            #[cfg(test)]
-            pause::at(pause::Point::LookupReadHops);
-            if let Some((_, entry_ptr)) = table.find(home, hops, hash, key, &guard) {
-                // SAFETY: loaded under `guard`, which keeps it from being freed.
-                return Some(unsafe { &*entry_ptr.as_raw() }.value.clone());
-            }
-            // A miss is final unless an entry of this home moved while the scan ran. A move
-            // links the entry at its new slot, sets that slot's hop bit and advances the stamp,
-            // and only then empties the old slot with a release store. A scan that found the
-            // old slot empty (or reused) acquired that store, so this re-read sees the advanced
-            // stamp and the new bit with it. Acquire: the rescan reads the slots the new bits
-            // name.
-            let again = control.load(Ordering::Acquire);
-            if (again ^ word) & STAMP_MASK == 0 {
-                return None;
-            }
-            word = again;
-        }
+        table
+            .lookup(hash, key, &guard)
+            .map(|entry| entry.value.clone())
     }
 
     /// Inserts a key-value pair into the map, returning the value it replaced.
@@ -241,6 +226,12 @@ where
             let Some(mut home) = table.home_guard(table.bucket_index(hash)) else {
                 #[cfg(test)]
                 pause::at(pause::Point::WriterMetHeldGuard);
+                // A call that only claims an absent key answers a present one without waiting
+                // for the writer holding its home: from the lookup `get` makes, as
+                // `get_or_insert` answers a present key before it writes.
+                if only_if_absent && let Some(entry) = table.lookup(hash, pending.key(), &guard) {
+                    return Outcome::Present(entry.value.clone());
+                }
                 spin_hint();
                 continue;
             };
@@ -270,14 +261,12 @@ where
                     // SAFETY: linked by this call under `guard`, which keeps it (and its table)
                     // from being freed even if a writer unlinks it now.
                     let answer = on_insert(unsafe { &(*entry).value });
-                    if let Some(new_count) = new_count {
+                    if let Some(new_count) = new_count
+                        && overfull(new_count, table.capacity)
+                    {
                         let current_capacity = table.capacity;
-                        let load_factor = new_count as f64 / current_capacity as f64;
-
-                        if load_factor > GROW_THRESHOLD {
-                            drop(guard);
-                            self.try_resize(current_capacity * 2);
-                        }
+                        drop(guard);
+                        self.try_resize(current_capacity * 2);
                     }
                     return Outcome::Linked(answer);
                 }
@@ -397,16 +386,16 @@ where
                 spin_hint();
                 continue;
             };
-            let (offset, entry_ptr) = table.find(home_idx, home.hops(), hash, key, &guard)?;
+            let (offset, word) = table.find(home_idx, home.hops(), hash, key, &guard)?;
+            let entry_ptr = word.ptr();
             // SAFETY: loaded under `guard`, which keeps it from being freed.
-            let old_value = unsafe { &*entry_ptr.as_raw() }.value.clone();
+            let old_value = unsafe { &*entry_ptr }.value.clone();
             // A store, not a CAS: no other thread writes an occupied slot of a home whose guard
             // this call holds. Release: a reader that acquires the free slot sees everything this
             // call wrote before it.
             table
                 .get_bucket(home_idx + offset)
-                .slot
-                .store(null_entry(), Ordering::Release);
+                .store(Word::free(), Ordering::Release);
             home.stage_unlinked(offset);
 
             // Counted down before the home guard is released, as an insert counts up: a clear
@@ -418,11 +407,7 @@ where
                 self.count
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1))
             {
-                let new_count = prev - 1;
-                let current_capacity = table.capacity;
-                let load_factor = new_count as f64 / current_capacity as f64;
-                (load_factor < SHRINK_THRESHOLD && current_capacity > MIN_CAPACITY)
-                    .then_some(current_capacity / 2)
+                underfull(prev - 1, table.capacity).then_some(table.capacity / 2)
             } else {
                 None
             };
@@ -430,7 +415,7 @@ where
 
             // SAFETY: unlinked above under its home guard, so no other thread unlinks or
             // retires it; a reader that loaded it holds a guard that keeps it alive.
-            unsafe { retire(entry_ptr.as_raw()) };
+            unsafe { retire(entry_ptr) };
 
             if let Some(cap) = shrink_to {
                 drop(guard);
@@ -461,21 +446,18 @@ where
 
         for i in 0..(table.capacity + NEIGHBORHOOD_SIZE) {
             let bucket = table.get_bucket(i);
-            let entry_ptr = bucket.slot.load(Ordering::Acquire, &guard);
+            let word = bucket.load(Ordering::Acquire, &guard);
 
-            if !entry_ptr.is_null()
-                && bucket
-                    .slot
-                    .compare_exchange(
-                        entry_ptr,
-                        unsafe { Shared::from_raw(core::ptr::null_mut()) },
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                        &guard,
-                    )
-                    .is_ok()
+            if !word.is_free()
+                && bucket.replace(
+                    word,
+                    Word::free(),
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                    &guard,
+                )
             {
-                unsafe { retire(entry_ptr.as_raw()) };
+                unsafe { retire(word.ptr()) };
             }
 
             if i < table.capacity {
