@@ -79,6 +79,32 @@ fn hashmap_accessors_need_no_hash_eq_clone_or_buildhasher() {
 }
 
 #[test]
+fn new_and_with_capacity_need_no_hash_eq_or_clone() {
+    let map: HopscotchMap<NoBounds, NoBounds> = HopscotchMap::new();
+    assert!(map.is_empty());
+    let map: HopscotchMap<NoBounds, NoBounds> = HopscotchMap::with_capacity(128);
+    assert!(map.capacity() >= 128);
+
+    let map: KHashMap<NoBounds, NoBounds> = KHashMap::new();
+    assert!(map.is_empty());
+    let map: KHashMap<NoBounds, NoBounds> = KHashMap::with_capacity(128);
+    assert!(map.capacity() >= 128);
+}
+
+/// `Clone` and `Debug` only: no `Hash`, no `Eq`.
+#[derive(Clone, Debug)]
+struct CloneDebugOnly;
+
+#[test]
+fn debug_needs_no_hash_or_buildhasher() {
+    // HopscotchMap's walk compares keys (K: Eq), HashMap's does not; neither hashes.
+    let map: HopscotchMap<i32, CloneDebugOnly, NoHasher> = HopscotchMap::with_hasher(NoHasher);
+    assert_eq!(format!("{map:?}"), "{}");
+    let map: KHashMap<CloneDebugOnly, CloneDebugOnly, NoHasher> = KHashMap::with_hasher(NoHasher);
+    assert_eq!(format!("{map:?}"), "{}");
+}
+
+#[test]
 fn hopscotch_into_iterator_for_ref_needs_no_hash_or_buildhasher() {
     // K: Eq + Clone (the walk yields owned clones - see the impl's doc comment), but no Hash and
     // no S: BuildHasher: `NoHasher` implements neither.

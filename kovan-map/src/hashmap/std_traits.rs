@@ -23,11 +23,12 @@ impl<K: 'static, V: 'static, S: Default> Default for HashMap<K, V, S> {
 }
 
 /// A snapshot of the map's entries, as `std::collections::HashMap`'s `Debug` prints its own.
+/// Bounded by what the walk needs (owned clones), never by `Hash`, `Eq` or `S: BuildHasher`:
+/// printing hashes nothing.
 impl<K, V, S> fmt::Debug for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + fmt::Debug + 'static,
+    K: Clone + fmt::Debug + 'static,
     V: Clone + fmt::Debug + 'static,
-    S: BuildHasher,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()

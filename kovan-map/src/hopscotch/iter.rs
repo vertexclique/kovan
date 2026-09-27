@@ -236,8 +236,9 @@ where
     }
 }
 
-// Bounded by exactly what `Iterator for HopscotchIter` needs (see its own comment): a concurrent
-// walk yields owned clones, so `K: Eq + Clone` and `V: Clone` are unavoidable here, unlike std's
+// Bounded by exactly what `Iterator for HopscotchIter` needs (`met_before` compares keys to skip
+// one the walk meets twice): a concurrent walk yields owned clones, so `K: Eq + Clone` and
+// `V: Clone` are unavoidable here, unlike std's
 // unconstrained `IntoIterator for &HashMap`, which yields borrowed `(&K, &V)` and hashes nothing
 // at this bound-checked level either.
 impl<'a, K, V, S> IntoIterator for &'a HopscotchMap<K, V, S>
