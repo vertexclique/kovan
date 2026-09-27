@@ -37,9 +37,14 @@ wasm-bindgen-test = "0.3"
 criterion = { version = "0.5", features = ["html_reports"] }
 shuttle = "0.9.1"
 proptest = "1.11"
+rapidhash = "4.5"
 
 [[bench]]
 name = "perf"
+harness = false
+
+[[bench]]
+name = "hopscotch_ops"
 harness = false
 
 # Single-threaded adaptations of the tests/*.rs integration tests, kept
