@@ -724,7 +724,6 @@ mod matches_std_on_any_sequence {
     }
 
     fn check<M: Map<u64, u64>>(steps: &[Step]) {
-        let _serial = serial();
         let map = M::with_capacity(64);
         let mut model: StdMap<u64, u64> = StdMap::new();
         for (i, s) in steps.iter().enumerate() {
@@ -758,27 +757,34 @@ mod matches_std_on_any_sequence {
         assert_eq!(walked, want, "{}: contents", M::NAME);
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(scaled(256) as u32))]
+    /// Every case under one `serial` hold, never one per case: a thread that ran a case keeps
+    /// its reservation published while it waits for the lock, so another test running between
+    /// two cases has batches parked on that idle thread and its `settle` never balances.
+    fn differential<M: Map<u64, u64>>(max_steps: usize) {
+        let _serial = serial();
+        proptest!(
+            ProptestConfig::with_cases(scaled(256) as u32),
+            |(steps in proptest::collection::vec(step(), 0..max_steps))| check::<M>(&steps)
+        );
+    }
 
-        #[test]
-        fn hashmap(steps in proptest::collection::vec(step(), 0..600)) {
-            check::<HashMap<u64, u64, Fold>>(&steps);
-        }
+    #[test]
+    fn hashmap() {
+        differential::<HashMap<u64, u64, Fold>>(600);
+    }
 
-        #[test]
-        fn hashmap_one_chain(steps in proptest::collection::vec(step(), 0..300)) {
-            check::<HashMap<u64, u64, Constant>>(&steps);
-        }
+    #[test]
+    fn hashmap_one_chain() {
+        differential::<HashMap<u64, u64, Constant>>(300);
+    }
 
-        #[test]
-        fn hopscotch(steps in proptest::collection::vec(step(), 0..600)) {
-            check::<HopscotchMap<u64, u64, Fold>>(&steps);
-        }
+    #[test]
+    fn hopscotch() {
+        differential::<HopscotchMap<u64, u64, Fold>>(600);
+    }
 
-        #[test]
-        fn hopscotch_identity(steps in proptest::collection::vec(step(), 0..600)) {
-            check::<HopscotchMap<u64, u64, Identity>>(&steps);
-        }
+    #[test]
+    fn hopscotch_identity() {
+        differential::<HopscotchMap<u64, u64, Identity>>(600);
     }
 }
