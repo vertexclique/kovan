@@ -26,6 +26,23 @@ struct NoBounds;
 /// of the iterators needs no `S: BuildHasher` either.
 struct NoHasher;
 
+/// `Default` only, not `BuildHasher`: proves `Default for Map` needs exactly `S: Default`, as
+/// `std::collections::HashMap`'s does (construction never hashes).
+#[derive(Default)]
+struct DefaultOnlyHasher;
+
+#[test]
+fn hopscotch_default_needs_only_s_default() {
+    let map: HopscotchMap<NoBounds, NoBounds, DefaultOnlyHasher> = HopscotchMap::default();
+    assert!(map.is_empty());
+}
+
+#[test]
+fn hashmap_default_needs_only_s_default() {
+    let map: KHashMap<NoBounds, NoBounds, DefaultOnlyHasher> = KHashMap::default();
+    assert!(map.is_empty());
+}
+
 #[test]
 fn hopscotch_accessors_need_no_hash_eq_clone_or_buildhasher() {
     let map: HopscotchMap<NoBounds, NoBounds, NoHasher> =

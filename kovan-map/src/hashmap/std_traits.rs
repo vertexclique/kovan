@@ -11,16 +11,12 @@ use super::HashMap;
 use core::fmt;
 use core::hash::{BuildHasher, Hash};
 
-/// Creates an empty map with `S`'s default hasher and the default capacity, as
-/// `std::collections::HashMap`'s `Default` does for any `S: Default`. Not `#[cfg(feature =
-/// "std")]`: unlike [`HashMap::new`] (which needs `foldhash::fast::FixedState`'s `std`-only
-/// default), this is generic over the caller's own `S` and asks nothing of it beyond `Default`.
-impl<K, V, S> Default for HashMap<K, V, S>
-where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
-    S: BuildHasher + Default,
-{
+/// Creates an empty map with `S`'s default hasher and the default capacity, bounded by exactly
+/// what `std::collections::HashMap`'s `Default` needs: `S: Default` (construction never hashes,
+/// so `K`/`V` carry only the struct's own `'static`, and `S` needs no `BuildHasher` either). Not
+/// `#[cfg(feature = "std")]`: unlike [`HashMap::new`] (which needs `foldhash::fast::FixedState`'s
+/// `std`-only default), this is generic over the caller's own `S`.
+impl<K: 'static, V: 'static, S: Default> Default for HashMap<K, V, S> {
     fn default() -> Self {
         Self::with_hasher(S::default())
     }
