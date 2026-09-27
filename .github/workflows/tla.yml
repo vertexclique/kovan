@@ -1,9 +1,8 @@
 name: TLA+
 
-# Model-checking scripts are DISCOVERED, never hand-listed: `tla.sh` picks up
-# any `tla/<name>/run_tlc.sh` from `cargo metadata`-independent globbing, so a
-# new model directory needs no change here. The job passes trivially until
-# the first model lands.
+# Models are never hand-listed here: `tla.sh` hands a verified tla2tools.jar
+# to `tla/run_tlc.sh all`, which checks every family under tla/ against its
+# EXPECTED.txt, so a new model needs no change to this workflow.
 
 on:
   push:
