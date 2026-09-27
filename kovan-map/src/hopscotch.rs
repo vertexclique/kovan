@@ -167,7 +167,16 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let hash = self.hasher.hash_one(key);
+        self.get_hashed(self.hasher.hash_one(key), key)
+    }
+
+    /// [`get`](Self::get) of a key whose hash the caller already took.
+    #[inline(always)]
+    fn get_hashed<Q>(&self, hash: u64, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let guard = pin();
         let table_ptr = self.table.load(Ordering::Acquire, &guard);
         let table = unsafe { &*table_ptr.as_raw() };
@@ -182,7 +191,8 @@ where
     /// Linearizable at the write under the key's home guard; the answer is
     /// exactly the value that write replaced.
     pub fn insert(&self, key: K, value: V) -> Option<V> {
-        match self.insert_impl(key, value, false, |_| ()) {
+        let hash = self.hasher.hash_one(&key);
+        match self.insert_impl(hash, key, value, false, |_| ()) {
             Outcome::Linked(()) => None,
             Outcome::Replaced(old) | Outcome::Present(old) => Some(old),
         }
@@ -193,24 +203,13 @@ where
     /// `on_insert` reads the value this call linked.
     fn insert_impl<R>(
         &self,
+        hash: u64,
         key: K,
         value: V,
         only_if_absent: bool,
         on_insert: impl FnOnce(&V) -> R,
     ) -> Outcome<R, V> {
-        let hash = self.hasher.hash_one(&key);
         let mut pending = Pending::Parts { hash, key, value };
-
-        // A claim answers a present key from the lookup `get` makes, before any write step: it
-        // writes nothing then, so it takes effect at that lookup and costs what a `get` costs.
-        if only_if_absent {
-            let guard = pin();
-            // SAFETY: loaded under `guard`, which keeps the table alive while it is read.
-            let table = unsafe { &*self.table.load(Ordering::Acquire, &guard).as_raw() };
-            if let Some(entry) = table.lookup(hash, pending.key(), &guard) {
-                return Outcome::Present(entry.value.clone());
-            }
-        }
 
         loop {
             self.wait_for_resize();
@@ -302,7 +301,13 @@ where
     /// there (the winner's, unless a later write already replaced it). A
     /// present key is answered by a lookup that takes no guard.
     pub fn get_or_insert(&self, key: K, value: V) -> V {
-        match self.insert_impl(key, value, true, V::clone) {
+        // A present key is answered by the lookup `get` makes, before any write step: this call
+        // writes nothing then, so it takes effect at that lookup. The hash is taken once.
+        let hash = self.hasher.hash_one(&key);
+        if let Some(v) = self.get_hashed(hash, &key) {
+            return v;
+        }
+        match self.insert_impl(hash, key, value, true, V::clone) {
             Outcome::Linked(own) | Outcome::Present(own) | Outcome::Replaced(own) => own,
         }
     }
@@ -316,7 +321,12 @@ where
     /// final). A call that finds the key present drops its own key and value,
     /// once.
     pub fn insert_if_absent(&self, key: K, value: V) -> Option<V> {
-        match self.insert_impl(key, value, true, |_| ()) {
+        // As `get_or_insert`: a present key is answered by a lookup, with the one hash.
+        let hash = self.hasher.hash_one(&key);
+        if let Some(existing) = self.get_hashed(hash, &key) {
+            return Some(existing);
+        }
+        match self.insert_impl(hash, key, value, true, |_| ()) {
             Outcome::Linked(()) => None,
             Outcome::Present(existing) | Outcome::Replaced(existing) => Some(existing),
         }
