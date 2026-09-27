@@ -307,10 +307,12 @@ where
     }
 }
 
+// `K: Send, V: Send`: an entry an insert replaces is retired, and its destructor may run on
+// another thread.
 impl<K, V, S> core::iter::FromIterator<(K, V)> for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher + Default,
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {

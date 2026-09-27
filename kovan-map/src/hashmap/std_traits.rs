@@ -3,6 +3,11 @@
 //! give them, built entirely on `HashMap`'s public API (`iter`, `get`, `len`,
 //! `with_capacity_and_hasher`, `insert`). None of it touches a write path's own body.
 //!
+//! `Clone` and `Extend<(K, V)>` also ask `K: Send, V: Send`, as `FromIterator` does: an entry
+//! their inserts replace is retired, and kovan may run a retired entry's destructor on another
+//! thread (the contract of `kovan::retire`), which a `!Send` key or value must never meet.
+//! `Extend<(&K, &V)>` needs no `Send`: its `Copy` keys and values have no destructor.
+//!
 //! `FromIterator` and both `IntoIterator` impls live in `iter.rs`, next to the iterator types
 //! they return; `Send`/`Sync`/`Drop` stay in the main module, next to the field layout they
 //! reason about.
@@ -41,8 +46,8 @@ where
 /// in the result.
 impl<K, V, S> Clone for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher + Clone,
 {
     fn clone(&self) -> Self {
@@ -62,8 +67,8 @@ where
 /// map's own writers.
 impl<K, V, S> Extend<(K, V)> for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {

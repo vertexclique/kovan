@@ -127,27 +127,27 @@ fn hashmap_into_iterator_for_ref_needs_no_hash_eq_or_buildhasher() {
     assert_eq!(n, 0);
 }
 
-/// `Rc` is `!Send`: proves `FromIterator` no longer requires `K: Send, V: Send` (0.1.20's bound
-/// would refuse this at compile time).
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-struct NotSend(std::rc::Rc<i32>);
-
-#[test]
-fn from_iter_does_not_require_send() {
-    let items: Vec<(NotSend, i32)> = (0..8).map(|i| (NotSend(std::rc::Rc::new(i)), i)).collect();
-    let map: HopscotchMap<NotSend, i32> = items.iter().cloned().collect();
-    assert_eq!(map.len(), 8);
-    for (k, v) in &items {
-        assert_eq!(map.get(k), Some(*v));
-    }
-
-    let map: KHashMap<NotSend, i32> = items.into_iter().collect();
-    assert_eq!(map.len(), 8);
-}
-
 // ---------------------------------------------------------------------------
 // New trait impls, checked against std::collections::HashMap on the same input
 // ---------------------------------------------------------------------------
+
+/// `FromIterator`, `Clone` and `Extend` ask `Send` of what they insert (a replaced entry's
+/// destructor may run on another thread), never `Sync`: `Cell` is `Send` and not `Sync`.
+#[test]
+fn inserting_impls_need_send_not_sync() {
+    use std::cell::Cell;
+    let map: HopscotchMap<i32, Cell<i32>> = (0..4).map(|i| (i, Cell::new(i))).collect();
+    let mut cloned = map.clone();
+    Extend::extend(&mut cloned, [(9, Cell::new(9))]);
+    assert_eq!((map.len(), cloned.len()), (4, 5));
+    assert_eq!(cloned.get(&9).map(Cell::into_inner), Some(9));
+
+    let map: KHashMap<i32, Cell<i32>> = (0..4).map(|i| (i, Cell::new(i))).collect();
+    let mut cloned = map.clone();
+    Extend::extend(&mut cloned, [(9, Cell::new(9))]);
+    assert_eq!((map.len(), cloned.len()), (4, 5));
+    assert_eq!(cloned.get(&9).map(Cell::into_inner), Some(9));
+}
 
 #[test]
 fn hopscotch_from_iter_and_eq_match_std() {
