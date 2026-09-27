@@ -84,10 +84,13 @@ where
                     });
                     probe_bucket.store(Word::of(new_entry), Ordering::Release);
 
-                    let bucket = table.get_bucket(bucket_idx);
-                    bucket
-                        .control
-                        .fetch_or(hop_bit(offset_from_home), Ordering::Relaxed);
+                    // A read and a store, not a read-modify-write: the new table is this
+                    // resize's alone until it publishes it (the table pointer's release store
+                    // carries this word to every thread that acquires the table), so no other
+                    // thread writes the word meanwhile.
+                    let control = &table.get_bucket(bucket_idx).control;
+                    let word = control.load(Ordering::Relaxed);
+                    control.store(word | hop_bit(offset_from_home), Ordering::Relaxed);
                     return true;
                 } else {
                     return false;
