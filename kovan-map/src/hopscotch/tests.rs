@@ -481,6 +481,34 @@ fn a_move_keeps_its_entry_visible_to_lookups_and_walks_at_every_step() {
     }
 }
 
+/// A test that gives up on a thread it paused inside a move (it drops the channel that would
+/// release it) leaves the map whole: the thread finishes the move, so no entry stays linked in
+/// two slots and dropping the map frees every entry once.
+#[test]
+fn an_abandoned_pause_inside_a_move_leaves_the_map_whole() {
+    for point in [Point::MoveLinkedTwice, Point::MoveUnlinked] {
+        let map = displacing_layout();
+        let (mover, mover_arrival, mover_release) = {
+            let map = Arc::clone(&map);
+            stopped_at(point, move || map.insert(64, 64))
+        };
+        mover_arrival
+            .recv_timeout(MEET)
+            .expect("the insert moves key 2");
+        drop(mover_release);
+        assert_eq!(
+            mover.join().expect("the insert finishes"),
+            None,
+            "{point:?}"
+        );
+        assert_eq!(map.get(&2), Some(2), "{point:?}");
+        assert_eq!(map.get(&64), Some(64), "{point:?}");
+        assert_eq!(map.len(), 34, "{point:?}");
+        assert_eq!(walked_keys(&map), keys_and(&[64]), "{point:?}");
+        drop(map);
+    }
+}
+
 /// A claim of a key whose entry a displacement is moving waits for the move (which holds the
 /// key's home guard) and then finds the key. Before the fix the claim scanned mid-move, missed
 /// the entry and linked a second one.

@@ -60,9 +60,12 @@ pub(super) fn at(point: Point) {
         }
     });
     if let Some(stop) = stop {
-        stop.arrived
-            .send(())
-            .expect("the test waits for this thread's arrival");
-        stop.go.recv().expect("the test lets this thread go");
+        // A test that failed first has dropped its ends of the channels. This thread then runs
+        // its operation to the end instead of unwinding from inside it: a panic at a point
+        // inside a move would leave the entry linked in two slots, and the table's drop would
+        // free it twice.
+        if stop.arrived.send(()).is_ok() {
+            let _ = stop.go.recv();
+        }
     }
 }
