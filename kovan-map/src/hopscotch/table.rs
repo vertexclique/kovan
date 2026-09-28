@@ -462,19 +462,28 @@ impl<K, V> Table<K, V> {
         unsafe { self.buckets.get_unchecked(idx) }
     }
 
-    /// Slot `idx`'s entry for a [`Walk`], prefetched (a free slot prefetches the table itself,
-    /// which keeps the prefetch free of a branch). Acquire: pairs with the release that linked
-    /// the entry, so its fields are visible.
+    /// Slot `idx`'s entry for a [`Walk`], prefetched ([`Table::prefetch_entry`]). Acquire: pairs
+    /// with the release that linked the entry, so its fields are visible.
     #[inline(always)]
     fn read_ahead(&self, idx: usize, guard: &kovan::Guard) -> *mut Entry<K, V> {
         let entry = self.get_bucket(idx).load(Ordering::Acquire, guard).ptr();
-        let line: *const u8 = if entry.is_null() {
-            (self as *const Self).cast()
-        } else {
-            entry.cast_const().cast()
-        };
-        prefetch(line);
+        self.prefetch_entry(entry);
         entry
+    }
+
+    /// Ask the cache for `entry`, a slot's entry read under a guard, ahead of a read of it: the
+    /// line of its hash, which a walk reads first, and the line of its last byte, where its
+    /// value ends (the two are one line unless the entry's fields straddle two). A free slot's
+    /// null prefetches the table itself, which keeps the prefetch free of a branch.
+    #[inline(always)]
+    pub(super) fn prefetch_entry(&self, entry: *const Entry<K, V>) {
+        let base: *const u8 = core::hint::select_unpredictable(
+            entry.is_null(),
+            (self as *const Self).cast(),
+            entry.cast(),
+        );
+        prefetch(base.wrapping_add(core::mem::offset_of!(Entry<K, V>, hash)));
+        prefetch(base.wrapping_add(core::mem::size_of::<Entry<K, V>>() - 1));
     }
 
     /// Whether slot `idx` looks free. Relaxed: only a hint for where to try, the claim's CAS

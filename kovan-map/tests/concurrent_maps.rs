@@ -377,7 +377,14 @@ mod a_walk_yields_every_steady_key_once {
             });
             for walk in 0..40 {
                 let mut seen: StdMap<u64, usize> = StdMap::new();
-                for (k, _) in map.entries() {
+                // Every other walk runs through `fold`, whose loop reads a group of slots
+                // before it yields their entries.
+                let walked = if walk % 2 == 0 {
+                    map.entries()
+                } else {
+                    map.entries_by_fold()
+                };
+                for (k, _) in walked {
                     *seen.entry(k).or_default() += 1;
                 }
                 for k in 0..steady {

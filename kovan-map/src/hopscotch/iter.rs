@@ -30,7 +30,10 @@ impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
     /// (so it is not repeated). An insert publishes its entry's hop bit before
     /// it links the entry, so an entry the walk finds in a slot is one a
     /// lookup finds too. An entry inserted, removed or updated concurrently may
-    /// or may not be reflected, and no key is yielded twice.
+    /// or may not be reflected, and no key is yielded twice. The iterator's
+    /// own loop (`fold`, and `for_each`, `count` and the other folds built on
+    /// it) reads a group of slots before it yields their entries, so a write
+    /// its closure makes is one of those concurrent writes too.
     pub fn iter(&self) -> HopscotchIter<'_, K, V, S> {
         let guard = pin();
         let table = self.table.load(Ordering::Acquire, &guard).as_raw();
@@ -42,9 +45,7 @@ impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
             slots,
             mask,
             bucket_idx: 0,
-            recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
-            recent_hash: [0; NEIGHBORHOOD_SIZE],
-            same_key: <K as PartialEq>::eq,
+            seen: Seen::new(<K as PartialEq>::eq),
             guard,
             _map: PhantomData,
         }
@@ -69,20 +70,51 @@ pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
     slots: usize,
     mask: usize,
     bucket_idx: usize,
+    seen: Seen<K, V>,
+    guard: kovan::Guard,
+    _map: PhantomData<&'a HopscotchMap<K, V, S>>,
+}
+
+/// Slots a walk's `fold` reads before it yields their entries: one bit each of a `u64`.
+const GROUP: usize = u64::BITS as usize;
+
+/// What a walk remembers of the slots it met: how it recognizes a key it already met.
+struct Seen<K, V> {
     /// The entry the walk read in each of its last `NEIGHBORHOOD_SIZE` slots (slot `i` at
-    /// `i % NEIGHBORHOOD_SIZE`, null for a free slot),
-    /// loaded under `guard`: how the walk recognizes a key it already met.
+    /// `i % NEIGHBORHOOD_SIZE`, null until the walk meets an entry there), loaded under the
+    /// walk's guard.
     recent: [*const Entry<K, V>; NEIGHBORHOOD_SIZE],
     /// The hash of the entry in each slot of `recent` (meaningless for a free slot): the walk
     /// compares hashes here, in its own memory, and reads an earlier entry only on a match.
     recent_hash: [u64; NEIGHBORHOOD_SIZE],
     /// `K`'s equality, taken where `iter` is built.
     same_key: fn(&K, &K) -> bool,
-    guard: kovan::Guard,
-    _map: PhantomData<&'a HopscotchMap<K, V, S>>,
 }
 
-impl<K, V, S> HopscotchIter<'_, K, V, S> {
+impl<K, V> Seen<K, V> {
+    /// Nothing met yet.
+    fn new(same_key: fn(&K, &K) -> bool) -> Self {
+        Self {
+            recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
+            recent_hash: [0; NEIGHBORHOOD_SIZE],
+            same_key,
+        }
+    }
+
+    /// Whether the walk yields `entry`, which it read at slot `idx` (the slots it read before
+    /// are all lower) of a table whose home mask is `mask`: `false` for a key it already met.
+    /// Every walk step, `next` and `fold` alike, is this call.
+    #[inline(always)]
+    fn first_meeting(&mut self, entry: &Entry<K, V>, idx: usize, mask: usize) -> bool {
+        // A free slot leaves its cell as it was. A stale cell (an entry met at least
+        // `NEIGHBORHOOD_SIZE` slots back) never matches: an entry's two slots in a move, or two
+        // entries of one key, share a home and so lie within one neighborhood, and `met_before`
+        // reads no cell below the home. The walk's guard keeps a stale entry allocated.
+        self.recent[idx % NEIGHBORHOOD_SIZE] = entry;
+        self.recent_hash[idx % NEIGHBORHOOD_SIZE] = entry.hash;
+        !self.met_before((entry.hash as usize) & mask, idx, entry)
+    }
+
     /// Whether the walk already met the key of `entry`, read at slot `idx`, in a lower slot of
     /// the key's neighborhood (which starts at `home`). A move carries an entry to a higher slot
     /// of its neighborhood, so the walk can meet it a second time there (or a newer entry of its
@@ -96,12 +128,84 @@ impl<K, V, S> HopscotchIter<'_, K, V, S> {
                 return false;
             }
             let seen = self.recent[slot];
-            // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
-            // being freed.
+            // SAFETY: null for a slot where the walk met no entry yet, else loaded under the
+            // walk's guard, which keeps it from being freed.
             unsafe { seen.as_ref() }.is_some_and(|seen| {
                 core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key)
             })
         })
+    }
+}
+
+impl<K, V, S> HopscotchIter<'_, K, V, S> {
+    /// The next entry the walk yields: the step of every `next` of the map's walks.
+    #[inline(always)]
+    fn next_entry(&mut self) -> Option<&Entry<K, V>> {
+        // SAFETY: owned by this iterator's `guard`, which was pinned before `table` was loaded
+        // and dies with the iterator: a resize that retires the table cannot free it (or its
+        // entries) while the guard is held.
+        let table = unsafe { &*self.table };
+        while self.bucket_idx < self.slots {
+            let idx = self.bucket_idx;
+            self.bucket_idx += 1;
+            let entry = table
+                .get_bucket(idx)
+                .load(Ordering::Acquire, &self.guard)
+                .entry();
+            if let Some(entry) = entry
+                && self.seen.first_meeting(entry, idx, self.mask)
+            {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
+    /// The rest of the walk, `f` on each entry it yields, in one loop whose position and
+    /// accumulator are locals: the loop of every `fold` of the map's walks. It reads the slots
+    /// a group of `GROUP` at a time, in order, and then yields the entries it read there: each
+    /// entry's line, prefetched when its slot is read, reaches the cache while the rest of the
+    /// group is read, and the group's free slots cost no branch. It reads each slot once, in
+    /// order, as `next` does, so what it yields keeps the guarantees of [`HopscotchMap::iter`];
+    /// it reads a slot up to `GROUP - 1` slots before it yields the slot's entry.
+    #[inline(always)]
+    fn fold_entries<B>(self, init: B, mut f: impl FnMut(B, &Entry<K, V>) -> B) -> B {
+        let Self {
+            table,
+            slots,
+            mask,
+            bucket_idx,
+            mut seen,
+            guard,
+            ..
+        } = self;
+        // SAFETY: as in `next_entry`: `guard` was pinned before `table` was loaded and lives to
+        // the end of this call.
+        let table = unsafe { &*table };
+        let mut acc = init;
+        let mut group = [core::ptr::null::<Entry<K, V>>(); GROUP];
+        let mut first = bucket_idx;
+        for buckets in table.buckets[bucket_idx..slots].chunks(GROUP) {
+            let mut occupied = 0u64;
+            for (offset, (bucket, cell)) in buckets.iter().zip(&mut group).enumerate() {
+                let entry: *const Entry<K, V> = bucket.load(Ordering::Acquire, &guard).ptr();
+                *cell = entry;
+                occupied |= u64::from(!entry.is_null()) << offset;
+                table.prefetch_entry(entry);
+            }
+            while occupied != 0 {
+                let offset = occupied.trailing_zeros() as usize;
+                occupied &= occupied - 1;
+                // SAFETY: a slot's non-null word, loaded under `guard`, which keeps its entry from
+                // being freed.
+                let entry = unsafe { &*group[offset] };
+                if seen.first_meeting(entry, first + offset, mask) {
+                    acc = f(acc, entry);
+                }
+            }
+            first += buckets.len();
+        }
+        acc
     }
 }
 
@@ -113,36 +217,19 @@ where
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // SAFETY: owned by this iterator's `guard`, which was pinned before
-        // `table` was loaded and dies with the iterator: a resize that
-        // retires the table cannot free it (or its entries) while the guard
-        // is held.
-        let table = unsafe { &*self.table };
+        self.next_entry()
+            .map(|entry| (entry.key.clone(), entry.value.clone()))
+    }
 
-        while self.bucket_idx < self.slots {
-            let idx = self.bucket_idx;
-            self.bucket_idx += 1;
-            let entry_ptr: *const Entry<K, V> = table
-                .get_bucket(idx)
-                .load(Ordering::Acquire, &self.guard)
-                .ptr();
-            // SAFETY: null for a free slot, else loaded under `self.guard`, which keeps it from
-            // being freed.
-            let Some(entry) = (unsafe { entry_ptr.as_ref() }) else {
-                // A free slot leaves its cell as it was. A stale cell (an entry met at least
-                // `NEIGHBORHOOD_SIZE` slots back) never matches: an entry's two slots in a move,
-                // or two entries of one key, share a home and so lie within one neighborhood,
-                // and `met_before` reads no cell below the home. The walk's guard keeps a stale
-                // entry allocated.
-                continue;
-            };
-            self.recent[idx % NEIGHBORHOOD_SIZE] = entry_ptr;
-            self.recent_hash[idx % NEIGHBORHOOD_SIZE] = entry.hash;
-            if !self.met_before((entry.hash as usize) & self.mask, idx, entry) {
-                return Some((entry.key.clone(), entry.value.clone()));
-            }
-        }
-        None
+    /// The rest of the walk in the walk's own loop (`for_each`, `count`, `sum` and the other
+    /// folds of `Iterator` come here).
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.fold_entries(init, |acc, entry| {
+            f(acc, (entry.key.clone(), entry.value.clone()))
+        })
     }
 }
 

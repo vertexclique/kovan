@@ -345,6 +345,38 @@ impl BuildHasher for Identity {
     }
 }
 
+/// Hashes a `u64` key below 128 to itself with its seven bits repeated at the top of the hash:
+/// the key's bucket is the one it names, as under [`Identity`], and keys of different buckets
+/// differ in their top bits too, which a walk compares first.
+#[derive(Clone, Copy, Default)]
+struct Tagged;
+
+struct TaggedHasher(u64);
+
+impl Hasher for TaggedHasher {
+    fn finish(&self) -> u64 {
+        self.0 | self.0 << 57
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 << 8) | u64::from(*byte);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+impl BuildHasher for Tagged {
+    type Hasher = TaggedHasher;
+
+    fn build_hasher(&self) -> TaggedHasher {
+        TaggedHasher(0)
+    }
+}
+
 /// A walk whose table grows under it keeps walking the table it started on. Key 70's home is
 /// bucket 6 in 64 buckets (it sits in slot 10, the first free slot of bucket 6's neighborhood)
 /// and bucket 70 in 128: a walk that moved to the new table at its position would meet key 70
@@ -411,7 +443,7 @@ fn displacing_layout() -> Arc<HopscotchMap<u64, u64, Identity>> {
 }
 
 /// The key in slot `idx` of the map's current table.
-fn key_at(map: &HopscotchMap<u64, u64, Identity>, idx: usize) -> Option<u64> {
+fn key_at<S>(map: &HopscotchMap<u64, u64, S>, idx: usize) -> Option<u64> {
     let guard = pin();
     let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
     let word = table.get_bucket(idx).load(Ordering::Acquire, &guard);
@@ -630,6 +662,111 @@ fn a_walk_meets_a_key_once_when_it_is_moved_ahead_and_updated() {
     seen.sort_unstable();
     let want: Vec<(u64, u64)> = (0..=32).map(|k| (k, k)).collect();
     assert_eq!(seen, want, "key 2 once, as the walk first met it");
+}
+
+/// A walk that met key 2 in slot 2 through `next`, and folds the rest after a displacement moved
+/// key 2 to slot 33, does not count it again there: the fold recognizes what `next` met.
+#[test]
+fn a_fold_after_next_meets_a_key_a_displacement_moved_ahead_of_it_once() {
+    let map = displacing_layout();
+    let mut walk = map.iter();
+    let seen: Vec<u64> = walk.by_ref().take(3).map(|(k, _)| k).collect();
+    assert_eq!(seen, [0, 1, 2]);
+    assert_eq!(map.insert(64, 64), None);
+    assert_displaced(&map);
+    // Keys 3..=32 in slots 3..=32, and key 2 in slot 33 once more.
+    assert_eq!(walk.count(), 30, "key 2 once: not met again in slot 33");
+}
+
+/// A 64-bucket map whose keys `32..64` sit each in its home slot (under `Identity` or `Tagged`),
+/// so the neighborhood of bucket 32 (slots 32..64) is full and slots 64.. are free.
+fn upper_half_layout<S: BuildHasher + Default>() -> HopscotchMap<u64, u64, S> {
+    let map = HopscotchMap::with_capacity_and_hasher(64, S::default());
+    for k in 32..64 {
+        map.insert(k, k);
+    }
+    map
+}
+
+/// How many times each key comes out of a fold over `map` whose closure runs `write` once, at
+/// the first entry it gets.
+fn fold_counts<S: BuildHasher>(
+    map: &HopscotchMap<u64, u64, S>,
+    write: impl FnOnce(),
+) -> std::collections::BTreeMap<u64, usize> {
+    let mut write = Some(write);
+    map.iter()
+        .fold(std::collections::BTreeMap::new(), |mut counts, (k, _)| {
+            if let Some(write) = write.take() {
+                write();
+            }
+            *counts.entry(k).or_insert(0) += 1;
+            counts
+        })
+}
+
+/// A fold meets a key once when a displacement, made from the fold's own closure, moves the key
+/// from a slot the fold may already have read to one it reads later: inserting key 96 (home
+/// bucket 32) moves key 33 from slot 33 to slot 64, the first slot of the table's second group
+/// of `u64::BITS` slots, which the fold reads after it yields the first.
+fn a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once<S: BuildHasher + Default>() {
+    let map = upper_half_layout::<S>();
+    let counts = fold_counts(&map, || {
+        assert_eq!(map.insert(96, 96), None);
+        assert_eq!(
+            key_at(&map, 33),
+            Some(96),
+            "key 96 took the slot key 33 left"
+        );
+        assert_eq!(key_at(&map, 64), Some(33), "key 33 moved to slot 64");
+    });
+    for k in 32..64 {
+        assert_eq!(
+            counts.get(&k),
+            Some(&1),
+            "key {k}, present throughout, once"
+        );
+    }
+    assert!(counts.values().all(|&n| n == 1), "no key twice: {counts:?}");
+}
+
+#[test]
+fn a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once_identity() {
+    a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once::<Identity>();
+}
+
+#[test]
+fn a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once_tagged() {
+    a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once::<Tagged>();
+}
+
+/// A fold meets a key once when the fold's own closure removes it from a slot the fold may
+/// already have read and inserts it again into one the fold reads later: key 127 (home bucket
+/// 63) takes slot 63 first, so key 63 lands in slot 64. The new entry is another allocation of
+/// the same key, which the fold recognizes by comparing keys.
+fn a_fold_meets_a_key_reinserted_ahead_of_it_once<S: BuildHasher + Default>() {
+    let map = upper_half_layout::<S>();
+    let counts = fold_counts(&map, || {
+        assert_eq!(map.remove(&63), Some(63));
+        assert_eq!(map.insert(127, 127), None);
+        assert_eq!(map.insert(63, 630), None);
+        assert_eq!(key_at(&map, 63), Some(127));
+        assert_eq!(key_at(&map, 64), Some(63), "key 63 again, in slot 64");
+    });
+    for k in 32..64 {
+        assert_eq!(counts.get(&k), Some(&1), "key {k} once");
+    }
+    assert!(counts.values().all(|&n| n == 1), "no key twice: {counts:?}");
+}
+
+#[test]
+fn a_fold_meets_a_key_reinserted_ahead_of_it_once_identity() {
+    a_fold_meets_a_key_reinserted_ahead_of_it_once::<Identity>();
+}
+
+#[test]
+fn a_fold_meets_a_key_reinserted_ahead_of_it_once_tagged() {
+    a_fold_meets_a_key_reinserted_ahead_of_it_once::<Tagged>();
 }
 
 /// A displacement whose first candidate's home guard is held by another writer moves the next

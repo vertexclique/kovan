@@ -27,6 +27,8 @@ pub trait Map<K, V>: Send + Sync + 'static {
     fn len(&self) -> usize;
     fn clear(&self);
     fn entries(&self) -> Vec<(K, V)>;
+    /// What `entries` returns, gathered by the walk's own loop (`for_each`) instead of `next`.
+    fn entries_by_fold(&self) -> Vec<(K, V)>;
 }
 
 macro_rules! impl_map {
@@ -96,6 +98,11 @@ macro_rules! impl_map {
             }
             fn entries(&self) -> Vec<(K, V)> {
                 $map::iter(self).collect()
+            }
+            fn entries_by_fold(&self) -> Vec<(K, V)> {
+                let mut all = Vec::new();
+                $map::iter(self).for_each(|entry| all.push(entry));
+                all
             }
         }
     };
