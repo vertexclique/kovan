@@ -8,7 +8,7 @@ use crate::retired::{INVPTR, RetiredNode, is_rnode, rnode_unmask};
 use core::sync::atomic::Ordering;
 
 /// Maximum cached free-list entries before draining
-const MAX_CACHE: usize = 12;
+pub(crate) const MAX_CACHE: usize = 12;
 
 /// Trait for types that can be reclaimed by the wait-free memory
 /// reclamation system.

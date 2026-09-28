@@ -314,12 +314,9 @@ impl Handle {
         loop {
             attempts -= 1;
             if attempts == 0 {
-                // Escalate: publish the unconditional reservation, then
-                // re-read once. Wait-free completion — no dependence on the
-                // epoch stabilizing.
-                slots.epoch[0].store_lo(EPOCH_UNCONDITIONAL, Ordering::SeqCst);
-                fence(Ordering::SeqCst);
-                self.cached_epoch.set(EPOCH_UNCONDITIONAL);
+                // Escalate, then re-read once. Wait-free completion, with no
+                // dependence on the epoch stabilizing.
+                self.escalate();
                 return data.load(order);
             }
 
@@ -343,6 +340,18 @@ impl Handle {
         }
     }
 
+    /// Publish the unconditional reservation on this thread's slot: every
+    /// load after it in the critical section is protected whatever the
+    /// global epoch does. Replaced by a real epoch at the next transition:
+    /// the outermost guard drop, or `flush()` outside a critical section.
+    #[cold]
+    fn escalate(&self) {
+        let slots = self.global().thread_slots(self.tid());
+        slots.epoch[0].store_lo(EPOCH_UNCONDITIONAL, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        self.cached_epoch.set(EPOCH_UNCONDITIONAL);
+    }
+
     /// Called when the outermost Guard drops (pin_count 1 -> 0).
     ///
     /// If the critical section escalated to the unconditional reservation
@@ -352,11 +361,20 @@ impl Handle {
     /// the slot defers every batch retired system-wide — to the critical
     /// section itself. Ordinary (non-escalated) guard drops stay free of
     /// atomic operations (the escalation check is one thread-local compare).
+    ///
+    /// The transition runs with the pin count at 1, as it does inside
+    /// `pin()`, so the destructors it runs (freeing cached batches) see
+    /// their own `pin()` as nested. At 0 a destructor's pin would be
+    /// outermost and run a second transition inside this one: the inner
+    /// transition stores the batches it freed in the free-list cache, and
+    /// this one then overwrites the cache with its own list, losing them.
     #[cold]
     fn unpin_outermost(&self) {
         let tid = self.tid();
         let global = self.global();
+        self.pin_count.set(1);
         self.do_update(global.get_epoch(), 0, tid);
+        self.pin_count.set(0);
     }
 
     /// do_update: transition epoch for a slot.
@@ -1486,6 +1504,17 @@ impl Handle {
 
         self.drain_free_list();
 
+        // The destructors run above (under the raised pin count, so their
+        // guards are nested) may have escalated their critical section.
+        // With no guard of the caller live this is where that section ends,
+        // as the outermost guard drop is for any other. Returning with the
+        // unconditional reservation published would put a node of every
+        // batch retired anywhere into this thread's slot until it pins
+        // again, forever if it goes idle.
+        if saved_pin == 0 && self.cached_epoch.get() == EPOCH_UNCONDITIONAL {
+            self.do_update(global.get_epoch(), 0, tid);
+        }
+
         self.pin_count.set(saved_pin);
         self.in_reclaim.set(false);
     }
@@ -1585,6 +1614,9 @@ impl Drop for Handle {
         self.cleanup();
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 // Thread-local handle
 #[cfg(feature = "nightly")]
