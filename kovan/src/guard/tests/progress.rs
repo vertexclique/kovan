@@ -839,3 +839,57 @@ fn flush_ends_while_others_are_held() {
     );
     drain(&live);
 }
+
+/// A helper stays with the request it started helping: once that request
+/// is answered, even if the pending thread opens its next one at once, the
+/// helper's loop ends. Following the thread into its next request would let
+/// epoch advances made for that one keep the helper looping.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn help_ends_when_its_request_changes() {
+    let _l = lock();
+    let mut pending = FakePending::open(crate::slot::epoch());
+    let (pending_tid, seqno) = (pending.tid, pending.seqno);
+    let passes = Arc::new(AtomicUsize::new(0));
+    let p = Arc::clone(&passes);
+    join_within(
+        thread::spawn(move || {
+            let tid = own_tid();
+            stall::arm(Step::HelpPass, tid, move || {
+                if p.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // During the first pass the epoch moves, another helper
+                    // answers the request, and the pending thread ends that
+                    // cycle and opens its next request.
+                    crate::slot::advance_epoch();
+                    let slots = crate::slot::global().thread_slots(pending_tid);
+                    let result = &slots.state[0].result;
+                    result.store(0, crate::slot::epoch(), Ordering::SeqCst);
+                    slots.epoch[0].store_hi(seqno + 2, Ordering::SeqCst);
+                    slots.first[0].store_hi(seqno + 2, Ordering::SeqCst);
+                    result.store(crate::retired::INVPTR as u64, seqno + 2, Ordering::SeqCst);
+                }
+                true
+            });
+            with_handle(|h| h.help_thread(pending_tid, 0, tid));
+            stall::disarm(Step::HelpPass, tid);
+        }),
+        "the helper",
+    );
+    assert_eq!(passes.load(Ordering::SeqCst), 1);
+    let result = crate::slot::global().thread_slots(pending_tid).state[0]
+        .result
+        .load();
+    assert_eq!(
+        result,
+        (crate::retired::INVPTR as u64, seqno + 2),
+        "the helper answered a later request than the one it was helping"
+    );
+    pending.seqno += 2;
+    join_within(
+        thread::spawn(move || {
+            own_tid();
+            pending.finish();
+        }),
+        "the pending thread's exit",
+    );
+}

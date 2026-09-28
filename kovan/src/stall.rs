@@ -33,6 +33,9 @@ pub(crate) enum Step {
     /// read the slot and not yet tried to empty it (one pass of the
     /// detach's loop).
     DetachList,
+    /// A helper has made one pass of its loop (updated its helper slot) and
+    /// not yet read the epoch again.
+    HelpPass,
     /// A protected load's convergence pass has loaded the pointer and not
     /// yet read the epoch again.
     LoadAttempt,

@@ -802,13 +802,15 @@ impl Handle {
     ///
     /// The main loop exits when either:
     /// 1. Epoch stabilizes (curr_epoch == prev_epoch) and result CAS succeeds, or
-    /// 2. Another helper already set the result (result ≠ INVPTR).
+    /// 2. The request it helps changed: another helper set the result, or
+    ///    the pending thread went on to a later request.
     ///
     /// For the epoch to advance during this loop, some thread must call
     /// `advance_epoch()`, which is preceded by `help_read()`. After at most
     /// T concurrent epoch advances, no more threads are in the
     /// advance phase and the epoch stabilizes. The bound is independent of
-    /// the helpee's progress — the helpee is passive.
+    /// the helpee's progress: the helpee is passive, and the loop never
+    /// follows it into a later request, whose advances would count anew.
     ///
     /// The hand-over loops are bounded too: the list's (`detach_nodes`) by
     /// the retires in flight when the slot closed to new batches, the
@@ -842,15 +844,16 @@ impl Handle {
 
         if result_hi == seqno {
             let mut curr_epoch = slot::epoch();
-            let (mut last_result_lo, mut last_result_hi) = (result_lo, result_hi);
 
-            // As the pending thread's own loop: another pass only after the
-            // epoch moved during this one and the request is still open, and
-            // an advance by a thread that read the request open helped it
-            // first, completing it. At most T + 2 passes, each one do_update
-            // of this thread's helper slot.
+            // At most T + 2 passes, each one do_update of this thread's
+            // helper slot: another pass only after the epoch moved during
+            // this one while the same request is still open (the argument of
+            // the pending thread's own loop). A request answered, or followed
+            // by the pending thread's next one, ends the loop.
             loop {
                 let prev_epoch = self.do_update(curr_epoch, hr_num + 1, mytid);
+                #[cfg(test)]
+                crate::stall::at(crate::stall::Step::HelpPass, mytid);
                 // In reserve_slot mode (pointer=0), ptr is always null
                 curr_epoch = slot::epoch();
 
@@ -858,7 +861,7 @@ impl Handle {
                     // Try to set result
                     if helpee.state[index]
                         .result
-                        .compare_exchange(last_result_lo, last_result_hi, 0, curr_epoch)
+                        .compare_exchange(result_lo, result_hi, 0, curr_epoch)
                         .is_ok()
                     {
                         let list = self.detach_nodes(helpee, index, seqno);
@@ -897,9 +900,7 @@ impl Handle {
                     break;
                 }
 
-                // Check if result was already set
-                (last_result_lo, last_result_hi) = helpee.state[index].result.load();
-                if last_result_lo != INVPTR as u64 {
+                if helpee.state[index].result.load() != (result_lo, result_hi) {
                     break;
                 }
             }
