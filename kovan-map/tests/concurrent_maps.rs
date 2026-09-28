@@ -13,8 +13,11 @@ mod maps;
 #[path = "support/stress.rs"]
 mod stress;
 
+#[path = "concurrent/conditional.rs"]
+mod conditional;
+
 use kovan_map::{HashMap, HopscotchMap};
-use lin::{Call, Event, linearizable};
+use lin::{Call, Event, REFUSED, linearizable, perform};
 use maps::{Clustered, Constant, Grouped, Identity, Map};
 use std::collections::HashMap as StdMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -500,9 +503,10 @@ fn hopscotch_a_key_being_moved_stays_findable_and_removable() {
     }
 }
 
-/// Recorded concurrent histories of every writing and reading call (clear included) on two keys,
-/// with a thread churning other keys so the table grows and shrinks under them, are
-/// linearizable per key.
+/// Recorded concurrent histories of every writing and reading call (clear and the conditional
+/// writes included) on two keys, with a thread churning other keys so the table grows and
+/// shrinks under them, are linearizable per key. A compare-and-remove or a compare-and-swap
+/// expects the value its thread last saw of the key.
 mod histories_linearize_across_resizes {
     use super::*;
 
@@ -534,31 +538,32 @@ mod histories_linearize_across_resizes {
             let (m, c) = (Arc::clone(&map), Arc::clone(&clock));
             let logs: Vec<Vec<(u64, Event)>> = together(CALLERS, move |t| {
                 let mut rng = Rng::new(round as u64 * 31 + t as u64);
+                let mut last_seen = [0u64; KEYS as usize];
                 (0..CALLS)
                     .map(|i| {
                         let k = rng.below(KEYS);
                         let v = (t * CALLS + i) as u64 + 1;
-                        let call = match rng.below(21) {
+                        let seen = last_seen[k as usize];
+                        let call = match rng.below(33) {
                             0..=3 => Call::Insert(v),
-                            4..=7 => Call::InsertIfAbsent(v),
-                            8..=11 => Call::GetOrInsert(v),
-                            12..=15 => Call::Remove,
-                            16..=19 => Call::Get,
+                            4..=6 => Call::InsertIfAbsent(v),
+                            7..=9 => Call::GetOrInsert(v),
+                            10..=12 => Call::Remove,
+                            13..=16 => Call::Get,
+                            17..=18 => Call::RemoveIfEven,
+                            19..=20 => Call::CompareAndRemove(seen),
+                            21..=22 => Call::ReplaceIfEven(v),
+                            23..=25 => Call::CompareAndSwap(seen, v),
+                            26..=28 => Call::ComputeAdd(100),
+                            29..=31 => Call::ComputeToggle(v),
                             _ => Call::Clear,
                         };
                         let invoked = c.fetch_add(1, Ordering::SeqCst);
-                        let answer = match call {
-                            Call::Insert(v) => m.insert(k, v),
-                            Call::InsertIfAbsent(v) => m.insert_if_absent(k, v),
-                            Call::GetOrInsert(v) => Some(m.get_or_insert(k, v)),
-                            Call::Remove => m.remove(&k),
-                            Call::Get => m.get(&k),
-                            Call::Clear => {
-                                m.clear();
-                                None
-                            }
-                        };
+                        let answer = perform(&*m, k, call);
                         let answered = c.fetch_add(1, Ordering::SeqCst);
+                        if let Some(a) = answer {
+                            last_seen[k as usize] = a & !REFUSED;
+                        }
                         (
                             if call == Call::Clear { ALL } else { k },
                             Event {
@@ -606,7 +611,8 @@ mod histories_linearize_across_resizes {
 }
 
 /// Every value a map is given is dropped exactly once, whatever happens to it: kept, replaced,
-/// removed, refused by a claim, copied by a resize, cleared, or dropped with the map.
+/// removed, refused by a claim or a conditional write, made by a compute, copied by a resize,
+/// cleared, or dropped with the map.
 mod every_value_is_dropped_once {
     use super::*;
 
@@ -621,13 +627,23 @@ mod every_value_is_dropped_once {
                     let mut rng = Rng::new((round * 8 + t) as u64 + 7);
                     for i in 0..3_000u64 {
                         let k = rng.below(600);
-                        match rng.below(7) {
+                        let parity = rng.below(2);
+                        match rng.below(12) {
                             0 => drop(m.insert(k, c.value(i))),
                             1 => drop(m.insert_if_absent(k, c.value(i))),
                             2 => drop(m.get_or_insert(k, c.value(i))),
                             3 => drop(m.remove(&k)),
                             4 => drop(m.force_remove(&k)),
                             5 => drop(m.get(&k)),
+                            6 => drop(m.remove_if(&k, |v| v.id % 2 == parity)),
+                            7 => drop(m.compare_and_remove(&k, &c.value(i % 5))),
+                            8 => drop(m.replace_if(k, c.value(i), |v| v.id % 2 == parity)),
+                            9 => drop(m.compare_and_swap(k, &c.value(i % 5), c.value(i))),
+                            10 => drop(m.compute(k, |v| match v {
+                                Some(v) if v.id % 2 == parity => None,
+                                Some(v) => Some(c.value(v.id + 1)),
+                                None => Some(c.value(i)),
+                            })),
                             _ if t == 0 && i % 1_000 == 999 => m.clear(),
                             _ => drop(m.entries()),
                         }
@@ -693,113 +709,16 @@ mod a_clear_racing_writers_leaves_a_consistent_map {
     }
 }
 
-/// Differential against `std::collections::HashMap` over any sequence of calls from one thread:
-/// every answer and the final contents match.
-mod matches_std_on_any_sequence {
-    use super::*;
-    use proptest::prelude::*;
-    use proptest::test_runner::TestRunner;
-
-    #[derive(Clone, Debug)]
-    enum Step {
-        Insert(u64, u64),
-        InsertIfAbsent(u64, u64),
-        GetOrInsert(u64, u64),
-        Remove(u64),
-        ForceRemove(u64),
-        Get(u64),
-        Clear,
-    }
-
-    fn step() -> impl Strategy<Value = Step> {
-        let k = 0..200u64;
-        prop_oneof![
-            4 => (k.clone(), any::<u64>()).prop_map(|(k, v)| Step::Insert(k, v)),
-            3 => (k.clone(), any::<u64>()).prop_map(|(k, v)| Step::InsertIfAbsent(k, v)),
-            3 => (k.clone(), any::<u64>()).prop_map(|(k, v)| Step::GetOrInsert(k, v)),
-            3 => k.clone().prop_map(Step::Remove),
-            1 => k.clone().prop_map(Step::ForceRemove),
-            3 => k.prop_map(Step::Get),
-            1 => Just(Step::Clear),
-        ]
-    }
-
-    fn check<M: Map<u64, u64>>(steps: &[Step]) {
-        let map = M::with_capacity(64);
-        let mut model: StdMap<u64, u64> = StdMap::new();
-        for (i, s) in steps.iter().enumerate() {
-            let (got, want) = match *s {
-                Step::Insert(k, v) => (map.insert(k, v), model.insert(k, v)),
-                Step::InsertIfAbsent(k, v) => {
-                    let want = model.get(&k).copied();
-                    model.entry(k).or_insert(v);
-                    (map.insert_if_absent(k, v), want)
-                }
-                Step::GetOrInsert(k, v) => (
-                    Some(map.get_or_insert(k, v)),
-                    Some(*model.entry(k).or_insert(v)),
-                ),
-                Step::Remove(k) => (map.remove(&k), model.remove(&k)),
-                Step::ForceRemove(k) => (map.force_remove(&k), model.remove(&k)),
-                Step::Get(k) => (map.get(&k), model.get(&k).copied()),
-                Step::Clear => {
-                    map.clear();
-                    model.clear();
-                    (None, None)
-                }
-            };
-            assert_eq!(got, want, "{} step {i} {s:?}", M::NAME);
-            assert_eq!(map.len(), model.len(), "{} step {i} {s:?}: count", M::NAME);
-        }
-        let mut walked = map.entries();
-        walked.sort_unstable();
-        let mut want: Vec<(u64, u64)> = model.into_iter().collect();
-        want.sort_unstable();
-        assert_eq!(walked, want, "{}: contents", M::NAME);
-    }
-
-    /// Every case of one map on this thread, under the suite's lock held for all of them (a
-    /// thread that pinned in one case and then waited for the lock would hold back the
-    /// reclamation another test's drop count waits for).
-    fn cases<M: Map<u64, u64>>(longest: usize) {
-        let _serial = serial();
-        let mut runner = TestRunner::new(ProptestConfig::with_cases(scaled(256) as u32));
-        let result = runner.run(&proptest::collection::vec(step(), 0..longest), |steps| {
-            check::<M>(&steps);
-            Ok(())
-        });
-        if let Err(e) = result {
-            panic!("{}: {e}", M::NAME);
-        }
-    }
-
-    #[test]
-    fn hashmap() {
-        cases::<HashMap<u64, u64, Fold>>(600);
-    }
-
-    #[test]
-    fn hashmap_one_chain() {
-        cases::<HashMap<u64, u64, Constant>>(300);
-    }
-
-    #[test]
-    fn hopscotch() {
-        cases::<HopscotchMap<u64, u64, Fold>>(600);
-    }
-
-    #[test]
-    fn hopscotch_identity() {
-        cases::<HopscotchMap<u64, u64, Identity>>(600);
-    }
-}
+#[path = "concurrent/matches_std.rs"]
+mod matches_std_on_any_sequence;
 
 /// Sixteen threads each own every sixteenth key (so the keys of one hash group, or of one
 /// neighborhood, belong to sixteen different threads) and run insert, replace, claim,
-/// get_or_insert, remove, force_remove and lookups on them, in bursts that grow and then shrink
-/// the table, checking every answer against the thread's own `std` model: with no other thread
-/// on its keys, every answer is determined. At the end the map holds exactly the union of the
-/// models. `KOVAN_STRESS_SCALE` multiplies the calls (millions in the release runs).
+/// get_or_insert, remove, force_remove, the conditional writes and lookups on them, in bursts
+/// that grow and then shrink the table, checking every answer against the thread's own `std`
+/// model: with no other thread on its keys, every answer is determined. At the end the map holds
+/// exactly the union of the models. `KOVAN_STRESS_SCALE` multiplies the calls (millions in the
+/// release runs).
 mod owned_keys_answer_like_a_sequential_model {
     use super::*;
 
@@ -819,7 +738,38 @@ mod owned_keys_answer_like_a_sequential_model {
                 // Bursts of 4096 calls lean to inserting, then to removing.
                 let grow = (i / 4_096).is_multiple_of(2);
                 let roll = rng.below(10);
+                // Every sixteenth call is a conditional write, on the call number's parity.
+                let parity = (i / 16) as u64 % 2;
                 let (got, want) = match (grow, roll) {
+                    _ if i % 16 == 5 => (
+                        m.remove_if(&k, |v| v % 2 == parity),
+                        match model.get(&k) {
+                            Some(p) if p % 2 == parity => model.remove(&k),
+                            _ => None,
+                        },
+                    ),
+                    _ if i % 16 == 11 => (
+                        lin::replaced(m.replace_if(k, v, |p| p % 2 == parity)),
+                        lin::replaced(match model.get_mut(&k) {
+                            None => Err(None),
+                            Some(p) if *p % 2 == parity => Ok(std::mem::replace(p, v)),
+                            Some(p) => Err(Some(*p)),
+                        }),
+                    ),
+                    _ if i % 16 == 13 => {
+                        let next = |seen: Option<&u64>| match seen {
+                            Some(p) if p % 2 == parity => None,
+                            Some(p) => Some(p + 1),
+                            None if grow => Some(v),
+                            None => None,
+                        };
+                        let want = next(model.get(&k));
+                        match want {
+                            Some(n) => model.insert(k, n),
+                            None => model.remove(&k),
+                        };
+                        (m.compute(k, next), want)
+                    }
                     (true, 0..=3) | (false, 0) => (m.insert(k, v), model.insert(k, v)),
                     (true, 4..=5) | (false, 1) => {
                         let want = model.get(&k).copied();

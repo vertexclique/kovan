@@ -15,6 +15,15 @@ pub trait Map<K, V>: Send + Sync + 'static {
     fn contains_key(&self, k: &K) -> bool;
     fn remove(&self, k: &K) -> Option<V>;
     fn force_remove(&self, k: &K) -> Option<V>;
+    fn remove_if(&self, k: &K, pred: impl FnOnce(&V) -> bool) -> Option<V>;
+    fn compare_and_remove(&self, k: &K, expected: &V) -> Option<V>
+    where
+        V: PartialEq;
+    fn replace_if(&self, k: K, v: V, pred: impl FnOnce(&V) -> bool) -> Result<V, Option<V>>;
+    fn compare_and_swap(&self, k: K, expected: &V, v: V) -> Result<V, Option<V>>
+    where
+        V: PartialEq;
+    fn compute(&self, k: K, f: impl FnOnce(Option<&V>) -> Option<V>) -> Option<V>;
     fn len(&self) -> usize;
     fn clear(&self);
     fn entries(&self) -> Vec<(K, V)>;
@@ -52,6 +61,32 @@ macro_rules! impl_map {
             }
             fn force_remove(&self, k: &K) -> Option<V> {
                 $map::force_remove(self, k)
+            }
+            fn remove_if(&self, k: &K, pred: impl FnOnce(&V) -> bool) -> Option<V> {
+                $map::remove_if(self, k, pred)
+            }
+            fn compare_and_remove(&self, k: &K, expected: &V) -> Option<V>
+            where
+                V: PartialEq,
+            {
+                $map::compare_and_remove(self, k, expected)
+            }
+            fn replace_if(
+                &self,
+                k: K,
+                v: V,
+                pred: impl FnOnce(&V) -> bool,
+            ) -> Result<V, Option<V>> {
+                $map::replace_if(self, k, v, pred)
+            }
+            fn compare_and_swap(&self, k: K, expected: &V, v: V) -> Result<V, Option<V>>
+            where
+                V: PartialEq,
+            {
+                $map::compare_and_swap(self, k, expected, v)
+            }
+            fn compute(&self, k: K, f: impl FnOnce(Option<&V>) -> Option<V>) -> Option<V> {
+                $map::compute(self, k, f)
             }
             fn len(&self) -> usize {
                 $map::len(self)

@@ -29,3 +29,17 @@ CM_live_reader                     MC_ChainedMap      pass
 CM_live_walker                     MC_ChainedMap      pass
 CM_mut_validate_current            MC_ChainedMap      violated:ReaderEnds
 CM_mut_validate_current_iter       MC_ChainedMap      violated:ReaderEnds
+CM_cond_rem                        MC_ChainedMap      pass
+CM_cond_rpi                        MC_ChainedMap      pass
+CM_cond_cmp                        MC_ChainedMap      pass
+CM_cond_tail                       MC_ChainedMap      pass
+CM_cond_chain                      MC_ChainedMap      pass
+CM_cond_clear                      MC_ChainedMap      pass
+CM_cond_iter                       MC_ChainedMap      pass
+CM_cond_unwind                     MC_ChainedMap      pass
+CM_big_cond                        MC_ChainedMap      pass
+CM_live_cond                       MC_ChainedMap      pass
+CM_live_reader_cond                MC_ChainedMap      pass
+CM_mut_unheld_check                MC_ChainedMap      violated:CondExact
+CM_wit_held_meet                   MC_ChainedMap      violated:NoHeldMeet
+CM_wit_freeze_wait                 MC_ChainedMap      violated:NoFreezeWait

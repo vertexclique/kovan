@@ -31,6 +31,9 @@ pub(super) enum Point {
     MoveLinkedTwice,
     /// A displacement unlinked the moved entry from its old slot, whose hop bit is still set.
     MoveUnlinked,
+    /// A compute of an absent key holds its home guard and reserved the slot its entry would
+    /// take; its closure has not run yet.
+    ComputeReserved,
 }
 
 /// Where an armed thread stops, and the two channels it meets the test on.

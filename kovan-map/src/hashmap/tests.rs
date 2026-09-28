@@ -1,5 +1,6 @@
 //! Colocated coverage for `HashMap`: its single-thread contract, growth, shrinking down to (and
-//! never below) its floor, and concurrent inserts across a growth.
+//! never below) its floor, concurrent inserts across a growth, and (`conditional`) the
+//! conditional writes.
 
 use super::*;
 
@@ -128,3 +129,5 @@ fn test_concurrent_grow() {
     }
     assert!(map.capacity() >= 16_000);
 }
+
+mod conditional;

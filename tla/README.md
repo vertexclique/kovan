@@ -7,8 +7,8 @@ built.
 
 | where | what | run |
 |-------|------|-----|
-| `chained/` | `kovan_map::HashMap`, the chained map: link words with a deleted mark and a frozen flag, one CAS per write, the unlink-then-retire rule, the walk that steps past a deleted node only through a live link, the freezing migration and clear, the bucket-snapshot walk | `bash tla/run_tlc.sh chained` (about 5 minutes) |
-| `hopscotch/` | `kovan_map::HopscotchMap`: home buckets with hop bits, writer guard and move stamp, the guarded insert (existence scan, the bit published before the link, displacement toward the home), the guarded remove, the lookup that rescans on a moved stamp, the resize that holds every writer guard, the clear, the walk across a table swap | `bash tla/run_tlc.sh hopscotch` (about 2 minutes) |
+| `chained/` | `kovan_map::HashMap`, the chained map: link words with a deleted mark, a frozen flag and a held flag, one CAS per write, the unlink-then-retire rule, the walk that steps past a deleted node only through a live link, the conditional writes that hold the key's link while their closure runs, the freezing migration (which waits for a hold) and clear, the bucket-snapshot walk | `bash tla/run_tlc.sh chained` (about 10 minutes) |
+| `hopscotch/` | `kovan_map::HopscotchMap`: home buckets with hop bits, writer guard and move stamp, the guarded insert (existence scan, the bit published before the link, displacement toward the home), the guarded remove, the conditional writes (closure under the home guard, a compute of an absent key reserving its slot first), the lookup that rescans on a moved stamp, the resize that holds every writer guard, the clear, the walk across a table swap | `bash tla/run_tlc.sh hopscotch` (about 4 minutes) |
 
 `bash tla/run_tlc.sh all` runs both. The script takes the TLA+ tools from `$TLA2TOOLS` when set,
 otherwise from `tla/.tools/tla2tools.jar`, which it fetches on first use (release v1.7.4, TLC 2.19,
@@ -26,6 +26,9 @@ configuration must report, and a full run of a family rewrites its `tlc-run.txt`
   and `get_or_insert` must answer `None` (their own value) exactly when their own write inserted.
   A broken check sets `err`, and each kind has a named invariant:
   - `Exactness`: a conditional insert answers exactly;
+  - `CondExact`: a conditional write (`remove_if`, `replace_if`, `compute`) runs its closure
+    once, on the value the key holds at the step that writes what the closure decided (or at the
+    step that keeps it), and an answer of absence is linearizable;
   - `Linearizable`: lookups and removes answer linearizably;
   - `NoUseAfterFree`: reclamation is modelled as kovan provides it, a pointer loaded from a link
     (a slot) protects its node (entry) for the rest of the operation when the node was not retired
@@ -73,6 +76,14 @@ Files as of this branch's commit adding the model:
 - `hashmap.rs:379` `remove` and `:501` `unlink`, `:436` `force_remove`: R1 to R9.
 - `hashmap/iter.rs:129` `collect`: T0 to T9 (the walk keeps its table and takes each bucket in one
   validated pass before yielding from it).
+- `hashmap/conditional.rs` (`remove_if` at `:57`, `replace_if` at `:110`, `compute` at `:197`,
+  `remove_where` at `:262`, `Hold` at `:343`): after the writers' walk, H0 to H3 and H9 (the key's
+  node, or for a compute of an absent key the chain's last link, held by one CAS setting its
+  HELD flag; the closure run once; the held link written with one store: the mark, the mark
+  naming the replacement, a new node at the chain's end, or the word as it was), then the
+  remove's R3, R4 and R9 or the insert's I4, I5 and I6. A link word carries the HELD flag (`h`):
+  the walk passes it as unheld (F2), every other writer's CAS expects a word without it and
+  fails, and the migration's freeze waits for its release (`resize.rs:91`, Z2 and Z3).
 - `hashmap/resize.rs:43` `try_resize`, `:72` `clear`, `:89` `freeze`, `:116` `migrate`,
   `:147` `publish`, `:35` `wait_for_resize`: Z0 to Z6 and WT (the latch, every link frozen in chain
   order with the live nodes copied, the new table published with its exact count, the old one
@@ -119,6 +130,20 @@ One bucket (every key in one chain) grown to two, or two shrunk to one; keys 1 t
 | `CM_wit_validation` | witness: a lookup validates its way past a deleted node | grow | 6, 2 | `NoValidationPass` broken |
 | `CM_wit_resize_under_write` | witness: a write's CAS is due while a resize holds the latch | grow | 6, 2 | `NoResizeUnderWrite` broken |
 | `CM_wit_replace` | witness: a replace reaches its unlink | grow | 7, 2 | `NoReplace` broken |
+| `CM_cond_rem` | a `remove_if` racing a replace and a second `remove_if` of the key | grow | 7, 2 | pass |
+| `CM_cond_rpi` | a `replace_if` and a lookup racing a remove and a claim of the key | grow | 8, 2 | pass |
+| `CM_cond_cmp` | computes of one key, present then absent, racing a claim and a remove | grow | 9, 2 | pass |
+| `CM_cond_tail` | a compute of an absent key holding the chain's end racing an insert of another key and a claim of the key | none | 6, 1 | pass |
+| `CM_cond_chain` | a compute holding the middle node of a chain of three while the nodes on both sides are removed | none | 5, 1 | pass |
+| `CM_cond_clear` | a compute, a `remove_if` and a lookup racing a clear | clear | 6, 2 | pass |
+| `CM_cond_iter` | a compute and a `replace_if` racing a walk | grow | 8, 2 | pass |
+| `CM_cond_unwind` | a compute of an absent key whose closure panics, racing an insert and a lookup | none | 4, 1 | pass |
+| `CM_big_cond` | three conditional writers of one key (compute, `remove_if`, `replace_if`) | none | 5, 1 | pass |
+| `CM_live_cond` | a compute holding the middle node, a remove of the node before it, a lookup behind them, weak fairness | none | 5, 1 | `Termination` holds |
+| `CM_live_reader_cond` | the same, only the lookup fair (the compute may stop holding its node) | none | 5, 1 | `ReaderEnds` holds |
+| `CM_mut_unheld_check` | a conditional write decides on the node it found without holding it, writes by a CAS, and after a lost CAS writes its decision to the node it finds next | none | 6, 1 | `CondExact` broken |
+| `CM_wit_held_meet` | witness: a plain write is about to CAS a link a conditional write holds | none | 5, 1 | `NoHeldMeet` broken |
+| `CM_wit_freeze_wait` | witness: a migration is about to freeze a held link | grow | 7, 2 | `NoFreezeWait` broken |
 
 ### Findings: the kovan-map 0.1.20 defects each mutation puts back
 
@@ -147,7 +172,7 @@ One bucket (every key in one chain) grown to two, or two shrunk to one; keys 1 t
   `..._iter`, 20 states). 0.1.20 replaced a node by marking it and then linking the new node with a
   second CAS on the predecessor: between the two the key was in no live node, a lookup missed it
   and a walk skipped it. Fix: one CAS marks the old node naming the new one.
-- **A lookup that never ends** (`CM_mut_check_addr`, a lasso of 34 states). The frozen-edge fix
+- **A lookup that never ends** (`CM_mut_check_addr`, a lasso of 33 states). The frozen-edge fix
   of `vclq/check-addr` made a lookup start over at every deleted node; with 0.1.20's best-effort
   unlink a deleted node can stay linked with no writer left to unlink it, and a lookup of a key
   behind it loops forever. Fix: the validated step past a deleted node, and the cleanup walk.
@@ -161,12 +186,24 @@ One bucket (every key in one chain) grown to two, or two shrunk to one; keys 1 t
   lookup exceeding shuttle's step bound under PCT), then modelled here with only the reader
   scheduled fairly. Fix: validate against the first deleted node of the run (`walk.rs:186`).
 
+- **A conditional write deciding on a node it does not hold** (`CM_mut_unheld_check`, 23
+  states). A closure
+  that runs once (an `FnOnce`) cannot be run again on the node that won a lost CAS; a write that
+  keeps its decision and applies it to the node it finds next (a replace landed in between)
+  removes or replaces a value the closure never saw. Fix: the closure runs while the key's link
+  is held (`hashmap/conditional.rs`), so no other write of the key lands between the decision and
+  the store that writes it.
+
 ### TLC results
 
 The run recorded in `chained/tlc-run.txt` (8 workers, beside other work on a 36-core machine):
-30 of 30 configurations match `EXPECTED.txt`; the largest passing ones are `CM_rem_rem`
-(10,004,502 distinct states, 138 s), `CM_big_iter` (7,974,721, 116 s) and `CM_big_claims`
-(3,260,753, 40 s).
+44 of 44 configurations match `EXPECTED.txt`; the largest passing ones are `CM_rem_rem`
+(10,004,502 distinct states, 142 s), `CM_big_iter` (7,974,721, 96 s), `CM_big_claims`
+(3,260,753, 31 s) and `CM_big_cond` (854,360, 10 s). Every configuration that passed before the held flag
+reaches exactly the states it reached before (the flag is never set without a conditional
+write). A variant of `CM_big_cond` racing a grow (7 nodes, 2 tables) passed too, with 51,695,290
+distinct states in 585 s; it is left out of `EXPECTED.txt` for the time it would add to every
+run.
 
 ## The hopscotch map (`hopscotch/HopscotchMap.tla`)
 
@@ -192,6 +229,17 @@ The run recorded in `chained/tlc-run.txt` (8 workers, beside other work on a 36-
   the use.
 - `hopscotch/iter.rs:97` `next` and `:77` `met_before`: T0, T1, T9 (the walk keeps its table and
   skips a key it met in the lower slots of the key's neighborhood).
+- `hopscotch/conditional.rs` (`remove_if` at `:59` and `replace_if` at `:112` through
+  `remove_where` at `:296` and `hopscotch.rs:228` `home_of`): RW, RC (a home without bits answers
+  absent), CS and CU (the key's entry under the guard, loaded then used as RS and RU load and use
+  theirs), CF (the closure, once, reading the entry), CX (the write under the
+  guard: the unlink, the replace, or nothing), CR (the release), CT (the retire of an unlinked
+  entry), CA. `compute` at `:195`: IW, IC (the guard always), IS and IU (the key's entry: CF), and for an
+  absent key IFr, IL, D0 to M4 and DL placing the reserved word (`table.rs:173`
+  `Word::reserved`, RSV: a reader and a walk pass it as a free slot, a writer finds it taken) as
+  an insert places its entry (`displace.rs:70` `place`), then CF, CX (the reservation filled, or
+  given back when the closure makes no entry or panics), CR, CT, CA. A reservation that needs a
+  displacement that loses a race, or a resize, releases the guard before the closure runs.
 - `hopscotch/resize.rs:103` `try_resize`, `:32` `hold_writers`, `:170` `copy_into`: Z0 to Z4 (every
   home guard taken, the copy into the first free slot of each entry's neighborhood, a neighborhood
   found full doubling the new table, the replaced table's guards kept held);
@@ -240,6 +288,21 @@ key 2 finds home 0's neighborhood full and moves key 1 to slot 2.
 | `HS_wit_resize_waits` | witness: a resize waits for a writer holding a home guard | grow | `NoResizeWaitsForWriter` broken |
 | `HS_wit_held_home` | witness: a displacement skips a candidate whose home guard is held | none | `NoHeldHomeSkip` broken |
 | `HS_wit_walk_skip` | witness: a walk meets a moved key again and skips it | none | `NoWalkSkip` broken |
+| `HS_cond_rem` | a `remove_if` racing a replace and a second `remove_if` of the key | none | pass |
+| `HS_cond_rpi` | a `replace_if` and a lookup racing a remove and a claim of the key | none | pass |
+| `HS_cond_cmp` | computes of one key, present then absent, racing a claim and a remove | none | pass |
+| `HS_cond_disp` | a compute of a key whose home's neighborhood is full (it reserves the slot a move frees), racing a lookup and a compute of the moved key | none | pass |
+| `HS_cond_unwind` | a compute whose closure panics after its reservation moved a key, racing a lookup and a walk | none | pass |
+| `HS_cond_grow` | a compute of an absent key and a `replace_if` racing a grow | grow | pass |
+| `HS_cond_clear` | a compute, a `remove_if` and a lookup racing a clear | clear | pass |
+| `HS_cond_iter` | a compute that inserts and a `remove_if` of its key racing a walk | none | pass |
+| `HS_big_cond` | a compute of the key a displacement is for, a `remove_if` of the key it moves and a claim, a `replace_if` and a lookup (three workers) | grow | pass |
+| `HS_live_cond` | computes of a key being moved and a lookup, weak fairness | none | `Termination` holds |
+| `HS_live_reader_cond` | a lookup of the key a compute reserved a slot for, only the lookup fair (the compute may stop holding its reservation) | none | `ReaderEnds` holds |
+| `HS_mut_unguarded_check` | a conditional write decides on the value a lookup read before it took the home guard, then writes under the guard | none | `CondExact` broken |
+| `HS_mut_held_scan_cond` | 0.1.20's unguarded remove racing a `remove_if` whose scan under the guard loads the key's entry unprotected and whose predicate reads it later | none | `NoUseAfterFree` broken |
+| `HS_wit_reserved_meet` | witness: a lookup meets a reserved slot | none | `NoReservedMeet` broken |
+| `HS_wit_cond_resize` | witness: a resize waits for the home guard a conditional write holds while its closure decides | grow | `NoResizeWaitsForClosure` broken |
 
 ### Findings
 
@@ -275,7 +338,19 @@ key 2 finds home 0's neighborhood full and moves key 1 to slot 2.
   and the use are separate steps. Holds with the guard: every remove, replace, move, resize and
   clear of the home's entries holds its guard.
 
+- **A conditional write deciding on a value read outside the guard** (`HS_mut_unguarded_check`,
+  15 states).
+  A `remove_if` whose predicate ran on the value a lookup returned, then took the home guard and
+  unlinked the key's entry, removes a value a replace put there in between, which its predicate
+  never saw. Fix: the closure runs under the key's home guard, on the entry the guarded scan
+  found (`hopscotch/conditional.rs`). The closure reads that entry after the scan loaded it
+  unprotected, a step later, as a claim's scan uses its entry: with 0.1.20's unguarded remove
+  unlinking and retiring the entry in between, the closure reads a retired entry
+  (`HS_mut_held_scan_cond`, 14 states); with the guard no other thread can.
+
 ### TLC results
 
-The run recorded in `hopscotch/tlc-run.txt` (8 workers): 32 of 32 configurations match
-`EXPECTED.txt`; the largest passing one is `HS_big_disp` (4,588,001 distinct states, 109 s).
+The run recorded in `hopscotch/tlc-run.txt` (8 workers): 47 of 47 configurations match
+`EXPECTED.txt`; the largest passing ones are `HS_big_disp` (4,588,001 distinct states, 118 s) and
+`HS_big_cond` (1,444,974, 27 s). Every configuration that passed before the reserved word
+reaches exactly the states it reached before.

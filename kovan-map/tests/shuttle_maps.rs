@@ -1,7 +1,9 @@
-//! Shuttle-searched interleavings of every pair of operations on both maps, with a grow or a
-//! shrink (or a clear, or a displacement) in flight among them: the threads record every call
-//! with its answer on one clock, and each key's history must linearize (see `support/lin.rs`);
-//! a walk must yield every key present for its whole length once. Under the `shuttle` feature
+//! Shuttle-searched interleavings of every pair of operations on both maps (the conditional
+//! writes included: their holds and reservations racing claims, removes, moves, clears and
+//! resizes), with a grow or a shrink (or a clear, or a displacement) in flight among them: the
+//! threads record every call with its answer on one clock, and each key's history must
+//! linearize (see `support/lin.rs`); a walk must yield every key present for its whole length
+//! once. Under the `shuttle` feature
 //! every atomic both maps use (kovan's pointer words, the latches, counts and control words) is a
 //! scheduling point.
 //!
@@ -17,7 +19,7 @@ mod lin;
 #[path = "support/maps.rs"]
 mod maps;
 
-use lin::{Call, Event, linearizable};
+use lin::{Call, Event, linearizable, perform};
 use maps::{Clustered, Constant, Grouped, Identity, Map};
 use shuttle::sync::Mutex;
 use shuttle::sync::atomic::{AtomicU64, Ordering};
@@ -46,17 +48,7 @@ struct Record {
 impl Record {
     fn call<M: Map<u64, u64>>(&self, m: &M, k: u64, call: Call) -> Option<u64> {
         let invoked = self.clock.fetch_add(1, Ordering::SeqCst);
-        let answer = match call {
-            Call::Insert(v) => m.insert(k, v),
-            Call::InsertIfAbsent(v) => m.insert_if_absent(k, v),
-            Call::GetOrInsert(v) => Some(m.get_or_insert(k, v)),
-            Call::Remove => m.remove(&k),
-            Call::Get => m.get(&k),
-            Call::Clear => {
-                m.clear();
-                None
-            }
-        };
+        let answer = perform(m, k, call);
         let answered = self.clock.fetch_add(1, Ordering::SeqCst);
         let key = if call == Call::Clear { ALL } else { k };
         self.log.lock().expect("log").push((
@@ -294,6 +286,123 @@ fn writes_race_a_move<M: Map<u64, u64>>() {
     rec.check(&[(2, Some(2)), (3, Some(3)), (64, None)], M::NAME);
 }
 
+/// Conditional writes of two keys racing a grow: a compare-and-swap and a remove_if of one key,
+/// a compute and a replace_if of the other, and a thread whose inserts push the table over three
+/// quarters.
+fn conditional_writes_race_a_grow<M: Map<u64, u64>>() {
+    let m = Arc::new(M::with_capacity(64));
+    fill(&*m, 1_000, 46);
+    m.insert(1, 2);
+    m.insert(2, 4);
+    let rec = Arc::new(Record::default());
+    let (m1, r1) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m2, r2) = (Arc::clone(&m), Arc::clone(&rec));
+    let m3 = Arc::clone(&m);
+    run_all(vec![
+        Box::new(move || {
+            r1.call(&*m1, 1, Call::CompareAndSwap(2, 3));
+            r1.call(&*m1, 2, Call::ComputeAdd(10));
+        }),
+        Box::new(move || {
+            r2.call(&*m2, 1, Call::RemoveIfEven);
+            r2.call(&*m2, 2, Call::ReplaceIfEven(5));
+        }),
+        Box::new(move || fill(&*m3, 2_000, 3)),
+    ]);
+    rec.check(&[(1, Some(2)), (2, Some(4))], M::NAME);
+    assert_eq!(m.len(), m.entries().len(), "{}: count", M::NAME);
+}
+
+/// A compute of an absent key (holding the chain's end, or reserving a slot of its home) racing
+/// a claim of the key, an insert of another key of the same chain or home, and a clear.
+fn compute_of_an_absent_key_races_claims_and_a_clear<M: Map<u64, u64>>() {
+    let m = Arc::new(M::with_capacity(64));
+    m.insert(3, 3);
+    let rec = Arc::new(Record::default());
+    let (m1, r1) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m2, r2) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m3, r3) = (Arc::clone(&m), Arc::clone(&rec));
+    run_all(vec![
+        Box::new(move || {
+            r1.call(&*m1, 67, Call::ComputeToggle(1));
+            r1.call(&*m1, 67, Call::ComputeAdd(4));
+        }),
+        Box::new(move || {
+            r2.call(&*m2, 67, Call::InsertIfAbsent(2));
+            r2.call(&*m2, 131, Call::Insert(5));
+        }),
+        Box::new(move || {
+            r3.call(&*m3, 3, Call::CompareAndRemove(3));
+            r3.call(&*m3, 0, Call::Clear);
+        }),
+    ]);
+    rec.check(&[(3, Some(3)), (67, None), (131, None)], M::NAME);
+    assert_eq!(m.len(), m.entries().len(), "{}: count", M::NAME);
+}
+
+/// Keys 3, 67 and 131 share a bucket (a chain in one map, a neighborhood in the other): a
+/// remove_if and a compute hold their keys while a remove of the key between them runs, and a
+/// lookup reads behind them.
+fn conditional_writes_race_adjacent_removes<M: Map<u64, u64>>() {
+    let m = Arc::new(M::with_capacity(64));
+    for k in [3, 67, 131] {
+        m.insert(k, k + 1);
+    }
+    let rec = Arc::new(Record::default());
+    let (m1, r1) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m2, r2) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m3, r3) = (Arc::clone(&m), Arc::clone(&rec));
+    run_all(vec![
+        Box::new(move || {
+            r1.call(&*m1, 3, Call::RemoveIfEven);
+            r1.call(&*m1, 131, Call::ComputeToggle(9));
+        }),
+        Box::new(move || {
+            r2.call(&*m2, 67, Call::Remove);
+            r2.call(&*m2, 3, Call::ReplaceIfEven(6));
+        }),
+        Box::new(move || {
+            r3.call(&*m3, 131, Call::Get);
+            r3.call(&*m3, 67, Call::CompareAndSwap(68, 1));
+        }),
+    ]);
+    rec.check(&[(3, Some(4)), (67, Some(68)), (131, Some(132))], M::NAME);
+    assert_eq!(m.len(), m.entries().len(), "{}: count", M::NAME);
+}
+
+/// Keys 0..=32 each in its home bucket of 64 (identity hash): an insert of key 64 moves another
+/// key out of home 0's full neighborhood in the hopscotch map, while conditional writes of the
+/// keys it may move run, and a compute of an absent key of home 0 reserves a slot there.
+fn conditional_writes_race_a_move<M: Map<u64, u64>>() {
+    let m = Arc::new(M::with_capacity(64));
+    for k in 0..=32 {
+        m.insert(k, k);
+    }
+    let rec = Arc::new(Record::default());
+    let (m1, r1) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m2, r2) = (Arc::clone(&m), Arc::clone(&rec));
+    let (m3, r3) = (Arc::clone(&m), Arc::clone(&rec));
+    run_all(vec![
+        Box::new(move || {
+            r1.call(&*m1, 64, Call::Insert(64));
+            r1.call(&*m1, 64, Call::RemoveIfEven);
+        }),
+        Box::new(move || {
+            r2.call(&*m2, 2, Call::CompareAndSwap(2, 7));
+            r2.call(&*m2, 128, Call::ComputeToggle(5));
+        }),
+        Box::new(move || {
+            r3.call(&*m3, 3, Call::ComputeAdd(1));
+            r3.call(&*m3, 2, Call::RemoveIfEven);
+        }),
+    ]);
+    rec.check(
+        &[(2, Some(2)), (3, Some(3)), (64, None), (128, None)],
+        M::NAME,
+    );
+    assert_eq!(m.len(), m.entries().len(), "{}: count", M::NAME);
+}
+
 /// A scenario on one map type, under both strategies.
 fn search(f: fn()) {
     let n = iterations();
@@ -339,6 +448,25 @@ scenario!(clear_races_writes, clear_races_writes:
     hopscotch => kovan_map::HopscotchMap<u64, u64, Fold>,
 );
 scenario!(writes_race_a_move, writes_race_a_move:
+    hashmap => kovan_map::HashMap<u64, u64, Identity>,
+    hopscotch => kovan_map::HopscotchMap<u64, u64, Identity>,
+);
+scenario!(conditional_writes_race_a_grow, conditional_writes_race_a_grow:
+    hashmap => kovan_map::HashMap<u64, u64, Fold>,
+    hashmap_grouped => kovan_map::HashMap<u64, u64, Grouped>,
+    hopscotch => kovan_map::HopscotchMap<u64, u64, Fold>,
+    hopscotch_clustered => kovan_map::HopscotchMap<u64, u64, Clustered>,
+);
+scenario!(compute_of_an_absent_key_races_claims_and_a_clear,
+    compute_of_an_absent_key_races_claims_and_a_clear:
+    hashmap_one_chain => kovan_map::HashMap<u64, u64, Constant>,
+    hopscotch_one_neighborhood => kovan_map::HopscotchMap<u64, u64, Identity>,
+);
+scenario!(conditional_writes_race_adjacent_removes, conditional_writes_race_adjacent_removes:
+    hashmap_one_chain => kovan_map::HashMap<u64, u64, Constant>,
+    hopscotch_one_neighborhood => kovan_map::HopscotchMap<u64, u64, Identity>,
+);
+scenario!(conditional_writes_race_a_move, conditional_writes_race_a_move:
     hashmap => kovan_map::HashMap<u64, u64, Identity>,
     hopscotch => kovan_map::HopscotchMap<u64, u64, Identity>,
 );

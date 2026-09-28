@@ -4,9 +4,11 @@
 //! One test per loosened bound proves it compiles with a type that lacks the trait the branch
 //! would otherwise have required (a compile failure here means a bound crept back in); one test
 //! per new trait impl (`Default`, `Debug`, `Clone`, `Extend`, `FromIterator`, `PartialEq`/`Eq`)
-//! checks its behaviour against `std::collections::HashMap` on the same input; a last group
-//! builds and drives both maps, single- and multi-threaded, entirely through RapidHash's own
-//! `BuildHasher` (`rapidhash` is a dev-dependency of this crate only, never a normal one).
+//! checks its behaviour against `std::collections::HashMap` on the same input; a group builds
+//! and drives both maps, single- and multi-threaded, entirely through RapidHash's own
+//! `BuildHasher` (`rapidhash` is a dev-dependency of this crate only, never a normal one); and a
+//! last one checks each conditional write against the same decision taken through std's entry
+//! API.
 
 use kovan_map::{HashMap as KHashMap, HopscotchMap};
 use rapidhash::fast::RandomState as RapidState;
@@ -526,3 +528,86 @@ macro_rules! snapshot_under_churn {
 
 snapshot_under_churn!(hopscotch_snapshot_impls_under_churn, HopscotchMap);
 snapshot_under_churn!(hashmap_snapshot_impls_under_churn, KHashMap);
+
+// ---------------------------------------------------------------------------
+// Conditional writes: each answers, and leaves the map, as the same decision taken through
+// `std::collections::HashMap`'s entry API does.
+// ---------------------------------------------------------------------------
+
+macro_rules! conditional_writes_match_std_entry {
+    ($name:ident, $map:ident) => {
+        #[test]
+        fn $name() {
+            use std::collections::hash_map::Entry;
+
+            let map: $map<u64, u64> = $map::default();
+            let mut std_map: StdHashMap<u64, u64> = StdHashMap::new();
+            for k in 0..64u64 {
+                map.insert(k, k);
+                std_map.insert(k, k);
+            }
+            for k in 0..96u64 {
+                // remove_if: an occupied entry whose value the predicate accepts is removed.
+                let want = match std_map.entry(k) {
+                    Entry::Occupied(e) if e.get() % 3 == 0 => Some(e.remove()),
+                    _ => None,
+                };
+                assert_eq!(map.remove_if(&k, |v| v % 3 == 0), want, "remove_if {k}");
+
+                // replace_if: an occupied entry whose value the predicate accepts takes the new
+                // value; a refused one answers its value; a vacant one stays vacant.
+                let want = match std_map.entry(k) {
+                    Entry::Occupied(mut e) if e.get() % 2 == 0 => Ok(e.insert(k + 100)),
+                    Entry::Occupied(e) => Err(Some(*e.get())),
+                    Entry::Vacant(_) => Err(None),
+                };
+                let got = map.replace_if(k, k + 100, |v| v % 2 == 0);
+                assert_eq!(got, want, "replace_if {k}");
+
+                // compute: the closure's answer is the entry's next state.
+                let f = |seen: Option<&u64>| match seen {
+                    Some(v) if v % 5 == 0 => None,
+                    Some(v) => Some(v + 1),
+                    None => Some(k * 7),
+                };
+                let want = match std_map.entry(k) {
+                    Entry::Occupied(mut e) => match f(Some(e.get())) {
+                        Some(next) => {
+                            e.insert(next);
+                            Some(next)
+                        }
+                        None => {
+                            e.remove();
+                            None
+                        }
+                    },
+                    Entry::Vacant(e) => f(None).map(|next| *e.insert(next)),
+                };
+                assert_eq!(map.compute(k, f), want, "compute {k}");
+
+                // compare_and_swap and compare_and_remove: equality as the predicate.
+                let expected = k + 1;
+                let want = match std_map.entry(k) {
+                    Entry::Occupied(mut e) if *e.get() == expected => Ok(e.insert(k)),
+                    Entry::Occupied(e) => Err(Some(*e.get())),
+                    Entry::Vacant(_) => Err(None),
+                };
+                assert_eq!(map.compare_and_swap(k, &expected, k), want, "cas {k}");
+                let want = match std_map.entry(k) {
+                    Entry::Occupied(e) if *e.get() == k * 7 => Some(e.remove()),
+                    _ => None,
+                };
+                assert_eq!(map.compare_and_remove(&k, &(k * 7)), want, "car {k}");
+                assert_eq!(map.len(), std_map.len(), "count after key {k}");
+            }
+            let mut got: Vec<(u64, u64)> = map.iter().collect();
+            got.sort_unstable();
+            let mut want: Vec<(u64, u64)> = std_map.into_iter().collect();
+            want.sort_unstable();
+            assert_eq!(got, want);
+        }
+    };
+}
+
+conditional_writes_match_std_entry!(hopscotch_conditional_writes_match_std_entry, HopscotchMap);
+conditional_writes_match_std_entry!(hashmap_conditional_writes_match_std_entry, KHashMap);

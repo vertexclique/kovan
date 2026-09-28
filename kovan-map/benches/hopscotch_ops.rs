@@ -258,8 +258,9 @@ fn fresh<K: Key, S: HashKind>(op: fn(&Map<K, S>, K)) -> Runner {
     })
 }
 
-/// Removes up to `FRESH_REMOVE` present keys per fresh map holding `FRESH_FILL`.
-fn remove_hit<K: Key, S: HashKind>() -> Runner {
+/// Removes up to `FRESH_REMOVE` present keys per fresh map holding `FRESH_FILL` (key `i` of the
+/// fill holding value `i`), each with `op`, which is handed the key and its value.
+fn remove_hit<K: Key, S: HashKind>(op: fn(&Map<K, S>, &K, u64)) -> Runner {
     let keys = keys::<K>(0, FRESH_FILL);
     Box::new(move |iters, clock| {
         let mut done = 0;
@@ -270,8 +271,8 @@ fn remove_hit<K: Key, S: HashKind>() -> Runner {
                 map.insert(key.clone(), i as u64);
             }
             clock.start();
-            for key in &keys[..n as usize] {
-                black_box(map.remove::<K::Q>(key.borrow()));
+            for (i, key) in keys[..n as usize].iter().enumerate() {
+                op(&map, key, i as u64);
             }
             clock.stop();
             drop(map);
@@ -459,7 +460,44 @@ fn register<K: Key, S: HashKind>(out: &mut Vec<Workload>) {
             black_box(m.get_or_insert(k, 7));
         })
     });
-    r.op("remove_hit", "", remove_hit::<K, S>);
+    r.op("remove_hit", "", || {
+        remove_hit::<K, S>(|m, k, _| {
+            black_box(m.remove::<K::Q>(k.borrow()));
+        })
+    });
+    // The conditional writes, uncontended: a remove whose predicate holds, one whose predicate
+    // refuses (the entry stays), a compare-and-remove of the present value, a replace whose
+    // predicate holds, and a compute that increments a present value or inserts an absent key.
+    r.op("remove_if_hit", "", || {
+        remove_hit::<K, S>(|m, k, _| {
+            black_box(m.remove_if::<K::Q, _>(k.borrow(), |_| true));
+        })
+    });
+    r.op("remove_if_refused", "10k", || {
+        steady(filled::<K, S>(SMALL), keys(0, SMALL), |m, k| {
+            black_box(m.remove_if::<K::Q, _>(k.borrow(), |v| *v == u64::MAX));
+        })
+    });
+    r.op("compare_and_remove_hit", "", || {
+        remove_hit::<K, S>(|m, k, v| {
+            black_box(m.compare_and_remove::<K::Q>(k.borrow(), &v));
+        })
+    });
+    r.op("replace_if", "10k", || {
+        owned(filled::<K, S>(SMALL), keys(0, SMALL), |m, k| {
+            black_box(m.replace_if(k, 7, |_| true)).ok();
+        })
+    });
+    r.op("compute_present", "10k", || {
+        owned(filled::<K, S>(SMALL), keys(0, SMALL), |m, k| {
+            black_box(m.compute(k, |v| v.map(|n| n.wrapping_add(1))));
+        })
+    });
+    r.op("compute_absent", "", || {
+        fresh::<K, S>(|m, k| {
+            black_box(m.compute(k, |_| Some(7)));
+        })
+    });
     r.add("iter", "10k", SMALL, false, || walk::<K, S>(SMALL));
     r.add("iter", "1m", LARGE, true, || walk::<K, S>(LARGE));
     r.add("grow", "1m", LARGE, true, || grow::<K, S>(LARGE));
@@ -489,6 +527,30 @@ fn register<K: Key, S: HashKind>(out: &mut Vec<Workload>) {
         r.add("same_key_get_or_insert", &size, t, false, move || {
             contended(filled::<K, S>(1), keys(0, 1), threads, |m, k, _| {
                 black_box(m.get_or_insert(k[0].clone(), 7));
+            })
+        });
+        // The conditional writes on one key from every thread: a remove whose predicate refuses
+        // and a compare-and-remove of a value the key never holds (the check under the key's
+        // home guard, the entry kept), a replace whose predicate holds, and a compute that
+        // increments the key's value (a shared counter).
+        r.add("same_key_remove_if", &size, t, false, move || {
+            contended(filled::<K, S>(1), keys(0, 1), threads, |m, k, _| {
+                black_box(m.remove_if::<K::Q, _>(k[0].borrow(), |v| *v == u64::MAX));
+            })
+        });
+        r.add("same_key_compare_and_remove", &size, t, false, move || {
+            contended(filled::<K, S>(1), keys(0, 1), threads, |m, k, _| {
+                black_box(m.compare_and_remove::<K::Q>(k[0].borrow(), &u64::MAX));
+            })
+        });
+        r.add("same_key_replace_if", &size, t, false, move || {
+            contended(filled::<K, S>(1), keys(0, 1), threads, |m, k, rng| {
+                black_box(m.replace_if(k[0].clone(), rng.step(), |_| true)).ok();
+            })
+        });
+        r.add("same_key_compute", &size, t, false, move || {
+            contended(filled::<K, S>(1), keys(0, 1), threads, |m, k, _| {
+                black_box(m.compute(k[0].clone(), |v| v.map(|n| n.wrapping_add(1))));
             })
         });
     }

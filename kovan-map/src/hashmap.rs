@@ -22,6 +22,10 @@
 //!   operation's linearization point, and the answer the operation gives is
 //!   exact: `insert_if_absent` answers `None` exactly when its CAS linked
 //!   the key's node, and otherwise the value of the node it found live.
+//! - **Conditional writes** (`conditional`): their closure runs once, so
+//!   they hold the key's link word (a flag set by one CAS) while it runs and
+//!   then write the link with one store; every other writer's CAS fails on a
+//!   held link and walks again, readers never wait.
 //! - **Reclamation**: a node is retired only by the thread whose CAS unlinked
 //!   it, never while a table can reach it, and a walk steps past a deleted
 //!   node only after checking the link it came through still names it
@@ -53,6 +57,7 @@ use walk::Found;
 
 pub use iter::{IntoIter, Iter, Keys, Values};
 
+mod conditional;
 mod iter;
 mod node;
 mod resize;
@@ -87,6 +92,11 @@ impl Backoff {
 
     #[inline(always)]
     fn spin(&mut self) {
+        // Under shuttle, one yield: a writer whose CAS failed on a held link waits for the
+        // holder, which must get to run (a spin with no yield in it can starve it under PCT).
+        #[cfg(feature = "shuttle")]
+        crate::sync::spin_hint();
+        #[cfg(not(feature = "shuttle"))]
         for _ in 0..(1 << self.step.min(6)) {
             core::hint::spin_loop();
         }
@@ -403,53 +413,15 @@ where
     ///
     /// Linearizable at the CAS that marks the key's node deleted; the answer
     /// is that node's value, and a later `get` of the key (with no insert of
-    /// it in between) answers `None`.
+    /// it in between) answers `None`. [`remove_if`](Self::remove_if) with a
+    /// predicate that always holds, which needs no hold of the node: one
+    /// write path for both.
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let hash = self.hasher.hash_one(key);
-        let mut backoff = Backoff::new();
-        loop {
-            let guard = pin();
-            let (table, found) = self.find(hash, key, &guard);
-            match found {
-                Found::Frozen => {
-                    drop(guard);
-                    self.wait_for_resize();
-                }
-                Found::Miss { .. } => return None,
-                Found::Hit { prev, node, next } => {
-                    // Cloned before the CAS: a panicking clone leaves the map as it was.
-                    let value = node.value.clone();
-                    // The removal: the node's own word marked, keeping its successor.
-                    if node
-                        .next
-                        .compare_exchange(
-                            word(next),
-                            word(with(next, MARK)),
-                            Ordering::AcqRel,
-                            Ordering::Relaxed,
-                            &guard,
-                        )
-                        .is_err()
-                    {
-                        backoff.spin();
-                        continue;
-                    }
-                    let remaining = table.count().fetch_sub(1, Ordering::Relaxed) - 1;
-                    self.unlink(prev, node, next, hash, key, &guard);
-                    let capacity = table.capacity();
-                    // Integer load-factor check: count/cap < 1/4.
-                    if 4 * (remaining.max(0) as usize) < capacity && capacity > self.floor {
-                        drop(guard);
-                        self.try_resize(capacity / 2);
-                    }
-                    return Some(value);
-                }
-            }
-        }
+        self.remove_where::<Q, false>(key, |_| true)
     }
 
     /// Remove the key's entry, returning its value if the key was present.

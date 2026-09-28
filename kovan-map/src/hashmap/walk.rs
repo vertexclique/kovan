@@ -21,15 +21,16 @@ use kovan::{Atomic, Guard, retire};
 
 /// Where a writer's walk of a chain stopped.
 pub(super) enum Found<'g, K: 'static, V: 'static> {
-    /// The key's node, not deleted when `next`, its link word, was loaded; `prev` is the link
-    /// the walk came through, which named the node unmarked.
+    /// The key's node, not deleted when its link word was loaded; `next` is the successor that
+    /// word named (the word without a hold's flag); `prev` is the link the walk came through,
+    /// which named the node unmarked.
     Hit {
         prev: &'g Atomic<Node<K, V>>,
         node: &'g Node<K, V>,
         next: *mut Node<K, V>,
     },
-    /// The key is in no node of the chain: `tail`, the chain's last link, was null, unmarked
-    /// and unfrozen when loaded.
+    /// The key is in no node of the chain: `tail`, the chain's last link, named no node and was
+    /// unmarked and unfrozen when loaded (it may be held).
     Miss { tail: &'g Atomic<Node<K, V>> },
     /// A link was frozen: a migration or a clear is replacing the table.
     Frozen,
@@ -70,10 +71,16 @@ where
             let table = self.table_ref(guard);
             let mut prev: &'g Atomic<Node<K, V>> = table.bucket(table.bucket_index(hash));
             // Acquire: pairs with the release that linked the node, so its fields are visible.
-            let mut cur = prev.load(Ordering::Acquire, guard).as_raw();
-            if is_frozen(cur) {
+            let head = prev.load(Ordering::Acquire, guard).as_raw();
+            if is_frozen(head) {
                 return (table, Found::Frozen);
             }
+            // A link is held only by a conditional write, and the walk goes on through it: the
+            // node it names stays linked until the holder writes the link, and every CAS a
+            // writer makes on a link (the snip below, the caller's mark, replace or append)
+            // expects the word without the flag, so it fails on a held link and the writer walks
+            // again once the holder is done.
+            let mut cur = ptr(head);
             loop {
                 if cur.is_null() {
                     return (table, Found::Miss { tail: prev });
@@ -108,6 +115,8 @@ where
                     cur = succ;
                     continue;
                 }
+                // Unmarked and unfrozen, so at most held: the node's successor.
+                let next = ptr(next);
                 if node.hash == hash && node.key.borrow() == key {
                     return (table, Found::Hit { prev, node, next });
                 }
