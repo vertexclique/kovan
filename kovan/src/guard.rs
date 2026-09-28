@@ -1520,57 +1520,96 @@ impl Handle {
             self.pin_count.set(saved_pin + 1);
 
             let global = self.global();
+            // With no guard of this thread live, its own slot takes no node
+            // of its batches and is drained here, as in flush().
+            let own = (saved_pin == 0).then_some(tid);
 
-            // Drain partial batch: if the thread exits with fewer than
-            // RETIRE_FREQ nodes in its batch, those nodes were never
-            // published via try_retire. We cannot call their destructors
-            // directly because other threads may still hold guard-protected
-            // references to the underlying objects (e.g. a resized table
-            // that readers loaded before the CAS... Hopscotch Map like
-            // data structures does that).
-            //
-            // Finalize the batch and submit it through try_retire so the
-            // normal epoch-based safety checks apply. If try_retire cannot
-            // place the batch (fewer nodes than eligible slots), park it on
-            // the global orphan list — another thread adopts and retires it
-            // through its own accumulating batch. Nothing leaks.
-            let count = self.batch_count.get();
-            if count > 0 {
-                let first = self.batch_first.get();
-                let last = self.batch_last.get();
-                self.batch_first.set(core::ptr::null_mut());
-                self.batch_last.set(core::ptr::null_mut());
-                self.batch_count.set(0);
-                unsafe {
-                    (*last)
-                        .batch_link
-                        .store(rnode_mark(first), Ordering::SeqCst);
+            // Everything that can run a destructor runs while this thread's
+            // slot is still active and published: a destructor is a critical
+            // section of its own, and its loads need this reservation as any
+            // load does. A destructor may retire again, so this repeats
+            // until no batch is left to submit.
+            loop {
+                // Drain partial batch: if the thread exits with fewer than
+                // RETIRE_FREQ nodes in its batch, those nodes were never
+                // published via try_retire. We cannot call their destructors
+                // directly because other threads may still hold
+                // guard-protected references to the underlying objects (e.g.
+                // a resized table that readers loaded before the CAS...
+                // Hopscotch Map like data structures does that).
+                //
+                // Finalize the batch and submit it through try_retire so the
+                // normal epoch-based safety checks apply. If try_retire
+                // cannot place the batch (fewer nodes than eligible slots),
+                // park it on the global orphan list: another thread adopts
+                // and retires it through its own accumulating batch. Nothing
+                // leaks.
+                let count = self.batch_count.get();
+                if count > 0 {
+                    let first = self.batch_first.get();
+                    let last = self.batch_last.get();
+                    self.batch_first.set(core::ptr::null_mut());
+                    self.batch_last.set(core::ptr::null_mut());
+                    self.batch_count.set(0);
+                    unsafe {
+                        (*last)
+                            .batch_link
+                            .store(rnode_mark(first), Ordering::SeqCst);
+                    }
+                    if !self.try_retire(first, last, own) {
+                        global.push_orphan(last as usize);
+                    }
                 }
-                if !self.try_retire(first, last, None) {
-                    global.push_orphan(last as usize);
+                if own.is_some() {
+                    for i in 0..global.hr_num() {
+                        let first =
+                            global.thread_slots(tid).first[i].exchange_lo(0, Ordering::AcqRel);
+                        if first != 0 && first != INVPTR as u64 {
+                            unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
+                        }
+                    }
+                }
+                self.drain_free_list();
+                if self.batch_count.get() == 0 {
+                    break;
                 }
             }
 
-            // Deactivate all slots. deactivate_slots uses exchange (not
-            // blind stores) so a node inserted by a concurrent try_retire is
-            // captured and traversed here instead of being obliterated;
-            // seqnos are preserved across tid recycling.
+            // Leave the protocol: deactivate all slots. deactivate_slots
+            // uses exchange (not blind stores) so a node a concurrent
+            // try_retire inserted since the drain above is captured here
+            // instead of being obliterated; seqnos are preserved across tid
+            // recycling. This thread holds no reservation any more and so
+            // runs no destructor from here on: a batch whose count this
+            // traversal brings to zero is re-armed and parked on the orphan
+            // list, where a live thread adopts it and retires it again.
             let captured = global.deactivate_slots(tid);
             for first in captured {
                 if first != 0 {
-                    unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
+                    let mut unowned: *mut RetiredNode = core::ptr::null_mut();
+                    unsafe { crate::reclaim::traverse(&mut unowned, first as *mut RetiredNode) };
+                    while !unowned.is_null() {
+                        let refs = unowned;
+                        // The refs-node is still finalized (batch_link =
+                        // RNODE(batch_first)); its count goes back to the
+                        // bias an unsubmitted batch carries. The orphan
+                        // list's lock orders these writes before the
+                        // adopter's reads.
+                        unsafe {
+                            unowned = (*refs).next.load(Ordering::Relaxed);
+                            (*refs).refs_or_next.store(REFC_PROTECT, Ordering::Relaxed);
+                        }
+                        global.push_orphan(refs as usize);
+                    }
                 }
             }
 
-            // Drain any remaining free list
-            self.drain_free_list();
-
-            // Only now may another thread take this ID over. The destructors
-            // run above may pin and load, and a load's publication goes to
-            // this ID's slot: released earlier, the ID could already belong
-            // to a new thread, whose published epoch that store would
-            // overwrite (possibly lowering it under what the new thread
-            // believes it publishes).
+            // Only now may another thread take this ID over, after every
+            // destructor this exit ran: a destructor may pin and load, and a
+            // load's publication goes to this ID's slot. Released earlier,
+            // the ID could already belong to a new thread, whose published
+            // epoch that store would overwrite (possibly lowering it under
+            // what the new thread believes it publishes).
             global.release_tid(tid);
 
             self.pin_count.set(saved_pin);

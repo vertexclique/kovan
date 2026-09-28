@@ -373,3 +373,60 @@ fn retire_submits_the_batch_left_after_helping() {
     .unwrap();
     assert_eq!(live.load(Ordering::SeqCst), 0);
 }
+
+/// A thread's exit runs the destructors of what its slot held and of what
+/// its last batch frees, and such a destructor may load. They run before
+/// the thread leaves the protocol, while its slot is still active, so their
+/// loads are protected as any other load is.
+#[test]
+fn exit_runs_its_destructors_with_its_slot_active() {
+    #[repr(C)]
+    struct ChecksSlot {
+        retired: RetiredNode,
+        tid: usize,
+        inactive: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for ChecksSlot {
+        fn drop(&mut self) {
+            let first = crate::slot::global().thread_slots(self.tid).first[0].load_lo();
+            if first == super::INVPTR as u64 {
+                self.inactive.fetch_add(1, Ordering::SeqCst);
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let _l = lock();
+    let inactive = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let i = Arc::clone(&inactive);
+    let d = Arc::clone(&dropped);
+    thread::spawn(move || {
+        drop(pin());
+        let tid = with_handle(|h| h.tid());
+        // A full batch into this thread's slot, and a partial one left in
+        // the thread's batch, both for the exit to free.
+        let _guard = pin();
+        for _ in 0..RETIRE_FREQ + RETIRE_FREQ / 2 {
+            let node = Box::into_raw(Box::new(ChecksSlot {
+                retired: RetiredNode::new(),
+                tid,
+                inactive: Arc::clone(&i),
+                dropped: Arc::clone(&d),
+            }));
+            unsafe { retire(node) };
+        }
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        RETIRE_FREQ + RETIRE_FREQ / 2
+    );
+    assert_eq!(
+        inactive.load(Ordering::SeqCst),
+        0,
+        "destructors ran after the exiting thread deactivated its slot"
+    );
+}
