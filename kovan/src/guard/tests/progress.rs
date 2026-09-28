@@ -278,7 +278,7 @@ fn slow_path_frees_nothing_before_it_republishes() {
         let handing_over = handing_over.clone();
         thread::spawn(move || {
             let tid = own_tid();
-            handing_over.arm(Step::HelpHandOver, tid);
+            handing_over.arm(Step::EraClosed, tid);
             with_handle(|h| h.help_thread(pending_tid, 0, tid));
         })
     };
@@ -365,7 +365,7 @@ fn list_hand_over_ends_while_retires_keep_coming() {
         );
         thread::spawn(move || {
             let tid = own_tid();
-            stall::arm(Step::HandOverTake, tid, move || {
+            stall::arm(Step::DetachList, tid, move || {
                 let n = passes.fetch_add(1, Ordering::SeqCst) + 2;
                 if n > RETIRES {
                     return false;

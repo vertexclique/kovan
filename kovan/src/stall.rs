@@ -25,13 +25,14 @@ pub(crate) enum Step {
     /// A pin's slow path has published its help request (result pending)
     /// and not yet entered its loop.
     SlowPending,
-    /// A helper has set a pending thread's result and made its empty epoch
-    /// transition, and not yet taken over its slot list.
-    HelpHandOver,
-    /// A thread taking over a slot list at the end of a slow-path
-    /// transition has read the slot and not yet tried to empty it (one
-    /// pass of the take's loop).
-    HandOverTake,
+    /// A thread detaching a slot list at the end of a slow-path cycle has
+    /// moved the era seqno odd (the slot closed to new batches) and not yet
+    /// emptied the list.
+    EraClosed,
+    /// A thread detaching a slot list at the end of a slow-path cycle has
+    /// read the slot and not yet tried to empty it (one pass of the
+    /// detach's loop).
+    DetachList,
     /// A protected load's convergence pass has loaded the pointer and not
     /// yet read the epoch again.
     LoadAttempt,

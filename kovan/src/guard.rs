@@ -606,9 +606,10 @@ impl Handle {
         #[cfg(test)]
         crate::stall::at(crate::stall::Step::SlowPending, tid);
 
-        // Wait for stable epoch (other threads to complete their updates)
-        #[allow(unused_assignments)]
-        let mut first: *mut RetiredNode = core::ptr::null_mut();
+        // The list the loop took after the request was answered (its list
+        // seqno moved on): the helper that answered it detached the slot's
+        // list before that, so this is what is left to traverse.
+        let mut produced: Option<u64> = None;
 
         // A pass is followed by another only when the global epoch moved
         // during it and no helper completed the request. Every epoch
@@ -622,7 +623,7 @@ impl Handle {
         loop {
             #[cfg(test)]
             crate::stall::at(crate::stall::Step::SlowPass, tid);
-            let curr_epoch = slot::epoch();
+            let mut curr_epoch = slot::epoch();
             if curr_epoch == prev_epoch {
                 // Try to self-complete: CAS result from (INVPTR, seqno) to (0, 0)
                 if slots.state[index]
@@ -648,22 +649,25 @@ impl Handle {
                 }
             }
 
-            // Dereference previous nodes
+            // Dereference previous nodes and update the era: after the
+            // traversal the era to publish is read again, as a transition
+            // publishes the era it reads after its traversal.
             let list_lo = slots.first[index].load_lo();
             if list_lo != 0 && list_lo != INVPTR as u64 {
                 let exchanged = slots.first[index].exchange_lo(0, Ordering::AcqRel);
                 // Check if result was already produced (seqno changed)
                 if slots.first[index].load_hi() != seqno {
-                    first = exchanged as *mut RetiredNode;
-                    break; // goto done
+                    produced = Some(exchanged);
+                    break;
                 }
                 if exchanged != INVPTR as u64 {
                     unsafe { self.traverse_onto_cache(exchanged as *mut RetiredNode) };
                 }
+                curr_epoch = slot::epoch();
             }
 
-            first = core::ptr::null_mut();
-            // Try to update epoch via DCAS
+            // Fails only when the result was produced: a helper moved the
+            // seqno on.
             let _ = slots.epoch[index].compare_exchange(prev_epoch, seqno, curr_epoch, seqno);
             prev_epoch = curr_epoch;
 
@@ -673,34 +677,28 @@ impl Handle {
             }
         }
 
-        // === done label ===
+        // The request was answered. Unless the loop found the list already
+        // detached, detach it here as the answering helper does (whoever
+        // runs it first takes the list).
+        let mut list = match produced {
+            Some(list) => list,
+            None => self.detach_nodes(slots, index, seqno),
+        };
 
-        // An empty epoch transition
-        let _ = slots.epoch[index].compare_exchange(prev_epoch, seqno, prev_epoch, seqno + 1);
-
-        // Clean up the list: take it over, unless a helper did. What is
-        // taken here goes onto the cache at once: `first` may already hold
-        // the list the loop above took.
-        let taken = self.take_over_list(&slots.first[index], seqno);
-        if taken != 0 {
-            unsafe { self.traverse_onto_cache(taken as *mut RetiredNode) };
-        }
-
-        let seqno = seqno + 1;
-
-        // Set the epoch from helper's result
-        slots.epoch[index].store_hi(seqno + 1, Ordering::Release);
+        // Publish the result's era with the seqnos past the cycle [Produced]:
+        // the era value first, then its seqno, then the list's.
         let result_epoch = slots.state[index].result.load_hi();
         slots.epoch[index].store_lo(result_epoch, Ordering::Release);
+        slots.epoch[index].store_hi(seqno + 2, Ordering::Release);
         // Mirror the published epoch and order it before this critical
         // section's pointer loads (Dekker pairing, see protect_load).
         self.mirror_transition(result_epoch);
         fence(Ordering::SeqCst);
+        slots.first[index].store_hi(seqno + 2, Ordering::Release);
 
-        // Set up first for the new seqno
-        slots.first[index].store_hi(seqno + 1, Ordering::Release);
-
-        // Check if the result pointer is already retired (need to protect it)
+        // Check if the result pointer is already retired (need to protect
+        // it): its batch's refs-node goes into the list as its terminal
+        // entry. (A pin's request carries no pointer, so this is inert.)
         let result_ptr = slots.state[index].result.load_lo() & 0xFFFFFFFFFFFFFFFC;
         if result_ptr != 0 {
             let ptr_node = result_ptr as *mut RetiredNode;
@@ -710,70 +708,61 @@ impl Handle {
                 unsafe {
                     (*refs).refs_or_next.fetch_add(1, Ordering::AcqRel);
                 }
-
-                if first as u64 != INVPTR as u64 && !first.is_null() {
-                    unsafe { self.traverse_onto_cache(first) };
+                if list != 0 && list != INVPTR as u64 {
+                    unsafe { self.traverse_onto_cache(list as *mut RetiredNode) };
                 }
-
-                let rnode = rnode_mark(refs);
-                let old_first = slots.first[index].exchange_lo(rnode as u64, Ordering::AcqRel);
-                // If exchange succeeded and old was not INVPTR, traverse it
-                if old_first != INVPTR as u64 && old_first != 0 {
-                    unsafe { self.traverse_onto_cache(old_first as *mut RetiredNode) };
-                }
-
-                global.dec_slow();
-                self.drain_free_list();
-                self.in_reclaim.set(was_reclaiming);
-                return;
-            } else {
-                // Empty list transition
-                let _ = slots.first[index].compare_exchange(0, seqno, 0, seqno + 1);
+                list = slots.first[index].exchange_lo(rnode_mark(refs) as u64, Ordering::AcqRel);
             }
         }
 
         global.dec_slow();
 
-        // Traverse removed list
-        if !first.is_null() && first as u64 != INVPTR as u64 {
-            unsafe { self.traverse_onto_cache(first) };
+        // Traverse the list detached or swapped out above.
+        if list != 0 && list != INVPTR as u64 {
+            unsafe { self.traverse_onto_cache(list as *mut RetiredNode) };
         }
 
         self.drain_free_list();
         self.in_reclaim.set(was_reclaiming);
     }
 
-    /// Take over the list of a slot whose slow-path transition ends: the
-    /// pending thread and its helpers all call this with the list seqno
-    /// the transition started from, and whoever runs it first takes what
-    /// the slot holds. Returns the list taken (0 when none), which the
-    /// caller traverses.
+    /// Detach the list of slot `index` of `slots`, whose slow-path cycle
+    /// `tag` ends: the pending thread and the helper that answered its
+    /// request both call this, and whoever runs it first takes the list.
+    /// Returns the list taken, or INVPTR when the other one took it.
     ///
-    /// Two steps. Step `HandOverClose` advances the list seqno from `seqno`
-    /// (even: the slot takes new batches) to `seqno + 1` (odd: a scan that
-    /// reads it skips the slot) with a compare-exchange of the seqno word
-    /// alone, which no insert can fail. Step `HandOverTake` then empties the
-    /// list with a compare-exchange of the whole slot, for as long as the
-    /// seqno stays `seqno + 1`: a thread that finds it moved on takes
-    /// nothing, the transition having republished the slot (what the slot
-    /// holds then is the new section's). The take fails only when the list
-    /// changed since it was read: another taker emptied it (then this one
-    /// ends) or a try_retire that scanned the slot before it was closed
-    /// inserted into it, or rolled an insert back, at most one each per
-    /// try_retire, and a thread has at most one in flight per nesting level
-    /// of its destructors. So the loop is bounded by the retires in flight
-    /// when the slot closed, never by how many other threads retire later.
-    fn take_over_list(&self, first: &slot::WordPair, seqno: u64) -> u64 {
-        let _ = first.compare_exchange_hi(seqno, seqno + 1);
+    /// Step `DetachEra` moves the era's seqno from `tag` to `tag + 1` with a
+    /// compare-exchange of that word alone, which the era's value (whatever
+    /// the pending thread last published) cannot fail; an odd era seqno
+    /// makes every scan that reads it skip the slot. Step `DetachList` then
+    /// empties the list and moves the list's seqno from `tag` to `tag + 1`
+    /// in one compare-exchange of the slot, while that seqno is still `tag`.
+    ///
+    /// The loop is bounded by the retires already past their scan when the
+    /// era seqno went odd, never by how many other threads retire after: a
+    /// pass fails only when the slot changed between its read and its
+    /// compare-exchange, by the other detach (which moves the list seqno, and
+    /// the next pass returns) or by an insert (or its rollback) of a
+    /// try_retire that read the era seqno still even. The era seqno stays
+    /// odd until the list seqno has moved on, so no later scan inserts; a
+    /// try_retire inserts once per slot, and a thread has one in flight per
+    /// nesting level of its destructors.
+    fn detach_nodes(&self, slots: &slot::ThreadSlots, index: usize, tag: u64) -> u64 {
+        let _ = slots.epoch[index].compare_exchange_hi(tag, tag + 1);
+        #[cfg(test)]
+        crate::stall::at(crate::stall::Step::EraClosed, self.tid());
         loop {
-            let (lo, hi) = first.load();
-            if hi != seqno + 1 || lo == 0 {
-                return 0;
+            let (lo, hi) = slots.first[index].load();
+            if hi != tag {
+                return INVPTR as u64;
             }
             #[cfg(test)]
-            crate::stall::at(crate::stall::Step::HandOverTake, self.tid());
-            if first.compare_exchange(lo, hi, 0, hi).is_ok() {
-                return if lo == INVPTR as u64 { 0 } else { lo };
+            crate::stall::at(crate::stall::Step::DetachList, self.tid());
+            if slots.first[index]
+                .compare_exchange(lo, hi, 0, tag + 1)
+                .is_ok()
+            {
+                return lo;
             }
         }
     }
@@ -821,45 +810,39 @@ impl Handle {
     /// advance phase and the epoch stabilizes. The bound is independent of
     /// the helpee's progress — the helpee is passive.
     ///
-    /// The hand-over loops are bounded too: the list's (`take_over_list`)
-    /// by the retires in flight when the slot closed to new batches, the
+    /// The hand-over loops are bounded too: the list's (`detach_nodes`) by
+    /// the retires in flight when the slot closed to new batches, the
     /// epoch's by the pending thread's republication (two passes at most).
     #[cold]
     fn help_thread(&self, helpee_tid: usize, index: usize, mytid: usize) {
         let global = self.global();
         let hr_num = global.hr_num();
+        let helpee = global.thread_slots(helpee_tid);
+        let mine = global.thread_slots(mytid);
 
-        // Check if still pending
-        let (last_result_lo, last_result_hi) =
-            global.thread_slots(helpee_tid).state[index].result.load();
-        if last_result_lo != INVPTR as u64 {
+        // The request to help, (INVPTR, its cycle's seqno) while open.
+        let (result_lo, result_hi) = helpee.state[index].result.load();
+        if result_lo != INVPTR as u64 {
             return;
         }
 
-        let birth_epoch = global.thread_slots(helpee_tid).state[index]
-            .epoch
-            .load(Ordering::Acquire);
-        let parent = global.thread_slots(helpee_tid).state[index]
-            .parent
-            .load(Ordering::Acquire);
+        let birth_epoch = helpee.state[index].epoch.load(Ordering::Acquire);
+        let parent = helpee.state[index].parent.load(Ordering::Acquire);
 
+        // Advertise the parent for a hand-over, protected by this thread's
+        // parent slot meanwhile. (A pin's request carries no parent.)
         if parent != 0 {
-            global.thread_slots(mytid).epoch[hr_num].store_lo(birth_epoch, Ordering::SeqCst);
-            global.thread_slots(mytid).first[hr_num].store_lo(0, Ordering::SeqCst);
+            mine.first[hr_num].store_lo(0, Ordering::SeqCst);
+            mine.epoch[hr_num].store_lo(birth_epoch, Ordering::SeqCst);
+            mine.state[hr_num].parent.store(parent, Ordering::SeqCst);
         }
-        global.thread_slots(mytid).state[hr_num]
-            .parent
-            .store(parent, Ordering::SeqCst);
 
-        let _obj = global.thread_slots(helpee_tid).state[index]
-            .pointer
-            .load(Ordering::Acquire);
-        let seqno = global.thread_slots(helpee_tid).epoch[index].load_hi();
+        let _obj = helpee.state[index].pointer.load(Ordering::Acquire);
+        let seqno = helpee.epoch[index].load_hi();
 
-        if last_result_hi == seqno {
-            let mut prev_epoch = slot::epoch();
-            let mut last_result_lo = last_result_lo;
-            let mut last_result_hi = last_result_hi;
+        if result_hi == seqno {
+            let mut curr_epoch = slot::epoch();
+            let (mut last_result_lo, mut last_result_hi) = (result_lo, result_hi);
 
             // As the pending thread's own loop: another pass only after the
             // epoch moved during this one and the request is still open, and
@@ -867,52 +850,33 @@ impl Handle {
             // first, completing it. At most T + 2 passes, each one do_update
             // of this thread's helper slot.
             loop {
-                prev_epoch = self.do_update(prev_epoch, hr_num + 1, mytid);
+                let prev_epoch = self.do_update(curr_epoch, hr_num + 1, mytid);
                 // In reserve_slot mode (pointer=0), ptr is always null
-                let curr_epoch = slot::epoch();
+                curr_epoch = slot::epoch();
 
                 if curr_epoch == prev_epoch {
                     // Try to set result
-                    if global.thread_slots(helpee_tid).state[index]
+                    if helpee.state[index]
                         .result
-                        .compare_exchange(
-                            last_result_lo,
-                            last_result_hi,
-                            0,
-                            curr_epoch, // ptr=0 (null), epoch=curr_epoch
-                        )
+                        .compare_exchange(last_result_lo, last_result_hi, 0, curr_epoch)
                         .is_ok()
                     {
-                        // Empty epoch transition
-                        let _ = global.thread_slots(helpee_tid).epoch[index].compare_exchange(
-                            prev_epoch,
-                            seqno,
-                            prev_epoch,
-                            seqno + 1,
-                        );
-                        #[cfg(test)]
-                        crate::stall::at(crate::stall::Step::HelpHandOver, mytid);
-
-                        // Clean up list: take it over, unless the pending
-                        // thread or another helper did.
-                        let taken = self
-                            .take_over_list(&global.thread_slots(helpee_tid).first[index], seqno);
-                        if taken != 0 {
-                            unsafe { self.traverse_into_cache(taken as *mut RetiredNode) };
+                        let list = self.detach_nodes(helpee, index, seqno);
+                        if list != INVPTR as u64 && list != 0 {
+                            unsafe { self.traverse_into_cache(list as *mut RetiredNode) };
                         }
 
                         let seqno = seqno + 1;
 
-                        // Set real epoch [HandOverEpoch]. A strong
+                        // Set the new era [HandOverEpoch]. A strong
                         // compare-exchange fails only when the word changed
                         // while its seqno is odd: the pending thread
-                        // republishing (seqno + 1, then its epoch) or another
+                        // republishing (its era, then seqno + 1) or another
                         // helper succeeding, both of which move the seqno on
                         // and end the loop. At most two passes.
-                        let (mut old_lo, mut old_hi) =
-                            global.thread_slots(helpee_tid).epoch[index].load();
+                        let (mut old_lo, mut old_hi) = helpee.epoch[index].load();
                         while old_hi == seqno {
-                            match global.thread_slots(helpee_tid).epoch[index].compare_exchange(
+                            match helpee.epoch[index].compare_exchange(
                                 old_lo,
                                 old_hi,
                                 curr_epoch,
@@ -926,62 +890,44 @@ impl Handle {
                             }
                         }
 
-                        // Empty list transition (no pointer to protect in reserve_slot mode)
-                        let _ = global.thread_slots(helpee_tid).first[index].compare_exchange(
-                            0,
-                            seqno,
-                            0,
-                            seqno + 1,
-                        );
+                        // A simple list seqno transition [HandOverList]: a
+                        // pin's request carries no pointer to hand over.
+                        let _ = helpee.first[index].compare_exchange_hi(seqno, seqno + 1);
                     }
                     break;
                 }
-                prev_epoch = curr_epoch;
 
                 // Check if result was already set
-                let (lo, hi) = global.thread_slots(helpee_tid).state[index].result.load();
-                last_result_lo = lo;
-                last_result_hi = hi;
+                (last_result_lo, last_result_hi) = helpee.state[index].result.load();
                 if last_result_lo != INVPTR as u64 {
                     break;
                 }
             }
 
-            // Clean up helper slot hr_num+1
-            let epoch_lo =
-                global.thread_slots(mytid).epoch[hr_num + 1].exchange_lo(0, Ordering::SeqCst);
-            if epoch_lo != 0 {
-                let first = global.thread_slots(mytid).first[hr_num + 1]
-                    .exchange_lo(INVPTR as u64, Ordering::AcqRel);
-                if first != INVPTR as u64 && first != 0 {
-                    unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
-                }
+            // Leave the helper slot [HelperLeave].
+            let first = mine.first[hr_num + 1].exchange_lo(INVPTR as u64, Ordering::AcqRel);
+            if first != INVPTR as u64 && first != 0 {
+                unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
             }
         }
 
-        // Clean up helper parent slot hr_num
-        let old_parent = global.thread_slots(mytid).state[hr_num]
-            .parent
-            .swap(0, Ordering::SeqCst);
-        if old_parent != parent {
-            // The helpee provided an extra reference
-            let refs = unsafe { crate::reclaim::get_refs_node(parent as *mut RetiredNode) };
-            let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
-            if old == 1 {
-                let mut free_list = self.free_list.get();
-                unsafe {
-                    (*refs).next.store(free_list, Ordering::Relaxed);
+        if parent != 0 {
+            // If the parent was handed over, drop the reference it came with.
+            let old_parent = mine.state[hr_num].parent.swap(0, Ordering::SeqCst);
+            if old_parent != parent {
+                let refs = unsafe { crate::reclaim::get_refs_node(parent as *mut RetiredNode) };
+                let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
+                if old == 1 {
+                    let mut free_list = self.free_list.get();
+                    unsafe {
+                        (*refs).next.store(free_list, Ordering::Relaxed);
+                    }
+                    free_list = refs;
+                    self.free_list.set(free_list);
                 }
-                free_list = refs;
-                self.free_list.set(free_list);
             }
-        }
-
-        // Clean up parent reservation slot hr_num
-        let epoch_lo = global.thread_slots(mytid).epoch[hr_num].exchange_lo(0, Ordering::SeqCst);
-        if epoch_lo != 0 {
-            let first = global.thread_slots(mytid).first[hr_num]
-                .exchange_lo(INVPTR as u64, Ordering::AcqRel);
+            // Leave the parent slot.
+            let first = mine.first[hr_num].exchange_lo(INVPTR as u64, Ordering::AcqRel);
             if first != INVPTR as u64 && first != 0 {
                 unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
             }
