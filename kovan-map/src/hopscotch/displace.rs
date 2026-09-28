@@ -6,12 +6,11 @@
 
 extern crate alloc;
 
-use super::table::{Entry, HomeGuard, Table, Word, link};
+use super::table::{Entry, HomeGuard, Table, Word};
 use super::{HopscotchMap, MAX_PROBE_DISTANCE, NEIGHBORHOOD_SIZE};
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
-use kovan::{RetiredNode, retire};
 
 #[cfg(test)]
 use super::pause;
@@ -35,59 +34,67 @@ where
         let hash = pending.key_hash();
 
         // 1. The key's entry. The scan is stable: only this guard's holder links, replaces,
-        // unlinks or moves an entry of the home.
-        let existing = table.find(home.idx, home.hops(), hash, pending.key(), guard);
+        // unlinks or moves an entry of the home, so it reads the entries unprotected.
+        let existing = table.find_held(home, hash, pending.key(), guard);
         if let Some((offset, found_word)) = existing {
             let found_ptr = found_word.ptr();
-            // SAFETY: loaded under `guard`, which keeps it from being freed.
+            // SAFETY: an entry of the home this call holds the guard of, so no other thread
+            // unlinks or retires it.
             let found = unsafe { &*found_ptr };
             if only_if_absent {
                 return InsertResult::Exists(found.value.clone());
             }
             let old_value = found.value.clone();
-            // A store, not a CAS: no other thread writes an occupied slot of a home whose guard
-            // this call holds. Release: a reader that acquires the slot sees the entry's fields.
-            table
-                .get_bucket(home.idx + offset)
-                .store(Word::of(pending.into_entry()), Ordering::Release);
-            // SAFETY: unlinked above under its home guard, so no other thread unlinks or
-            // retires it; a reader that loaded it holds a guard that keeps it alive.
-            unsafe { retire(found_ptr) };
+            // SAFETY: `found_ptr` is the entry of the slot `offset` past the held home.
+            unsafe { table.replace_held(home, offset, found_ptr, pending.into_entry()) };
             return InsertResult::Replaced(old_value);
         }
 
         #[cfg(test)]
         pause::at(pause::Point::InGuardBeforeClaim);
 
-        // 2. The first free slot of the neighborhood (a home is below the capacity, so the
-        // neighborhood ends within the padded bucket array).
-        let mut entry = pending.into_entry();
-        for offset in 0..NEIGHBORHOOD_SIZE {
-            if !table.looks_free(home.idx + offset, guard) {
-                continue;
-            }
-            match Self::link_in(table, home, offset, entry, guard) {
-                Ok(linked) => return InsertResult::Linked(linked),
-                Err(back) => entry = back,
-            }
-        }
-
-        // 3. Displace entries of other homes until a slot of the neighborhood is free.
-        match Self::displace(table, home.idx, guard) {
-            Freed::Slot(offset) => match Self::link_in(table, home, offset, entry, guard) {
-                Ok(linked) => InsertResult::Linked(linked),
-                Err(back) => InsertResult::Retry(Pending::Built(back)),
-            },
-            Freed::Contended => InsertResult::Retry(Pending::Built(entry)),
-            Freed::Full => InsertResult::NeedResize(Pending::Built(entry)),
+        // 2. A slot of the neighborhood, freed by displacement when none is.
+        let word = Word::of(pending.into_entry());
+        match Self::place(table, home, word, guard) {
+            Placed::At(_) => InsertResult::Linked(word.ptr()),
+            // SAFETY (both): no slot took the word, so its entry is still this call's.
+            Placed::Contended => InsertResult::Retry(Pending::Built(unsafe { word.into_entry() })),
+            Placed::Full => InsertResult::NeedResize(Pending::Built(unsafe { word.into_entry() })),
         }
     }
 
-    /// Link `entry` in the free slot `offset` past the home of `home`, publishing the slot's hop
+    /// Link `word` (a new entry's, or [`Word::reserved`]) in the first free slot of the
+    /// neighborhood of the home `home` holds, freeing one by displacing entries of other homes
+    /// when the neighborhood is full: where it went, or why it went nowhere (the word is then
+    /// still the caller's).
+    pub(super) fn place(
+        table: &Table<K, V>,
+        home: &mut HomeGuard<'_>,
+        word: Word<'_, K, V>,
+        guard: &kovan::Guard,
+    ) -> Placed {
+        // A home is below the capacity, so the neighborhood ends within the padded bucket array.
+        for offset in 0..NEIGHBORHOOD_SIZE {
+            if table.looks_free(home.idx + offset, guard)
+                && Self::link_in(table, home, offset, word, guard)
+            {
+                return Placed::At(offset);
+            }
+        }
+        match Self::displace(table, home.idx, guard) {
+            Freed::Slot(offset) if Self::link_in(table, home, offset, word, guard) => {
+                Placed::At(offset)
+            }
+            Freed::Slot(_) | Freed::Contended => Placed::Contended,
+            Freed::Full => Placed::Full,
+        }
+    }
+
+    /// Link `word` in the free slot `offset` past the home of `home`, publishing the slot's hop
     /// bit first: a lookup that finds the entry, through any word of the home that names the
     /// slot (a word read before a remove emptied it, say), finds it only after every later
     /// lookup sees the bit too, so the link is the insert's linearization point for every
-    /// reader. A link that loses the slot takes the bit back. Modelled in
+    /// reader. A link that loses the slot takes the bit back and answers `false`. Modelled in
     /// `tla/hopscotch/HopscotchMap.tla` (IFr, IL); linking first and publishing the bit at the
     /// guard's release (Mutation "link_then_publish") lets a lookup see an insert that a later
     /// lookup does not.
@@ -95,13 +102,23 @@ where
         table: &Table<K, V>,
         home: &mut HomeGuard<'_>,
         offset: usize,
-        entry: Box<Entry<K, V>>,
+        word: Word<'_, K, V>,
         guard: &kovan::Guard,
-    ) -> Result<*const Entry<K, V>, Box<Entry<K, V>>> {
+    ) -> bool {
         home.publish_linked(offset);
-        link(table.get_bucket(home.idx + offset), entry, guard).inspect_err(|_| {
+        // Release: a reader that acquires the slot sees the entry's fields. Relaxed on failure:
+        // the value read is not used.
+        let linked = table.get_bucket(home.idx + offset).replace(
+            Word::free(),
+            word,
+            Ordering::Release,
+            Ordering::Relaxed,
+            guard,
+        );
+        if !linked {
             home.retract_linked(offset);
-        })
+        }
+        linked
     }
 
     /// Free a slot of the neighborhood of `home` by moving entries: find the first free slot
@@ -241,12 +258,7 @@ impl<K, V> Pending<K, V> {
     /// The entry, allocated the first time an attempt needs it.
     fn into_entry(self) -> Box<Entry<K, V>> {
         match self {
-            Self::Parts { hash, key, value } => Box::new(Entry {
-                retired: RetiredNode::new(),
-                hash,
-                key,
-                value,
-            }),
+            Self::Parts { hash, key, value } => Entry::boxed(hash, key, value),
             Self::Built(entry) => entry,
         }
     }
@@ -261,6 +273,17 @@ pub(super) enum InsertResult<K, V> {
     Exists(V),
     NeedResize(Pending<K, V>),
     Retry(Pending<K, V>),
+}
+
+/// Where [`place`](HopscotchMap::place) put a word.
+pub(super) enum Placed {
+    /// In the slot this far past the home.
+    At(usize),
+    /// Nowhere yet: a step lost a race (a free slot taken, an entry moved, a home held); a retry
+    /// can succeed.
+    Contended,
+    /// Nowhere: no free slot within reach that entries can move into; the table grows.
+    Full,
 }
 
 /// How freeing a slot of an insert's neighborhood by displacement ended.

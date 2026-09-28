@@ -21,6 +21,13 @@
 (* table it started on and skips an entry whose key it met in the lower     *)
 (* slots of that key's neighborhood.                                        *)
 (*                                                                          *)
+(* The conditional writes (remove_if, replace_if, compute) run their        *)
+(* closure once, under the key's home guard, and write what it decided      *)
+(* before the guard is released. A compute of an absent key first reserves  *)
+(* the slot its entry would take (RSV: no entry to a reader, taken to a     *)
+(* writer), placing it as an insert places an entry, so the entry lands     *)
+(* without the guard ever being released after the closure ran.            *)
+(*                                                                          *)
 (* The hash of key k is k (the tests' identity hasher); NH is the           *)
 (* neighborhood size (32 in the code). `Mutation` puts back one 0.1.20 rule *)
 (* at a time; see README.md.                                                *)
@@ -43,6 +50,8 @@ CONSTANTS
     Mutation     \* "none" or one 0.1.20 rule put back
 
 None == 0
+\* A reserved slot's word (`Word::reserved`): no entry, and not free.
+RSV == -1
 Procs == Workers \cup {RZ}
 Ents == 1..MaxEntries
 TIds == 1..MaxTables
@@ -76,10 +85,18 @@ InitAbs(k) == LET is == {i \in InitIds : InitSlots[i + 1][1] = k}
               IN IF is = {} THEN None ELSE InitSlots[Min(is) + 1][2]
 InitHops(h) == {i - h : i \in {j \in InitIds : Home(InitSlots[j + 1][1], InitCap) = h}}
 
-Protect(P, e) == IF e # 0 /\ ent.st[e] = "live" THEN P \cup {e} ELSE P
+Protect(P, e) == IF e \in Ents /\ ent.st[e] = "live" THEN P \cup {e} ELSE P
 FreeEnts == {e \in Ents : ent.st[e] = "free"}
 Alloc(en, e, k, v) == [en EXCEPT !.st[e] = "live", !.key[e] = k, !.val[e] = v]
 Fail(e) == IF err = "none" THEN e ELSE err
+\* A scan by the holder of home h's guard in table t (`find_held`) loads the words of the slots
+\* `hops` names without protecting the entries they name (IS, RS), and uses those entries (their
+\* keys compared, the found one's value read) a step later (IU, RU): each must still be live
+\* then, a use after free otherwise. The load and the use are separate steps, so a thread that
+\* could unlink and retire an entry between them breaks NoUseAfterFree.
+HeldLoad(t, h, hops) == [o \in Offs |-> IF o \in hops THEN tb.slot[t][h + o] ELSE 0]
+HeldUse(rd) == IF \A o \in Offs : rd[o] \notin Ents \/ ent.st[rd[o]] = "live" THEN err ELSE Fail("uaf")
+Unloaded == [o \in Offs |-> 0]
 
 Op(p) == Prog[p][ts[p].i]
 K(p) == Op(p).k
@@ -93,9 +110,9 @@ Removals(p, k) == Cardinality({j \in (ts[p].inv + 1)..Len(hist) : hist[j] = <<k,
 \* The entry of key k a lookup finds in table t through its home's bits.
 Visible(t, k) == LET h == Home(k, tb.cap[t])
                      es == {tb.slot[t][h + o] : o \in tb.hops[t][h]}
-                 IN {e \in es : e # 0 /\ ent.key[e] = k}
+                 IN {e \in es : e \in Ents /\ ent.key[e] = k}
 ValIn(t, k) == LET es == Visible(t, k) IN IF es = {} THEN None ELSE ent.val[CHOOSE e \in es : TRUE]
-InSlots(t) == {tb.slot[t][i] : i \in 0..(Span(t, tb) - 1)} \ {0}
+InSlots(t) == {tb.slot[t][i] : i \in 0..(Span(t, tb) - 1)} \cap Ents
 
 Word(t, h) == [hops |-> tb.hops[t][h], stamp |-> tb.stamp[t][h]]
 Bump(s) == (s + 1) % (MaxStamp + 1)
@@ -106,7 +123,9 @@ Idle == [pc |-> "next", i |-> 1, t |-> 0, h |-> 0, hw |-> [hops |-> {}, stamp |-
          free |-> 0, from |-> 0, con |-> FALSE, own |-> 0, ow |-> [hops |-> {}, stamp |-> 0],
          rest |-> {}, idx |-> 0, recent |-> [o \in Offs |-> 0],
          ycnt |-> [k \in Keys |-> 0], yv |-> {}, old |-> 0, nt |-> 0, j |-> 1, gc |-> 0,
-         rsc |-> FALSE, skp |-> FALSE, rk |-> "none", rc |-> 0, ce |-> 0]
+         rsc |-> FALSE, skp |-> FALSE, rk |-> "none", rc |-> 0, ce |-> 0, rd |-> [o \in Offs |-> 0],
+         dec |-> "none", saw |-> None, nv |-> None, runs |-> 0, pre |-> None, rsv |-> FALSE,
+         met |-> FALSE]
 
 Go(p, lbl) == [ts EXCEPT ![p].pc = lbl]
 
@@ -131,18 +150,30 @@ Init ==
 
 \* ---------------------------------------------------------------- dispatch
 
+\* The conditional writes: remove_if and replace_if take the remove's way to the guard (a home
+\* with no bits answers absent), compute takes the insert's (the guard always, and an absent key
+\* places a reservation as an insert places its entry).
+CondRP == {"rif", "rpi"}
+CondCmp == {"cmp", "cmpx"}
+Cond == CondRP \cup CondCmp
+\* A conditional write decides on a value a lookup read before it took the guard.
+MutCheck == Mutation = "unguarded_check"
+
 Dispatch(p) ==
     /\ ts[p].pc = "next"
     /\ IF ts[p].i > Len(Prog[p])
        THEN ts' = Go(p, "done")
        ELSE LET o == Prog[p][ts[p].i].op
-                lbl == CASE o \in {"ins", "iia", "goi"} -> "IW"
-                         [] o \in {"rem", "frm"} -> "RW"
+                lbl == CASE o \in {"ins", "iia", "goi"} \cup CondCmp -> "IW"
+                         [] o \in {"rem", "frm"} \cup CondRP -> "RW"
                          [] o = "get" -> "G0"
                          [] o = "iter" -> "T0"
-            IN ts' = [ts EXCEPT ![p].pc = lbl, ![p].inv = Len(hist), ![p].abs0 = abs,
+            IN ts' = [ts EXCEPT ![p].pc = IF o \in Cond /\ MutCheck THEN "CP" ELSE lbl,
+                                ![p].inv = Len(hist), ![p].abs0 = abs,
                                 ![p].res = None, ![p].ins = FALSE, ![p].cnt = FALSE,
-                                ![p].rmv = FALSE, ![p].ycnt = [k \in Keys |-> 0], ![p].yv = {}]
+                                ![p].rmv = FALSE, ![p].ycnt = [k \in Keys |-> 0], ![p].yv = {},
+                                ![p].dec = "none", ![p].saw = None, ![p].nv = None,
+                                ![p].runs = 0, ![p].rsv = FALSE, ![p].e = 0]
     /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist, err, prot>>
 
 Finish(p, e) ==
@@ -171,33 +202,50 @@ IC(p) ==
                /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h), ![p].pc = "IS"]
     /\ UNCHANGED <<ent, cur, latch, count, abs, hist, err, prot>>
 
-\* The key's entry under the guard (a stable scan): answered, replaced, or absent.
+\* The key's entry under the guard (a stable scan): the words of the slots the home's bits name,
+\* loaded without protecting their entries (`find_held`).
 IS(p) ==
     /\ ts[p].pc = "IS"
+    /\ ts' = [ts EXCEPT ![p].rd = HeldLoad(ts[p].t, ts[p].h, ts[p].hw.hops), ![p].pc = "IU"]
+    /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist, err, prot>>
+
+\* The entries IS loaded, used: the key's entry answered, replaced, or absent.
+IU(p) ==
+    /\ ts[p].pc = "IU"
     /\ LET t == ts[p].t
            h == ts[p].h
-           found == {o \in ts[p].hw.hops : tb.slot[t][h + o] # 0 /\ ent.key[tb.slot[t][h + o]] = K(p)}
-           e == IF found = {} THEN 0 ELSE tb.slot[t][h + Min(found)]
-       IN CASE e # 0 /\ Op(p).op \in {"iia", "goi"} ->
-                 /\ ts' = [ts EXCEPT ![p].res = ent.val[e], ![p].out = "exists", ![p].pc = "IR"]
-                 /\ prot' = [prot EXCEPT ![p] = Protect(@, e)]
-                 /\ UNCHANGED <<ent, tb, abs, hist, err>>
+           rd == ts[p].rd
+           found == {o \in ts[p].hw.hops : rd[o] \in Ents /\ ent.key[rd[o]] = K(p)}
+           e == IF found = {} THEN 0 ELSE rd[Min(found)]
+           used == HeldUse(rd)
+       IN CASE e # 0 /\ Op(p).op \in CondCmp ->
+                 /\ ts' = [ts EXCEPT ![p].e = e, ![p].off = Min(found), ![p].rd = Unloaded,
+                                     ![p].pc = "CF"]
+                 /\ err' = used
+                 /\ UNCHANGED <<ent, tb, abs, hist>>
+            [] e # 0 /\ Op(p).op \in {"iia", "goi"} ->
+                 /\ ts' = [ts EXCEPT ![p].res = ent.val[e], ![p].out = "exists", ![p].rd = Unloaded,
+                                     ![p].pc = "IR"]
+                 /\ err' = used
+                 /\ UNCHANGED <<ent, tb, abs, hist>>
             [] e # 0 /\ FreeEnts = {} ->
                  /\ err' = Fail("pool")
                  /\ ts' = Go(p, "done")
-                 /\ UNCHANGED <<ent, tb, abs, hist, prot>>
+                 /\ UNCHANGED <<ent, tb, abs, hist>>
             [] e # 0 ->
                  LET n == Min(FreeEnts) IN
                  /\ ent' = [Alloc(ent, n, K(p), V(p)) EXCEPT !.st[e] = "retired"]
                  /\ tb' = [tb EXCEPT !.slot[t][h + Min(found)] = n]
                  /\ abs' = [abs EXCEPT ![K(p)] = V(p)]
                  /\ hist' = Append(hist, <<K(p), V(p)>>)
-                 /\ ts' = [ts EXCEPT ![p].res = ent.val[e], ![p].out = "replaced", ![p].pc = "IR"]
-                 /\ UNCHANGED <<err, prot>>
+                 /\ ts' = [ts EXCEPT ![p].res = ent.val[e], ![p].out = "replaced", ![p].rd = Unloaded,
+                                     ![p].pc = "IR"]
+                 /\ err' = used
             [] OTHER ->
-                 /\ ts' = [ts EXCEPT ![p].off = 0, ![p].pc = "IFr"]
-                 /\ UNCHANGED <<ent, tb, abs, hist, err, prot>>
-    /\ UNCHANGED <<cur, latch, count>>
+                 /\ ts' = [ts EXCEPT ![p].off = 0, ![p].rd = Unloaded, ![p].pc = "IFr"]
+                 /\ err' = used
+                 /\ UNCHANGED <<ent, tb, abs, hist>>
+    /\ UNCHANGED <<cur, latch, count, prot>>
 
 Late == Mutation = "link_then_publish"
 
@@ -215,7 +263,7 @@ IFr(p) ==
             [] tb.slot[t][h + o] # 0 ->
                  /\ ts' = [ts EXCEPT ![p].off = o + 1]
                  /\ UNCHANGED <<ent, tb, err>>
-            [] FreeEnts = {} ->
+            [] FreeEnts = {} /\ Op(p).op \notin CondCmp ->
                  /\ err' = Fail("pool")
                  /\ ts' = Go(p, "done")
                  /\ UNCHANGED <<ent, tb>>
@@ -234,14 +282,18 @@ IFr(p) ==
 
 \* The link CAS into the slot whose bit is published: the insert's linearization point. A lost
 \* slot takes the bit back; from the first free slot the next is tried, after a displacement the
-\* insert retries.
+\* insert retries. A compute links the reserved word instead, and runs its closure next.
 IL(p) ==
     /\ ts[p].pc = "IL"
     /\ LET t == ts[p].t
            h == ts[p].h
            f == ts[p].free
            after == IF f < h + NH /\ ts[p].off < NH THEN "first" ELSE "displaced"
-       IN IF tb.slot[t][f] = 0 /\ FreeEnts # {}
+       IN IF tb.slot[t][f] = 0 /\ Op(p).op \in CondCmp
+          THEN /\ tb' = [tb EXCEPT !.slot[t][f] = RSV]
+               /\ ts' = [ts EXCEPT ![p].off = f - h, ![p].e = 0, ![p].rsv = TRUE, ![p].pc = "CF"]
+               /\ UNCHANGED <<ent, abs, hist>>
+          ELSE IF tb.slot[t][f] = 0 /\ FreeEnts # {}
           THEN LET n == Min(FreeEnts) IN
                /\ ent' = Alloc(ent, n, K(p), V(p))
                /\ tb' = [tb EXCEPT !.slot[t][f] = n]
@@ -286,7 +338,7 @@ D2(p) ==
           THEN /\ ts' = [ts EXCEPT ![p].out = IF ts[p].con THEN "retry" ELSE "needresize",
                                    ![p].pc = "IR"]
                /\ UNCHANGED <<tb, err, prot>>
-          ELSE IF e = 0
+          ELSE IF e \notin Ents
           THEN /\ ts' = [ts EXCEPT ![p].free = from, ![p].pc = "D1"]
                /\ UNCHANGED <<tb, err, prot>>
           ELSE LET own == Home(ent.key[e], tb.cap[t]) IN
@@ -399,7 +451,7 @@ DL(p) ==
        IN CASE tb.slot[t][f] # 0 ->
                  /\ ts' = [ts EXCEPT ![p].out = "retry", ![p].pc = "IR"]
                  /\ UNCHANGED <<ent, tb, err>>
-            [] FreeEnts = {} ->
+            [] FreeEnts = {} /\ Op(p).op \notin CondCmp ->
                  /\ err' = Fail("pool")
                  /\ ts' = Go(p, "done")
                  /\ UNCHANGED <<ent, tb>>
@@ -486,44 +538,62 @@ RC(p) ==
            h == Home(K(p), tb.cap[t])
        IN CASE latch -> /\ ts' = Go(p, "RW")
                         /\ UNCHANGED tb
-            [] tb.hops[t][h] = {} -> /\ ts' = [ts EXCEPT ![p].pc = "R9"]
+            [] tb.hops[t][h] = {} -> /\ ts' = [ts EXCEPT ![p].pc = IF Op(p).op \in CondRP
+                                                                  THEN "CA" ELSE "R9"]
                                      /\ UNCHANGED tb
-            [] Unguarded -> /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h), ![p].pc = "RS"]
-                            /\ UNCHANGED tb
+            [] Unguarded /\ Op(p).op \notin CondRP ->
+                   /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h), ![p].pc = "RS"]
+                   /\ UNCHANGED tb
             [] tb.grd[t][h] -> /\ ts' = Go(p, "RW")
                                /\ UNCHANGED tb
             [] OTHER -> /\ tb' = [tb EXCEPT !.grd[t][h] = TRUE]
-                        /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h), ![p].pc = "RS"]
+                        /\ ts' = [ts EXCEPT ![p].h = h, ![p].hw = Word(t, h),
+                                            ![p].pc = IF Op(p).op \in CondRP THEN "CS" ELSE "RS"]
     /\ UNCHANGED <<ent, cur, latch, count, abs, hist, err, prot>>
 
-\* The key's entry under the guard, unlinked by a store (0.1.20: found, then a CAS).
+\* The key's entry under the guard: the words of the slots the home's bits name, loaded without
+\* protecting their entries (`find_held`); RU uses them. 0.1.20 ("unguarded_remove"): a scan with
+\* no guard, protecting the entry it finds, then the unlink CAS (RX).
 RS(p) ==
     /\ ts[p].pc = "RS"
     /\ LET t == ts[p].t
            h == ts[p].h
-           found == {o \in ts[p].hw.hops : tb.slot[t][h + o] # 0 /\ ent.key[tb.slot[t][h + o]] = K(p)}
+           found == {o \in ts[p].hw.hops : tb.slot[t][h + o] \in Ents /\ ent.key[tb.slot[t][h + o]] = K(p)}
            o == IF found = {} THEN 0 ELSE Min(found)
            e == IF found = {} THEN 0 ELSE tb.slot[t][h + o]
-       IN CASE e = 0 /\ Unguarded ->
-                 /\ ts' = Go(p, "R9")
-                 /\ UNCHANGED <<tb, abs, hist, prot>>
+       IN CASE ~Unguarded ->
+                 /\ ts' = [ts EXCEPT ![p].rd = HeldLoad(t, h, ts[p].hw.hops), ![p].pc = "RU"]
+                 /\ UNCHANGED prot
             [] e = 0 ->
-                 /\ tb' = [tb EXCEPT !.grd[t][h] = FALSE]
                  /\ ts' = Go(p, "R9")
-                 /\ UNCHANGED <<abs, hist, prot>>
-            [] Unguarded ->
+                 /\ UNCHANGED prot
+            [] OTHER ->
                  /\ ts' = [ts EXCEPT ![p].e = e, ![p].off = o, ![p].pc = "RX"]
                  /\ prot' = [prot EXCEPT ![p] = Protect(@, e)]
-                 /\ UNCHANGED <<tb, abs, hist>>
-            [] OTHER ->
-                 /\ tb' = [tb EXCEPT !.slot[t][h + o] = 0]
-                 /\ abs' = [abs EXCEPT ![K(p)] = None]
-                 /\ hist' = Append(hist, <<K(p), None>>)
-                 /\ prot' = [prot EXCEPT ![p] = Protect(@, e)]
-                 /\ ts' = [ts EXCEPT ![p].e = e, ![p].hw.hops = @ \ {o},
-                                     ![p].res = IF ts[p].res # None THEN @ ELSE ent.val[e],
-                                     ![p].rmv = TRUE, ![p].pc = "RN"]
-    /\ UNCHANGED <<ent, cur, latch, count, err>>
+    /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist, err>>
+
+\* The entries RS loaded, used: the key's entry unlinked by a store (0.1.20: found, then a CAS),
+\* or none, and the guard released.
+RU(p) ==
+    /\ ts[p].pc = "RU"
+    /\ LET t == ts[p].t
+           h == ts[p].h
+           rd == ts[p].rd
+           found == {o \in ts[p].hw.hops : rd[o] \in Ents /\ ent.key[rd[o]] = K(p)}
+           o == IF found = {} THEN 0 ELSE Min(found)
+           e == IF found = {} THEN 0 ELSE rd[o]
+       IN /\ err' = HeldUse(rd)
+          /\ IF e = 0
+             THEN /\ tb' = [tb EXCEPT !.grd[t][h] = FALSE]
+                  /\ ts' = [ts EXCEPT ![p].rd = Unloaded, ![p].pc = "R9"]
+                  /\ UNCHANGED <<abs, hist>>
+             ELSE /\ tb' = [tb EXCEPT !.slot[t][h + o] = 0]
+                  /\ abs' = [abs EXCEPT ![K(p)] = None]
+                  /\ hist' = Append(hist, <<K(p), None>>)
+                  /\ ts' = [ts EXCEPT ![p].e = e, ![p].hw.hops = @ \ {o}, ![p].rd = Unloaded,
+                                      ![p].res = IF ts[p].res # None THEN @ ELSE ent.val[e],
+                                      ![p].rmv = TRUE, ![p].pc = "RN"]
+    /\ UNCHANGED <<ent, cur, latch, count, prot>>
 
 \* 0.1.20: the unlink CAS; an entry moved meanwhile makes the call answer None.
 RX(p) ==
@@ -603,10 +673,10 @@ G2(p) ==
                    e == tb.slot[t][h + o]
                    P2 == Protect(prot[p], e)
                IN /\ prot' = [prot EXCEPT ![p] = P2]
-                  /\ err' = IF e = 0 \/ e \in P2 THEN err ELSE Fail("uaf")
-                  /\ ts' = IF e # 0 /\ ent.key[e] = K(p)
+                  /\ err' = IF e \notin Ents \/ e \in P2 THEN err ELSE Fail("uaf")
+                  /\ ts' = IF e \in Ents /\ ent.key[e] = K(p)
                            THEN [ts EXCEPT ![p].res = ent.val[e], ![p].pc = "G9"]
-                           ELSE [ts EXCEPT ![p].rest = @ \ {o}]
+                           ELSE [ts EXCEPT ![p].rest = @ \ {o}, ![p].met = @ \/ e = RSV]
     /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist>>
 
 \* A miss rescans when the home's move stamp moved (0.1.20 "no_stamp": never).
@@ -628,6 +698,148 @@ G9(p) ==
     /\ Finish(p, IF SeenDuring(p, K(p), ts[p].res) THEN err ELSE Fail("lin_get"))
     /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist>>
 
+\* ---------------------------------------------------------------- conditional writes
+\* remove_if (rif, the value in `acc`), replace_if (rpi, the value in `acc`, by `v`), compute
+\* (cmp, the next value `fx[seen]`, None removing) and a compute whose closure unwinds (cmpx).
+\* The closure runs in one step (CF), under the home guard, on the value of the entry found (or
+\* None, a slot reserved for an absent key); the write (CX) is checked against it: the value the
+\* closure saw is the key's value when what it decided is written (CondExact).
+
+\* The lookup a conditional write makes before it takes the guard ("unguarded_check" only).
+CP(p) ==
+    /\ ts[p].pc = "CP"
+    /\ ts' = [ts EXCEPT ![p].pre = ValIn(cur, K(p)),
+                        ![p].pc = IF Op(p).op \in CondRP THEN "RW" ELSE "IW"]
+    /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist, err, prot>>
+
+\* remove_if and replace_if under the guard: the words of the slots the home's bits name, loaded
+\* without protecting their entries (`find_held`), as RS loads them; CU uses them.
+CS(p) ==
+    /\ ts[p].pc = "CS"
+    /\ ts' = [ts EXCEPT ![p].rd = HeldLoad(ts[p].t, ts[p].h, ts[p].hw.hops), ![p].pc = "CU"]
+    /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist, err, prot>>
+
+\* The entries CS loaded, used: the key's entry goes to the closure, or the key is absent (the
+\* guard released).
+CU(p) ==
+    /\ ts[p].pc = "CU"
+    /\ LET t == ts[p].t
+           h == ts[p].h
+           rd == ts[p].rd
+           found == {o \in ts[p].hw.hops : rd[o] \in Ents /\ ent.key[rd[o]] = K(p)}
+       IN /\ err' = HeldUse(rd)
+          /\ IF found = {}
+             THEN /\ tb' = [tb EXCEPT !.grd[t][h] = FALSE]
+                  /\ ts' = [ts EXCEPT ![p].rd = Unloaded, ![p].pc = "CA"]
+             ELSE /\ ts' = [ts EXCEPT ![p].e = rd[Min(found)], ![p].off = Min(found),
+                                      ![p].rd = Unloaded, ![p].pc = "CF"]
+                  /\ UNCHANGED tb
+    /\ UNCHANGED <<ent, cur, latch, count, abs, hist, prot>>
+
+\* A use of the entry `e` a writer found under its home guard (the closure reading its value, the
+\* clone of the value answered): a use after free unless it is still live.
+LiveUse(e) == IF e \in Ents /\ ent.st[e] # "live" THEN Fail("uaf") ELSE err
+
+\* The closure, once: on the entry's value, or None for a reserved slot ("unguarded_check": on the
+\* value the lookup read before the guard). It decides what the key holds next: "keep", "remove",
+\* "put" (nv: a replace, or the fill of the reservation) or "unwind" (the closure panicked).
+CF(p) ==
+    /\ ts[p].pc = "CF"
+    /\ LET o == Op(p)
+           seen == IF MutCheck THEN ts[p].pre
+                   ELSE IF ts[p].rsv THEN None ELSE ent.val[ts[p].e]
+           next == CASE o.op = "cmp" -> o.fx[seen]
+                     [] o.op = "rpi" -> o.v
+                     [] OTHER -> None
+           dec == CASE o.op = "cmpx" -> "unwind"
+                    [] o.op = "cmp" -> IF next = None THEN (IF seen = None THEN "keep" ELSE "remove")
+                                       ELSE "put"
+                    [] seen \in o.acc -> IF o.op = "rif" THEN "remove" ELSE "put"
+                    [] OTHER -> "keep"
+       IN /\ ts' = [ts EXCEPT ![p].saw = seen, ![p].nv = next, ![p].dec = dec,
+                              ![p].runs = @ + 1, ![p].pc = "CX"]
+          /\ err' = IF ts[p].runs > 0 THEN Fail("closure_twice") ELSE LiveUse(ts[p].e)
+    /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist, prot>>
+
+\* The write, still under the guard: the linearization point of a write (the unlink, the replace,
+\* the fill of the reservation) and of a decision to keep (then the reservation is given back).
+CX(p) ==
+    /\ ts[p].pc = "CX"
+    /\ LET t == ts[p].t
+           h == ts[p].h
+           o == ts[p].off
+           e == ts[p].e
+           op == Op(p).op
+           exact == IF ts[p].dec = "unwind" \/ abs[K(p)] = ts[p].saw THEN LiveUse(e)
+                    ELSE Fail("cond_exact")
+       IN CASE ts[p].dec = "remove" /\ e \in Ents ->
+                 /\ tb' = [tb EXCEPT !.slot[t][h + o] = 0]
+                 /\ abs' = [abs EXCEPT ![K(p)] = None]
+                 /\ hist' = Append(hist, <<K(p), None>>)
+                 /\ count' = count - 1
+                 /\ ts' = [ts EXCEPT ![p].hw.hops = @ \ {o},
+                                     ![p].res = IF op = "rif" THEN ts[p].saw ELSE None,
+                                     ![p].pc = "CR"]
+                 /\ err' = exact
+                 /\ UNCHANGED ent
+            [] ts[p].dec = "put" /\ FreeEnts = {} ->
+                 /\ err' = Fail("pool")
+                 /\ ts' = Go(p, "done")
+                 /\ UNCHANGED <<ent, tb, count, abs, hist>>
+            [] ts[p].dec = "put" ->
+                 LET n == Min(FreeEnts)
+                     replace == e \in Ents
+                 IN /\ ent' = IF replace THEN [Alloc(ent, n, K(p), ts[p].nv) EXCEPT !.st[e] = "retired"]
+                              ELSE Alloc(ent, n, K(p), ts[p].nv)
+                    /\ tb' = [tb EXCEPT !.slot[t][h + o] = n]
+                    /\ abs' = [abs EXCEPT ![K(p)] = ts[p].nv]
+                    /\ hist' = Append(hist, <<K(p), ts[p].nv>>)
+                    /\ count' = IF replace THEN count ELSE count + 1
+                    /\ ts' = [ts EXCEPT ![p].e = 0, ![p].rsv = FALSE,
+                                        ![p].res = IF op = "rpi" THEN ts[p].saw ELSE ts[p].nv,
+                                        ![p].pc = "CR"]
+                    /\ err' = exact
+            [] ts[p].rsv ->
+                 /\ tb' = [tb EXCEPT !.slot[t][h + o] = 0]
+                 /\ ts' = [ts EXCEPT ![p].hw.hops = @ \ {o}, ![p].rsv = FALSE, ![p].res = None,
+                                     ![p].pc = "CR"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<ent, count, abs, hist>>
+            [] OTHER ->
+                 /\ ts' = [ts EXCEPT ![p].e = 0,
+                                     ![p].res = IF op = "rpi" THEN ts[p].saw ELSE None,
+                                     ![p].pc = "CR"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<ent, tb, count, abs, hist>>
+    /\ UNCHANGED <<cur, latch, prot>>
+
+\* Release the home guard, publishing the word as the writer staged it.
+CR(p) ==
+    /\ ts[p].pc = "CR"
+    /\ LET t == ts[p].t
+           h == ts[p].h
+       IN tb' = [tb EXCEPT !.grd[t][h] = FALSE, !.hops[t][h] = ts[p].hw.hops,
+                           !.stamp[t][h] = ts[p].hw.stamp]
+    /\ ts' = Go(p, "CT")
+    /\ UNCHANGED <<ent, cur, latch, count, abs, hist, err, prot>>
+
+\* Retire the entry a remove unlinked (a replace retired its entry at the write).
+CT(p) ==
+    /\ ts[p].pc = "CT"
+    /\ LET e == ts[p].e
+           gone == ts[p].dec = "remove" /\ e \in Ents
+       IN /\ ent' = IF gone THEN [ent EXCEPT !.st[e] = "retired"] ELSE ent
+          /\ err' = IF gone /\ ent.st[e] = "retired" THEN Fail("double_retire") ELSE err
+    /\ ts' = Go(p, "CA")
+    /\ UNCHANGED <<tb, cur, latch, count, abs, hist, prot>>
+
+\* The answer. One that found the key absent (no closure ran) is linearizable: the key was absent
+\* at some moment of the call.
+CA(p) ==
+    /\ ts[p].pc = "CA"
+    /\ Finish(p, IF ts[p].dec # "none" \/ SeenDuring(p, K(p), None) THEN err ELSE Fail("lin_cond"))
+    /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist>>
+
 \* ---------------------------------------------------------------- iter
 
 T0(p) ==
@@ -638,7 +850,7 @@ T0(p) ==
 \* The walk met the key of e in a lower slot of e's neighborhood.
 MetBefore(p, home, i, e) ==
     \E j \in Max2(home, i - NH + 1)..(i - 1) :
-        LET s == ts[p].recent[j % NH] IN s # 0 /\ ent.key[s] = ent.key[e]
+        LET s == ts[p].recent[j % NH] IN s \in Ents /\ ent.key[s] = ent.key[e]
 
 T1(p) ==
     /\ ts[p].pc = "T1"
@@ -649,13 +861,13 @@ T1(p) ==
                /\ UNCHANGED <<err, prot>>
           ELSE LET e == tb.slot[t][i]
                    P2 == Protect(prot[p], e)
-                   skip == e # 0 /\ Mutation \notin {"iter_index", "iter_no_recent"}
+                   skip == e \in Ents /\ Mutation \notin {"iter_index", "iter_no_recent"}
                            /\ MetBefore(p, Home(ent.key[e], tb.cap[t]), i, e)
-                   y == e # 0 /\ ~skip
+                   y == e \in Ents /\ ~skip
                IN /\ prot' = [prot EXCEPT ![p] = P2]
-                  /\ err' = IF e = 0 \/ e \in P2 THEN err ELSE Fail("uaf")
+                  /\ err' = IF e \notin Ents \/ e \in P2 THEN err ELSE Fail("uaf")
                   /\ ts' = [ts EXCEPT ![p].idx = i + 1, ![p].recent[i % NH] = e,
-                                      ![p].skp = @ \/ skip,
+                                      ![p].skp = @ \/ skip, ![p].met = @ \/ e = RSV,
                                       ![p].ycnt = IF y THEN [@ EXCEPT ![ent.key[e]] = @ + 1] ELSE @,
                                       ![p].yv = IF y THEN @ \cup {<<ent.key[e], ent.val[e]>>} ELSE @]
     /\ UNCHANGED <<ent, tb, cur, latch, count, abs, hist>>
@@ -737,7 +949,7 @@ ZK(p) ==
        IN IF i >= Span(old, tb)
           THEN /\ ts' = Go(p, "ZP")
                /\ UNCHANGED <<ent, tb, err, prot>>
-          ELSE IF e = 0
+          ELSE IF e \notin Ents
           THEN /\ ts' = [ts EXCEPT ![p].idx = i + 1]
                /\ UNCHANGED <<ent, tb, err, prot>>
           ELSE LET h2 == Home(ent.key[e], tb.cap[nt])
@@ -783,7 +995,7 @@ ZX(p) ==
                /\ UNCHANGED <<ent, abs, hist>>
           ELSE LET e == tb.slot[old][i]
                    k == ent.key[e]
-               IN IF e = 0
+               IN IF e \notin Ents
                   THEN /\ ts' = [ts EXCEPT ![p].idx = i + 1]
                        /\ UNCHANGED <<ent, tb, count, abs, hist>>
                   ELSE /\ tb' = [tb EXCEPT !.slot[old][i] = 0]
@@ -805,11 +1017,12 @@ Z4(p) ==
 
 Worker(p) ==
     \/ Dispatch(p)
-    \/ IW(p) \/ IC(p) \/ IS(p) \/ IFr(p) \/ D0(p) \/ D1(p) \/ D2(p)
+    \/ IW(p) \/ IC(p) \/ IS(p) \/ IU(p) \/ IFr(p) \/ D0(p) \/ D1(p) \/ D2(p)
     \/ M1(p) \/ M2(p) \/ M3(p) \/ M4(p) \/ O1(p) \/ O2(p) \/ O3(p) \/ O4(p)
     \/ IL(p) \/ DL(p) \/ ICnt(p) \/ IR(p) \/ IA(p) \/ NR(p)
-    \/ RW(p) \/ RC(p) \/ RS(p) \/ RX(p) \/ RB(p) \/ RN(p) \/ RR(p) \/ RT(p) \/ R9(p)
+    \/ RW(p) \/ RC(p) \/ RS(p) \/ RU(p) \/ RX(p) \/ RB(p) \/ RN(p) \/ RR(p) \/ RT(p) \/ R9(p)
     \/ G0(p) \/ G2(p) \/ G3(p) \/ G8(p) \/ G9(p)
+    \/ CP(p) \/ CS(p) \/ CU(p) \/ CF(p) \/ CX(p) \/ CR(p) \/ CT(p) \/ CA(p)
     \/ T0(p) \/ T1(p) \/ T9(p)
     \/ Z1(p) \/ ZC(p) \/ ZK(p) \/ ZP(p) \/ ZX(p) \/ Z4(p)
 
@@ -837,6 +1050,9 @@ Exactness == err # "insert_exact"
 Linearizable == err \notin {"lin_get", "lin_remove"}
 \* No thread reads a node or entry its guard does not protect.
 NoUseAfterFree == err # "uaf"
+\* A conditional write's closure runs once, on the value the key holds when what it decided is
+\* written, and an answer of absence is linearizable.
+CondExact == err \notin {"cond_exact", "closure_twice", "lin_cond"}
 \* A walk yields every key present throughout once, nothing never present, and no key more
 \* often than its lives during the walk.
 WalkExact == err # "iter"
@@ -873,4 +1089,8 @@ NoResizeWaitsForWriter ==
     ~(ts[RZ].pc = "Z1" /\ ts[RZ].gc < tb.cap[ts[RZ].old] /\ tb.grd[ts[RZ].old][ts[RZ].gc])
 NoHeldHomeSkip == \A p \in Workers : ~(ts[p].pc = "D2" /\ ts[p].con)
 NoWalkSkip == \A p \in Workers : ~ts[p].skp
+NoReservedMeet == \A p \in Workers : ~ts[p].met
+NoResizeWaitsForClosure ==
+    ~(ts[RZ].pc = "Z1" /\ ts[RZ].gc < tb.cap[ts[RZ].old] /\ tb.grd[ts[RZ].old][ts[RZ].gc]
+      /\ \E p \in Workers : ts[p].pc = "CX" /\ ts[p].t = ts[RZ].old /\ ts[p].h = ts[RZ].gc)
 =============================================================================

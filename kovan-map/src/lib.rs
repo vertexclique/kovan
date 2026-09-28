@@ -103,6 +103,8 @@
 mod hashmap;
 mod hopscotch;
 mod sync;
+#[cfg(test)]
+mod test_support;
 
 pub use hashmap::*;
 pub use hopscotch::*;

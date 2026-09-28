@@ -14,6 +14,19 @@ Rem(k) == [op |-> "rem", k |-> k, v |-> 0]
 Frm(k) == [op |-> "frm", k |-> k, v |-> 0]
 Get(k) == [op |-> "get", k |-> k, v |-> 0]
 Iter == [op |-> "iter", k |-> 1, v |-> 0]
+\* A compute's closure, as the map from the value it sees (None = 0) to the one it answers.
+NoF == [x \in 0..3 |-> 0]
+\* Absent: insert 1; present: remove.
+Flip == [x \in 0..3 |-> IF x = 0 THEN 1 ELSE 0]
+\* Absent: insert 1; present: the next value (3 wraps to 1).
+Next1 == [x \in 0..3 |-> IF x = 3 THEN 1 ELSE x + 1]
+\* The conditional writes: remove_if and replace_if take the values their predicate accepts,
+\* compute its closure.
+Rif(k, acc) == [op |-> "rif", k |-> k, v |-> 0, acc |-> acc, fx |-> NoF]
+Rpi(k, v, acc) == [op |-> "rpi", k |-> k, v |-> v, acc |-> acc, fx |-> NoF]
+Cmp(k, fx) == [op |-> "cmp", k |-> k, v |-> 0, acc |-> {}, fx |-> fx]
+\* A compute whose closure panics.
+Cmpx(k) == [op |-> "cmpx", k |-> k, v |-> 0, acc |-> {}, fx |-> NoF]
 
 Grow == <<[kind |-> "resize", cap |-> 2]>>
 Shrink == <<[kind |-> "resize", cap |-> 1]>>
@@ -98,6 +111,44 @@ I_big_iter == <<<<1, 1>>, <<2, 1>>>>
 P_live_iter == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Rem(1)>>
                                      [] w = 2 -> <<Rem(2)>>
                                      [] w = 3 -> <<Iter>>]
+
+\* A remove_if racing a replace and a second remove_if of the same key, and a grow.
+P_cond_rem == [w \in {1, 2} |-> IF w = 1 THEN <<Rif(1, {1})>> ELSE <<Ins(1, 2), Rif(1, {2})>>]
+I_cond_rem == <<<<1, 1>>, <<2, 1>>>>
+\* A replace_if and a lookup racing a remove and a claim of the key, and a grow.
+P_cond_rpi == [w \in {1, 2} |-> IF w = 1 THEN <<Rpi(1, 3, {1}), Get(1)>> ELSE <<Rem(1), Iia(1, 2)>>]
+I_cond_rpi == <<<<1, 1>>, <<2, 1>>>>
+\* Computes of one key, present then absent, racing a claim and a remove of it, and a grow.
+P_cond_cmp == [w \in {1, 2} |-> IF w = 1 THEN <<Cmp(1, Flip), Cmp(1, Next1)>>
+                                          ELSE <<Iia(1, 2), Rem(1)>>]
+I_cond_cmp == <<<<1, 1>>, <<2, 1>>>>
+\* A compute of an absent key holding the chain's end racing an insert of another key (appended
+\* there) and a claim of the key.
+P_cond_tail == [w \in {1, 2} |-> IF w = 1 THEN <<Cmp(3, Flip)>> ELSE <<Ins(4, 1), Iia(3, 2)>>]
+I_cond_tail == <<<<1, 1>>, <<2, 1>>>>
+\* A compute holding the middle node of a chain of three while the nodes on both sides are
+\* removed (the successor's unlink waits for the hold).
+P_cond_chain == [w \in {1, 2} |-> IF w = 1 THEN <<Cmp(2, Next1)>> ELSE <<Rem(3), Rem(1)>>]
+I_cond_chain == <<<<1, 1>>, <<2, 1>>, <<3, 1>>>>
+\* A compute, a remove_if and a lookup racing a clear.
+P_cond_clear == [w \in {1, 2} |-> IF w = 1 THEN <<Cmp(1, Flip)>> ELSE <<Rif(2, {1}), Get(1)>>]
+I_cond_clear == <<<<1, 1>>, <<2, 1>>>>
+\* A compute and a replace_if racing a walk, and a grow.
+P_cond_iter == [w \in {1, 2} |-> IF w = 1 THEN <<Iter>> ELSE <<Cmp(1, Next1), Rpi(2, 3, {1})>>]
+I_cond_iter == <<<<1, 1>>, <<2, 1>>>>
+\* A compute of an absent key whose closure panics, racing an insert and a lookup of the key.
+P_cond_unwind == [w \in {1, 2} |-> IF w = 1 THEN <<Cmpx(3)>> ELSE <<Ins(3, 1), Get(3)>>]
+I_cond_unwind == <<<<1, 1>>>>
+\* Three conditional writers of one key (a compute, a remove_if, a replace_if).
+P_big_cond == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Cmp(1, Next1)>>
+                                    [] w = 2 -> <<Rif(1, {1, 2})>>
+                                    [] w = 3 -> <<Rpi(1, 3, {1, 2})>>]
+I_big_cond == <<<<1, 1>>, <<2, 1>>>>
+\* A compute holding the middle node, a remove of the node before it, a lookup behind them.
+P_live_cond == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Cmp(2, Next1)>>
+                                     [] w = 2 -> <<Rem(1)>>
+                                     [] w = 3 -> <<Get(3)>>]
+I_live_cond == <<<<1, 1>>, <<2, 1>>, <<3, 1>>>>
 
 \* Only the lookup (worker 3) is scheduled fairly: the removers may stop anywhere, between a
 \* mark and its unlink included, and the lookup must still end (it does not wait for them).

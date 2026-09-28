@@ -6,7 +6,6 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-exclude.workspace = true
 description = "Multi-producer multi-consumer channels using Kovan for memory reclamation"
 keywords = ["concurrency", "channel", "mpmc", "lock-free", "atomic"]
 categories = ["concurrency", "data-structures"]

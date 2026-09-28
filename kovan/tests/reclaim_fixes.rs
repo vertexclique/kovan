@@ -21,7 +21,7 @@ impl Drop for Counted {
 }
 
 /// Serialize ALL tests in this file: kovan's reclamation state (epoch,
-/// slots, orphan list) is process-global, so concurrent tests would
+/// slots, orphans) is process-global, so concurrent tests would
 /// perturb each other's exact drop counts. Poison-resilient: a failed
 /// test must not cascade into the others.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -96,7 +96,7 @@ fn no_batch_leak_with_few_pinned_threads() {
 }
 
 /// A thread that exits while its partial batch cannot be placed (many
-/// eligible slots) must park the batch on the orphan list; a later retiring
+/// eligible slots) must park the batch as an orphan; a later flushing
 /// thread adopts and frees it. Nothing leaks across thread exit.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
@@ -146,8 +146,8 @@ fn orphaned_partial_batch_is_adopted() {
         h.join().unwrap();
     }
 
-    // Adopter: retire enough on this thread to trigger the RETIRE_FREQ
-    // block, which adopts the orphan and submits the merged batch.
+    // Adopter: retire a full batch on this thread, then flush(), which
+    // adopts the orphan and submits the merged batch.
     for i in 1..=64u64 {
         atom.store(Counted(2000 + i));
     }
@@ -352,7 +352,7 @@ fn pin_completes_under_flush_storm() {
 }
 
 /// Thread churn: many short-lived threads retire and exit concurrently with
-/// pinned readers. Exercises free_tid's exchange-based deactivation and tid
+/// pinned readers. Exercises deactivate_slots' exchange-based deactivation and tid
 /// recycling; everything must be freed after the unwind.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model

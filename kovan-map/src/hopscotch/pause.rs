@@ -23,11 +23,17 @@ pub(super) enum Point {
     WriterMetHeldGuard,
     /// A lookup read its home's hop bits and has not read a slot yet.
     LookupReadHops,
+    /// A writer's scan under its home guard loaded the word of a slot the home's bits name,
+    /// without protecting the entry it names, and has not read the entry yet.
+    HeldScanLoaded,
     /// A displacement linked the entry it moves at its new slot and published the new slot's
     /// hop bit and the advanced move stamp; the entry is still in its old slot too.
     MoveLinkedTwice,
     /// A displacement unlinked the moved entry from its old slot, whose hop bit is still set.
     MoveUnlinked,
+    /// A compute of an absent key holds its home guard and reserved the slot its entry would
+    /// take; its closure has not run yet.
+    ComputeReserved,
 }
 
 /// Where an armed thread stops, and the two channels it meets the test on.

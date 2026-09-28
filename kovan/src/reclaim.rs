@@ -1,14 +1,14 @@
 //! Memory reclamation: Crystalline (WFR) traverse and free_list.
 //!
 //! - `traverse`: exchange-based list walk with INVPTR sentinel
-//! - `traverse_cache`: cached traverse with periodic free_list drain
 //! - `free_list`: walks batch chain and calls per-node destructors
 
 use crate::retired::{INVPTR, RetiredNode, is_rnode, rnode_unmask};
 use core::sync::atomic::Ordering;
 
-/// Maximum cached free-list entries before draining
-const MAX_CACHE: usize = 12;
+/// Traversals whose zero-count batches the free-list cache holds before it
+/// is freed (see `Handle::traverse_into_cache`).
+pub(crate) const MAX_CACHE: usize = 12;
 
 /// Trait for types that can be reclaimed by the wait-free memory
 /// reclamation system.
@@ -60,7 +60,10 @@ pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
 ///
 /// The list is captured atomically by the caller's exchange, so its length
 /// is fixed before traversal begins and the loop terminates in finitely
-/// many steps. The length is NOT bounded by the thread count: each
+/// many steps: an insert into the slot after the capture starts a new list,
+/// and an entry whose inserter has not linked the rest behind it yet ends
+/// the walk (its `next` is still null; that inserter walks the rest). The
+/// length is NOT bounded by the thread count: each
 /// `try_retire()` call system-wide may insert one node into this slot, and
 /// a slot is only traversed when its owner transitions it (next `pin()`
 /// after an epoch change, `flush()`, or exit). A thread returning from a
@@ -99,8 +102,9 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
         // Follow batch_link to refs-node and decrement.
         // Ordering: Relaxed is sufficient because the happens-before chain is
         // established through the slot exchange (AcqRel) that delivered current slot
-        // to this thread. The batch_link was written (SeqCst) before the slot
-        // insertion, which happens-before current thread's slot extraction. shrug.
+        // to this thread. The batch_link was written before the slot insertion
+        // (sequenced before the inserting exchange's release), which
+        // happens-before current thread's slot extraction.
         let refs = unsafe { (*curr).batch_link.load(Ordering::Relaxed) };
         let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
         if old == 1 {
@@ -109,27 +113,6 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
             }
             *free_list = refs;
         }
-    }
-}
-
-/// Traverse with caching: accumulates free-list entries and periodically drains.
-///
-/// # Safety
-///
-/// Same as `traverse`.
-pub(crate) unsafe fn traverse_cache(
-    free_list: &mut *mut RetiredNode,
-    list_count: &mut usize,
-    next: *mut RetiredNode,
-) {
-    if !next.is_null() {
-        if *list_count >= MAX_CACHE {
-            unsafe { free_batch_list(*free_list) };
-            *free_list = core::ptr::null_mut();
-            *list_count = 0;
-        }
-        unsafe { traverse(free_list, next) };
-        *list_count += 1;
     }
 }
 
@@ -143,6 +126,8 @@ pub(crate) unsafe fn traverse_cache(
 ///
 /// All refs-nodes in the list must have refs == 0.
 pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
+    // One pass over the batches of the list, and over each batch's nodes:
+    // the list is the caller's, taken out of any cell others reach.
     while !list.is_null() {
         let refs_node = list;
         // batch_link on refs-node is RNODE(batch_front)

@@ -12,7 +12,7 @@
 //! removes a copy of what it already removed. Modelled in `tla/chained/ChainedMap.tla` (actions
 //! Z0 to Z6), where 0.1.20's read-then-revalidate protocol (Mutation "revalidate") breaks both.
 
-use super::node::{FROZEN, Node, is_frozen, is_marked, ptr, with, word};
+use super::node::{FROZEN, Node, is_frozen, is_held, is_marked, ptr, with, word};
 use super::table::TableRef;
 use super::{HashMap, MIN_CAPACITY};
 use crate::sync::spin_hint;
@@ -85,7 +85,9 @@ where
         self.resizing.store(false, Ordering::Release);
     }
 
-    /// Freeze `link` and return its frozen word.
+    /// Freeze `link` and return its frozen word. A held link is waited for: only its holder
+    /// writes it, and the conditional write holding it lands in this table before the link
+    /// freezes (so the copy reads it).
     fn freeze(link: &Atomic<Node<K, V>>, guard: &Guard) -> *mut Node<K, V> {
         loop {
             // A word a failed CAS returns is reloaded here rather than used: only a load
@@ -93,6 +95,10 @@ where
             let w = link.load(Ordering::Acquire, guard).as_raw();
             if is_frozen(w) {
                 return w;
+            }
+            if is_held(w) {
+                spin_hint();
+                continue;
             }
             let frozen = with(w, FROZEN);
             // AcqRel: the copy below reads the fields of the node the word names.

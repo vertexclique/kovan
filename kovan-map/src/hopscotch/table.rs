@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::sync::atomic::Ordering;
-use kovan::{Atomic, RetiredNode, Shared, pin};
+use kovan::{Atomic, RetiredNode, Shared, pin, retire};
 
 // A bucket's control word describes the bucket as a home, in three fields:
 // - the hop bits (`HOP_MASK`): bit `i` set means slot `home + i` holds an entry of this home. An
@@ -78,6 +78,23 @@ impl<K, V> Bucket<K, V> {
         Word(self.slot.load(order, guard))
     }
 
+    /// This bucket's slot, read by the holder of the writer guard of the home whose hop bits
+    /// name it: `guard` need not protect the entry, as only that holder unlinks or retires it.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the writer guard of a home of a live table whose hop bits name this
+    /// slot, and uses the entry only while it holds that guard (or after unlinking it itself).
+    #[inline(always)]
+    pub(super) unsafe fn load_held<'g>(
+        &self,
+        order: Ordering,
+        guard: &'g kovan::Guard,
+    ) -> Word<'g, K, V> {
+        // SAFETY: the caller's contract: no other thread retires the entry meanwhile.
+        Word(unsafe { self.slot.load_unprotected(order, guard) })
+    }
+
     /// Store `word` in this bucket's slot.
     #[inline(always)]
     pub(super) fn store(&self, word: Word<'_, K, V>, order: Ordering) {
@@ -119,6 +136,10 @@ pub(super) fn tag(hash: u64) -> usize {
 /// scan reads is always the tag of the entry the word names, and a scan for a hash whose tag
 /// differs skips the entry without reading it: exactly the entries the full hash comparison
 /// would skip on those bits, so a lookup of another key costs no read of the entry's line.
+///
+/// A third kind of word, [`Word::reserved`], is a null address with a tag bit set: a slot a
+/// `compute` holds for the entry its closure may make. It names no entry, so every reader and
+/// walk passes it as a free slot, and it is not free, so no other writer claims the slot.
 pub(super) struct Word<'g, K, V>(Shared<'g, Entry<K, V>>);
 
 impl<K, V> Clone for Word<'_, K, V> {
@@ -141,6 +162,18 @@ impl<'g, K, V> Word<'g, K, V> {
     pub(super) fn free() -> Self {
         // SAFETY: a null `Shared` points at nothing, so it is valid for any lifetime.
         Self(unsafe { Shared::from_raw(core::ptr::null_mut()) })
+    }
+
+    /// The word of a reserved slot: no entry (a scan, a walk and a copy pass it as a free slot),
+    /// yet not free (an insert or a move, whose claims expect a free slot, leaves it alone). Only
+    /// the holder of the guard of the home whose hop bits name the slot writes it, and it never
+    /// outlives that holder's guard, so a resize or a clear (which hold every guard) never meets
+    /// it.
+    #[inline(always)]
+    pub(super) fn reserved() -> Self {
+        // SAFETY: an address with no allocation behind it, never dereferenced: `ptr` takes the
+        // tag bit off and answers null.
+        Self(unsafe { Shared::from_raw(core::ptr::without_provenance_mut(1)) })
     }
 
     /// The word linking `entry`, whose ownership passes to the slot that takes the word (or
@@ -263,6 +296,20 @@ pub(super) struct Entry<K, V> {
     pub(super) value: V,
 }
 
+impl<K, V> Entry<K, V> {
+    /// A new entry of `key`, whose hash is `hash`, holding `value`: the one allocation a write
+    /// that links an entry makes.
+    #[inline]
+    pub(super) fn boxed(hash: u64, key: K, value: V) -> Box<Self> {
+        Box::new(Self {
+            retired: RetiredNode::new(),
+            hash,
+            key,
+            value,
+        })
+    }
+}
+
 // SAFETY (kovan retirement rule): a retired Entry's destructor may run on
 // any thread, and entries (with K and V inside) move between threads -
 // hence `K: Send, V: Send` for Send. Lookups DO produce `&K`/`&V` from a
@@ -359,31 +406,6 @@ impl<K, V> Walk<K, V> {
     }
 }
 
-/// Claim the free slot of `bucket` for `entry`: `Ok` with the linked entry when the slot took it
-/// (the table owns it now), `Err` with the entry back when another writer took the slot first.
-pub(super) fn link<K, V>(
-    bucket: &Bucket<K, V>,
-    entry: Box<Entry<K, V>>,
-    guard: &kovan::Guard,
-) -> Result<*const Entry<K, V>, Box<Entry<K, V>>> {
-    let word = Word::of(entry);
-    // Release: a reader that acquires the slot sees the entry's fields. Relaxed on failure: the
-    // value read is not used.
-    if bucket.replace(
-        Word::free(),
-        word,
-        Ordering::Release,
-        Ordering::Relaxed,
-        guard,
-    ) {
-        Ok(word.ptr())
-    } else {
-        // SAFETY: the CAS failed, so the word was never published: its entry is still the
-        // allocation `Word::of` took from this call.
-        Err(unsafe { word.into_entry() })
-    }
-}
-
 /// The hash table structure
 #[repr(C)]
 pub(super) struct Table<K, V> {
@@ -440,19 +462,28 @@ impl<K, V> Table<K, V> {
         unsafe { self.buckets.get_unchecked(idx) }
     }
 
-    /// Slot `idx`'s entry for a [`Walk`], prefetched (a free slot prefetches the table itself,
-    /// which keeps the prefetch free of a branch). Acquire: pairs with the release that linked
-    /// the entry, so its fields are visible.
+    /// Slot `idx`'s entry for a [`Walk`], prefetched ([`Table::prefetch_entry`]). Acquire: pairs
+    /// with the release that linked the entry, so its fields are visible.
     #[inline(always)]
     fn read_ahead(&self, idx: usize, guard: &kovan::Guard) -> *mut Entry<K, V> {
         let entry = self.get_bucket(idx).load(Ordering::Acquire, guard).ptr();
-        let line: *const u8 = if entry.is_null() {
-            (self as *const Self).cast()
-        } else {
-            entry.cast_const().cast()
-        };
-        prefetch(line);
+        self.prefetch_entry(entry);
         entry
+    }
+
+    /// Ask the cache for `entry`, a slot's entry read under a guard, ahead of a read of it: the
+    /// line of its hash, which a walk reads first, and the line of its last byte, where its
+    /// value ends (the two are one line unless the entry's fields straddle two). A free slot's
+    /// null prefetches the table itself, which keeps the prefetch free of a branch.
+    #[inline(always)]
+    pub(super) fn prefetch_entry(&self, entry: *const Entry<K, V>) {
+        let base: *const u8 = core::hint::select_unpredictable(
+            entry.is_null(),
+            (self as *const Self).cast(),
+            entry.cast(),
+        );
+        prefetch(base.wrapping_add(core::mem::offset_of!(Entry<K, V>, hash)));
+        prefetch(base.wrapping_add(core::mem::size_of::<Entry<K, V>>() - 1));
     }
 
     /// Whether slot `idx` looks free. Relaxed: only a hint for where to try, the claim's CAS
@@ -468,24 +499,49 @@ impl<K, V> Table<K, V> {
     /// writer holds it.
     #[inline]
     pub(super) fn home_guard(&self, idx: usize) -> Option<HomeGuard<'_>> {
+        self.home_guard_unless(idx, |_| false).ok()
+    }
+
+    /// Take the writer guard of the home bucket `idx` without waiting, unless another writer
+    /// holds it or `refuse` holds of the home's control word: `Err` with the word as read then.
+    /// One read of the word serves `refuse`, the test of the guard and the compare-exchange that
+    /// takes it, which sets the guard bit and nothing else, as a read-modify-write setting the
+    /// bit would.
+    #[inline(always)]
+    pub(super) fn home_guard_unless(
+        &self,
+        idx: usize,
+        refuse: impl Fn(u64) -> bool,
+    ) -> Result<HomeGuard<'_>, u64> {
         let control = &self.get_bucket(idx).control;
         // A writer that finds the guard held leaves the word alone: its read shares the
-        // holder's line, where the read-modify-write below would take the line from the holder
-        // in the middle of its write. Relaxed: only a hint, the read-modify-write decides.
-        if control.load(Ordering::Relaxed) & GUARD != 0 {
-            return None;
+        // holder's line, where a read-modify-write would take the line from the holder in the
+        // middle of its write. Relaxed: the compare-exchange decides.
+        let mut word = control.load(Ordering::Relaxed);
+        loop {
+            if word & GUARD != 0 || refuse(word) {
+                return Err(word);
+            }
+            // Acquire: pairs with the previous holder's release, so every slot and hop bit it
+            // wrote is visible to this holder. Relaxed on failure: the word read is only tested
+            // again. The word changes only under the guard and at its release, so a failure
+            // finds the guard held, or retries with the word a holder released.
+            match control.compare_exchange_weak(
+                word,
+                word | GUARD,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(HomeGuard {
+                        control,
+                        idx,
+                        word: word | GUARD,
+                    });
+                }
+                Err(now) => word = now,
+            }
         }
-        // Acquire: pairs with the previous holder's release, so every slot and hop bit it wrote
-        // is visible to this holder.
-        let prev = control.fetch_or(GUARD, Ordering::Acquire);
-        if prev & GUARD != 0 {
-            return None;
-        }
-        Some(HomeGuard {
-            control,
-            idx,
-            word: prev | GUARD,
-        })
     }
 
     /// The entry of `key`, whose hash is `hash`, as `get` finds it, taking no guard: a scan of
@@ -532,7 +588,7 @@ impl<K, V> Table<K, V> {
     }
 
     /// The entry of `key` among the slots `hops` names past the home `home`, and its offset
-    /// there. An entry whose tag differs from `hash`'s is skipped without being read.
+    /// there, for a reader: every entry read is protected by `guard`.
     #[inline]
     pub(super) fn find<'g, Q>(
         &self,
@@ -546,15 +602,91 @@ impl<K, V> Table<K, V> {
         K: Borrow<Q>,
         Q: Eq + ?Sized,
     {
+        // Acquire: pairs with the release that linked the entry, so its fields are visible.
+        self.scan(home, hops, hash, key, |bucket| {
+            bucket.load(Ordering::Acquire, guard)
+        })
+    }
+
+    /// [`find`](Self::find) for the holder of the home's writer guard `held`, the one thread
+    /// that unlinks or retires an entry of the home until it releases the guard: the entries
+    /// read need no protection of `guard`. The word found lives no longer than the borrow of
+    /// `held`, so its entry is read only while the guard is held.
+    #[inline]
+    pub(super) fn find_held<'h, Q>(
+        &self,
+        held: &'h HomeGuard<'_>,
+        hash: u64,
+        key: &Q,
+        guard: &'h kovan::Guard,
+    ) -> Option<(usize, Word<'h, K, V>)>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        debug_assert!(
+            core::ptr::eq(held.control, &self.get_bucket(held.idx).control),
+            "a home guard of another table"
+        );
+        self.scan(held.idx, held.hops(), hash, key, |bucket| {
+            // Acquire: pairs with the release that linked the entry, so its fields are visible.
+            // SAFETY: `held` is the guard of the home whose bits name every slot read, of this
+            // table, which is live while its guard is held (a resize takes every guard first).
+            let word = unsafe { bucket.load_held(Ordering::Acquire, guard) };
+            #[cfg(test)]
+            pause::at(pause::Point::HeldScanLoaded);
+            word
+        })
+    }
+
+    /// Put `entry` in the slot `offset` past the home of `held` in place of `old`, and retire
+    /// `old`: the write of an insert, a conditional replace or a compute that found its key.
+    ///
+    /// # Safety
+    ///
+    /// `held` is the guard of `old`'s home in this table, and `old` is the entry that slot holds
+    /// (found by [`find_held`](Self::find_held) under `held`).
+    #[inline(always)]
+    pub(super) unsafe fn replace_held(
+        &self,
+        held: &HomeGuard<'_>,
+        offset: usize,
+        old: *mut Entry<K, V>,
+        entry: Box<Entry<K, V>>,
+    ) where
+        K: 'static,
+        V: 'static,
+    {
+        // A store, not a CAS: no other thread writes an occupied slot of a home whose guard this
+        // call holds. Release: a reader that acquires the slot sees the entry's fields.
+        self.get_bucket(held.idx + offset)
+            .store(Word::of(entry), Ordering::Release);
+        // SAFETY: unlinked above under its home guard, so no other thread unlinks or retires
+        // it; a reader that loaded it holds a guard that keeps it alive.
+        unsafe { retire(old) };
+    }
+
+    /// The scan of [`find`](Self::find) and [`find_held`](Self::find_held), reading a slot with
+    /// `load`. An entry whose tag differs from `hash`'s is skipped without being read.
+    #[inline(always)]
+    fn scan<'g, Q>(
+        &self,
+        home: usize,
+        hops: u32,
+        hash: u64,
+        key: &Q,
+        load: impl Fn(&Bucket<K, V>) -> Word<'g, K, V>,
+    ) -> Option<(usize, Word<'g, K, V>)>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let tag = tag(hash);
         let mut rest = hops;
         while rest != 0 {
             let offset = rest.trailing_zeros() as usize;
             rest &= rest - 1;
-            // Acquire: pairs with the release that linked the entry, so its fields are visible.
-            let word = self
-                .get_bucket(home + offset)
-                .load(Ordering::Acquire, guard);
+            let word = load(self.get_bucket(home + offset));
             if word.has_tag(tag)
                 && let Some(entry) = word.entry()
                 && entry.hash == hash

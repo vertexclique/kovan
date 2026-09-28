@@ -24,8 +24,10 @@ Kovan tracks this automatically with near-zero overhead on reads.
 ## Why Kovan?
 
 - **Near-zero read overhead**: One atomic load & one comparison
-- **Wait-free operations**: loads, `pin()`, and `retire()` each complete in a
-  bounded number of steps regardless of other threads.
+- **Wait-free operations**: loads, `pin()`, `retire()`, guard drops, `flush()`
+  and thread exit each complete in a bounded number of their own steps,
+  whatever other threads do, stalled ones included (with native 128-bit
+  atomics, see Supported Platforms).
 - **Bounded memory**: Never grows unbounded like epoch-based schemes. Batches
   that cannot be placed are accumulated or adopted by other threads but never
   dropped, even across thread exit.

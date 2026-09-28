@@ -9,22 +9,52 @@
 //! # Progress Guarantees (precise)
 //!
 //! Every core operation completes in a bounded number of its own steps,
-//! regardless of what other threads are doing:
+//! whatever other threads do, including threads stopped for good at any
+//! point of theirs: no step waits for another thread, and no loop retries
+//! because another thread got in first more often than the bound below
+//! allows. T is the number of thread IDs handed out (at most 65,536); a
+//! step is one atomic instruction, as it is on x86_64 and on aarch64 with
+//! LSE (an LL/SC read-modify-write is the hardware's own retry loop; on
+//! targets whose 128-bit atomics are emulated with a lock, reclamation is
+//! not lock-free at all, see Supported Platforms in README.md).
 //!
-//! - **Protected loads (`Atomic::load`, `Atom::load`) — wait-free.** The
+//! - **Protected loads (`Atomic::load`, `Atom::load`): wait-free.** The
 //!   common case is one pointer load plus one epoch compare. If the global
-//!   epoch keeps advancing, the load converges within a fixed number of
-//!   attempts; on exhaustion it escalates to an *unconditional reservation*
-//!   (the slot becomes eligible for every batch) and completes with one
-//!   final load. Bound: 16 + 1 iterations, independent of all other threads.
-//! - **`pin()` — wait-free.** Bounded fast path; on contention a helping
-//!   slow path completes in O(T) steps. Every epoch advance is preceded by
-//!   helping, so a pinning thread cannot be starved.
-//! - **`retire()` — wait-free** (amortized O(1); the periodic `try_retire`
-//!   scan is bounded by the thread count and batch size).
-//! - **`Guard` drop — wait-free** (a counter decrement; plus one bounded
-//!   slot transition when the section escalated to an unconditional
+//!   epoch keeps advancing, the load re-publishes at most 15 times; then it
+//!   escalates to an *unconditional reservation* (the slot becomes
+//!   eligible for every batch) and completes with one final load.
+//! - **`pin()`: wait-free.** A nested pin, or an outermost one that finds
+//!   the global epoch where its thread's last transition left it, is a
+//!   counter update. Otherwise a transition: at most 16 attempts, each one
+//!   walk of the thread's own slot list (see below) and one publication,
+//!   then a slow path whose loop passes once more only for an epoch advance
+//!   made by a thread that had not yet seen its help request: every advance
+//!   helps the pending requests first, and a helper completes the request.
+//!   A thread's first pin also claims a thread ID: one pass over the
+//!   released IDs, no lock.
+//! - **`retire()`: wait-free.** O(1) per call; every 64th submits the
+//!   batch (one pass over the slots, one insert per eligible slot), every
+//!   128th helps the pending slow-path requests (O(T) each) and advances
+//!   the epoch.
+//! - **`Guard` drop: wait-free** (a counter store; plus one slot
+//!   transition when the section escalated to an unconditional
 //!   reservation).
+//! - **`flush()` and thread exit: wait-free**, a fixed sequence of the
+//!   steps above; batches an exiting thread cannot place are parked on its
+//!   thread ID and adopted by `flush()`, both without a lock.
+//!
+//! Every walk of a slot list takes the list with one exchange first, so it
+//! is as long as the list was at that instant: one entry per batch
+//! submitted while the slot was eligible, since its previous walk. What
+//! other threads insert meanwhile starts a new list, and an insert still
+//! linking its entry ends the walk there (the inserter walks the rest), so
+//! no walk grows while it runs. A thread that stays away from its slot for
+//! long owes a walk as long as what was retired meanwhile; `flush()`
+//! before idling avoids that (see Quiescence).
+//!
+//! The destructors of retired values run inside these operations (the
+//! batches a walk frees); each kovan call a destructor makes is an
+//! operation of its own, with the same bounds.
 //!
 //! `Atom::rcu` and `Atom::compare_and_swap` re-apply user closures on
 //! contention as read-copy-update semantics require; the kovan primitives
@@ -59,7 +89,8 @@
 //! A thread's reservation slot stays active after its last `Guard` drops;
 //! it is refreshed/drained on the next `pin()`, `flush()`, or thread exit.
 //! Long-idle threads that once pinned should call [`flush`] before idling
-//! to release retained garbage promptly.
+//! to release retained garbage promptly: with no guard live, `flush()`
+//! also leaves the slot holding nothing back until the thread pins again.
 //!
 //! # Example
 //!
@@ -102,7 +133,8 @@ mod guard;
 mod reclaim;
 mod retired;
 mod slot;
-mod ttas;
+#[cfg(test)]
+mod stall;
 
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};

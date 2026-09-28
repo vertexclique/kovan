@@ -10,7 +10,7 @@ use crate::sync::spin_hint;
 use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
-use kovan::{RetiredNode, Shared, pin, retire};
+use kovan::{Shared, pin, retire};
 
 #[cfg(test)]
 use super::pause;
@@ -76,13 +76,7 @@ where
                 let offset_from_home = probe_idx - bucket_idx;
 
                 if offset_from_home < NEIGHBORHOOD_SIZE {
-                    let new_entry = Box::new(Entry {
-                        retired: RetiredNode::new(),
-                        hash,
-                        key,
-                        value,
-                    });
-                    probe_bucket.store(Word::of(new_entry), Ordering::Release);
+                    probe_bucket.store(Word::of(Entry::boxed(hash, key, value)), Ordering::Release);
 
                     // A read and a store, not a read-modify-write: the new table is this
                     // resize's alone until it publishes it (the table pointer's release store

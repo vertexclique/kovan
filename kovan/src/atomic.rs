@@ -85,7 +85,7 @@ impl<T> Atomic<T> {
     /// the thread's slot era is updated so `try_retire()` counts this thread
     /// as protecting the loaded pointer's batch.
     ///
-    /// Fast path cost: 3 words (1 atomic load, 2 word compares)
+    /// Fast path cost: 1 atomic pointer load, 1 epoch load, 1 compare
     ///
     /// # Examples
     ///
@@ -102,6 +102,42 @@ impl<T> Atomic<T> {
         let raw = crate::guard::protect_load(&self.data, order);
         Shared {
             data: raw as *mut T,
+            marker,
+        }
+    }
+
+    /// Loads a pointer from the atomic without era tracking: the guard does not protect it.
+    ///
+    /// For a caller that keeps the pointee alive by an exclusion of its own, where the era check
+    /// of [`load`](Atomic::load) buys nothing: a writer holding a lock that every retirement of a
+    /// value this atomic names takes.
+    ///
+    /// # Safety
+    ///
+    /// If the pointer loaded is not null, its pointee stays allocated until the caller's last use
+    /// of the returned [`Shared`]: it was not retired when it was loaded, no thread retires it
+    /// before that use, and nothing frees it any other way meanwhile (a retired value that owns
+    /// it, say). The guard gives it no protection: a retired pointee may be freed while the guard
+    /// is still held.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kovan::{Atomic, pin};
+    /// use std::sync::atomic::Ordering;
+    ///
+    /// let atomic = Atomic::new(Box::into_raw(Box::new(42)));
+    /// let guard = pin();
+    /// // SAFETY: no other thread can reach `atomic`, so nothing retires or frees the value before
+    /// // its last use below.
+    /// let ptr = unsafe { atomic.load_unprotected(Ordering::Acquire, &guard) };
+    /// assert_eq!(unsafe { *ptr.deref() }, 42);
+    /// drop(unsafe { Box::from_raw(ptr.as_raw()) });
+    /// ```
+    #[inline]
+    pub unsafe fn load_unprotected<'g>(&self, order: Ordering, _guard: &'g Guard) -> Shared<'g, T> {
+        Shared {
+            data: self.data.load(order) as *mut T,
             marker,
         }
     }

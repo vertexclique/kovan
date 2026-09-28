@@ -1,6 +1,6 @@
 //! A chain node and the link words that join nodes into a bucket's chain.
 //!
-//! A link word (a bucket head, or a node's `next`) is a node pointer with two flag bits:
+//! A link word (a bucket head, or a node's `next`) is a node pointer with three flag bits:
 //!
 //! - `MARK`, on a node's `next` only: the node is deleted. A remove marks the word keeping the
 //!   successor; a replace marks it naming the replacement node, which names the old successor.
@@ -8,6 +8,13 @@
 //!   again except to be frozen.
 //! - `FROZEN`: a migration (or a clear) froze the link; no write lands on it again, and a writer
 //!   that meets it waits for the new table.
+//! - `HELD`, on an unmarked, unfrozen link: a conditional write (`remove_if`, `replace_if`,
+//!   `compute`) holds the link while its closure runs, the link of the key's node, or the
+//!   chain's last link for a `compute` of an absent key. Only the holder writes a held link:
+//!   every other writer's CAS expects a word without the flag and fails (the writer walks again),
+//!   and a migration waits for the release. Readers pass the flag. The holder's closure decides
+//!   once on a node no other write can change meanwhile, and the holder's store (the mark, the
+//!   replace, the link of a new node, or the word as it was) is its linearization point.
 //!
 //! A node is retired only by the thread whose CAS unlinked it (a snip, or the unlink a remove or
 //! a replace does after its mark), so no node is retired while a table can reach it: a node
@@ -43,9 +50,11 @@ unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Node<K, V> {}
 pub(super) const MARK: usize = 1;
 /// The frozen flag of any link word.
 pub(super) const FROZEN: usize = 2;
-const FLAGS: usize = MARK | FROZEN;
+/// The held flag of an unmarked, unfrozen link word.
+pub(super) const HELD: usize = 4;
+const FLAGS: usize = MARK | FROZEN | HELD;
 
-// Both flags live in the low bits of a node pointer.
+// The flags live in the low bits of a node pointer.
 const _: () = assert!(core::mem::align_of::<RetiredNode>() > FLAGS);
 
 /// The node a link word names.
@@ -62,6 +71,11 @@ pub(super) fn is_marked<K, V>(word: *mut Node<K, V>) -> bool {
 #[inline(always)]
 pub(super) fn is_frozen<K, V>(word: *mut Node<K, V>) -> bool {
     word.addr() & FROZEN != 0
+}
+
+#[inline(always)]
+pub(super) fn is_held<K, V>(word: *mut Node<K, V>) -> bool {
+    word.addr() & HELD != 0
 }
 
 /// `word` with `flags` set.

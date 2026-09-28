@@ -20,6 +20,13 @@
 (* a frozen link waits for the new table and starts over; a write whose CAS *)
 (* landed is final and never retried.                                       *)
 (*                                                                          *)
+(* The conditional writes (remove_if, replace_if, compute) hold the key's   *)
+(* link word (the node's `next`, or for a compute of an absent key the      *)
+(* chain's last link) by a CAS that sets its HELD flag, run their closure   *)
+(* once, then write the link with a store. Every other writer's CAS expects *)
+(* a word without the flag and fails; a migration waits for the release;    *)
+(* readers pass the flag.                                                   *)
+(*                                                                          *)
 (* Reclamation is modelled as kovan provides it: a pointer loaded from a    *)
 (* link protects its node for the rest of the operation when the node was   *)
 (* not retired at the load (`prot`); reading a node not protected so is a   *)
@@ -50,7 +57,10 @@ TIds == 1..MaxTables
 Buckets == 0..(MaxCap - 1)
 Bucket(k, c) == k % c
 
-Link(p, m, f) == [p |-> p, m |-> m, f |-> f]
+Link(p, m, f) == [p |-> p, m |-> m, f |-> f, h |-> FALSE]
+\* A link word with its HELD flag set, and without it.
+Hold(l) == [l EXCEPT !.h = TRUE]
+Unheld(l) == [l EXCEPT !.h = FALSE]
 L(p) == Link(p, FALSE, FALSE)
 NilLink == L(0)
 
@@ -123,7 +133,8 @@ Idle == [pc |-> "next", i |-> 1, tbl |-> 0, prev |-> <<0, 0, 0>>, c |-> 0,
          w |-> NilLink, nw |-> NilLink, n |-> 0, fres |-> "none", ret |-> "none",
          res |-> None, ins |-> FALSE, cnt |-> FALSE, rmv |-> FALSE, inv |-> 0,
          abs0 |-> [k \in Keys |-> None], b |-> 0, buf |-> {},
-         ycnt |-> [k \in Keys |-> 0], yv |-> {}, old |-> 0, nt |-> 0, cp |-> 0, j |-> 1, rn |-> 0]
+         ycnt |-> [k \in Keys |-> 0], yv |-> {}, old |-> 0, nt |-> 0, cp |-> 0, j |-> 1, rn |-> 0,
+         dec |-> "none", saw |-> None, nv |-> None, runs |-> 0]
 
 Go(p, lbl) == [ts EXCEPT ![p].pc = lbl]
 
@@ -150,18 +161,27 @@ Init ==
 
 \* ---------------------------------------------------------------- dispatch
 
+\* The conditional writes: remove_if (rif), replace_if (rpi), compute (cmp), and a compute whose
+\* closure panics (cmpx).
+Cond == {"rif", "rpi", "cmp", "cmpx"}
+\* A conditional write decides on the node it found without holding it, and writes by a CAS; a
+\* lost CAS walks again and writes what it decided to the node it finds then.
+MutUnheld == Mutation = "unheld_check"
+
 Dispatch(p) ==
     /\ ts[p].pc = "next"
     /\ IF ts[p].i > Len(Prog[p])
        THEN ts' = Go(p, "done")
        ELSE LET o == Prog[p][ts[p].i].op
-                lbl == CASE o \in {"ins", "iia", "goi", "rem", "frm"} -> "F0"
+                lbl == CASE o \in {"ins", "iia", "goi", "rem", "frm"} \cup Cond -> "F0"
                          [] o = "get" -> "G0"
                          [] o = "iter" -> "T0"
             IN ts' = [ts EXCEPT ![p].pc = lbl, ![p].ret = o, ![p].inv = Len(hist),
                                 ![p].abs0 = abs, ![p].res = None, ![p].ins = FALSE,
                                 ![p].cnt = FALSE, ![p].rmv = FALSE,
-                                ![p].ycnt = [k \in Keys |-> 0], ![p].yv = {}]
+                                ![p].ycnt = [k \in Keys |-> 0], ![p].yv = {},
+                                ![p].dec = "none", ![p].saw = None, ![p].nv = None,
+                                ![p].runs = 0]
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
 
 \* The operation ends: its guard is dropped, the next one starts.
@@ -193,13 +213,15 @@ F1(p) ==
           ELSE ts' = [ts EXCEPT ![p].c = w.p, ![p].pc = "F2"]
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err>>
 
+\* A held link word is walked through as unheld: it names the node's successor, and every CAS
+\* the caller makes expects the word without the flag, so it fails while the link is held.
 F2(p) ==
     /\ ts[p].pc = "F2"
     /\ LET c == ts[p].c IN
        IF c = 0
        THEN /\ ts' = [ts EXCEPT ![p].fres = "absent", ![p].pc = "FR"]
             /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
-       ELSE LET nw == mem.nx[c] IN
+       ELSE LET nw == Unheld(mem.nx[c]) IN
             /\ err' = IF c \in prot[p] THEN err ELSE Fail("uaf")
             /\ prot' = [prot EXCEPT ![p] = Protect(@, nw.p)]
             /\ ts' = CASE nw.f -> [ts EXCEPT ![p].nw = nw, ![p].fres = "frozen", ![p].pc = "FR"]
@@ -232,6 +254,7 @@ FR(p) ==
     /\ ts' = [ts EXCEPT ![p].pc = CASE ts[p].ret = "ins" -> "I1"
                                     [] ts[p].ret \in {"iia", "goi"} -> "A1"
                                     [] ts[p].ret \in {"rem", "frm"} -> "R1"
+                                    [] ts[p].ret \in Cond -> "H0"
                                     [] ts[p].ret = "cleanup" -> "C9"]
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
 
@@ -255,7 +278,7 @@ Cleanup(p) == ts' = [ts EXCEPT ![p].ret = "cleanup", ![p].pc = "F0"]
 
 C9(p) ==
     /\ ts[p].pc = "C9"
-    /\ ts' = Go(p, IF Op(p).op \in {"rem", "frm"} THEN "R9" ELSE "I6")
+    /\ ts' = Go(p, IF Op(p).op \in {"rem", "frm"} \/ ts[p].dec = "remove" THEN "R9" ELSE "I6")
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
 
 \* 0.1.20's re-validation: after a write landed, a resize in flight or done sends
@@ -484,6 +507,148 @@ R9(p) ==
           ELSE Finish(p, IF ok THEN err ELSE Fail("lin_remove"))
     /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist>>
 
+\* ---------------------------------------------------------------- conditional writes
+\* remove_if (rif, the value in `acc`), replace_if (rpi, the value in `acc`, by `v`), compute
+\* (cmp, the next value `fx[seen]`, None removing) and a compute whose closure unwinds (cmpx).
+\* After the writers' walk: the key's node, or (compute only) the chain's last link, is held
+\* (H1), the closure runs once (H2), and the held link is written (H3), checked against what the
+\* closure saw: the key's value when its decision is written (CondExact).
+
+H0(p) ==
+    /\ ts[p].pc = "H0"
+    /\ LET o == Op(p).op
+           decided == ts[p].dec # "none"
+       IN CASE ts[p].fres = "frozen" ->
+                 /\ Frozen(p)
+                 /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err>>
+            [] ts[p].fres = "absent" /\ o \in {"rif", "rpi"} ->
+                 /\ ts' = Go(p, "H9")
+                 /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
+            [] MutUnheld /\ decided ->
+                 /\ ts' = Go(p, "H3")
+                 /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
+            [] MutUnheld ->
+                 /\ ts' = Go(p, "H2")
+                 /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
+            [] OTHER ->
+                 /\ ts' = Go(p, "H1")
+                 /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, err, prot>>
+
+\* The hold: one CAS setting the HELD flag of the node's link word (as found, unmarked and
+\* unfrozen), or of the chain's last link (null); a lost CAS walks again.
+H1(p) ==
+    /\ ts[p].pc = "H1"
+    /\ IF ts[p].fres = "found"
+       THEN LET c == ts[p].c IN
+            IF mem.nx[c] = ts[p].nw
+            THEN /\ mem' = [mem EXCEPT !.nx[c] = Hold(ts[p].nw)]
+                 /\ ts' = Go(p, "H2")
+                 /\ UNCHANGED tb
+            ELSE /\ ts' = Go(p, "F0")
+                 /\ UNCHANGED <<mem, tb>>
+       ELSE IF Rd(ts[p].prev) = NilLink
+            THEN /\ mem' = MemW(mem, ts[p].prev, Hold(NilLink))
+                 /\ tb' = TbW(tb, ts[p].prev, Hold(NilLink))
+                 /\ ts' = Go(p, "H2")
+            ELSE /\ ts' = Go(p, "F0")
+                 /\ UNCHANGED <<mem, tb>>
+    /\ UNCHANGED <<cur, latch, gcnt, abs, hist, err, prot>>
+
+\* The closure, once, on the node's value (None at the chain's end). It decides what the key
+\* holds next: "keep", "remove", "put" (nv: a replace, or a new node at the chain's end) or
+\* "unwind" (the closure panicked).
+H2(p) ==
+    /\ ts[p].pc = "H2"
+    /\ LET o == Op(p)
+           seen == IF ts[p].fres = "found" THEN mem.val[ts[p].c] ELSE None
+           next == CASE o.op = "cmp" -> o.fx[seen]
+                     [] o.op = "rpi" -> o.v
+                     [] OTHER -> None
+           dec == CASE o.op = "cmpx" -> "unwind"
+                    [] o.op = "cmp" -> IF next = None THEN (IF seen = None THEN "keep" ELSE "remove")
+                                       ELSE "put"
+                    [] seen \in o.acc -> IF o.op = "rif" THEN "remove" ELSE "put"
+                    [] OTHER -> "keep"
+       IN /\ ts' = [ts EXCEPT ![p].saw = seen, ![p].nv = next, ![p].dec = dec,
+                              ![p].runs = @ + 1, ![p].pc = "H3"]
+          /\ err' = IF ts[p].runs > 0 THEN Fail("closure_twice") ELSE err
+    /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist, prot>>
+
+\* The write of the held link, a store no other writer races: the node marked (removed), marked
+\* naming its replacement, a new node linked at the chain's end, or the word as it was. The
+\* linearization point, checked against what the closure saw. ("unheld_check": a CAS expecting
+\* the word as found; a lost one walks again, keeping the decision.)
+H3(p) ==
+    /\ ts[p].pc = "H3"
+    /\ LET o == Op(p).op
+           found == ts[p].fres = "found"
+           c == ts[p].c
+           nw == ts[p].nw
+           ok == ~MutUnheld \/ IF found THEN mem.nx[c] = nw ELSE Rd(ts[p].prev) = NilLink
+           exact == IF ts[p].dec = "unwind" \/ abs[K(p)] = ts[p].saw THEN err ELSE Fail("cond_exact")
+       IN CASE ts[p].dec \in {"remove", "put"} /\ ~ok ->
+                 /\ ts' = Go(p, "F0")
+                 /\ UNCHANGED <<mem, tb, gcnt, abs, hist, err, prot>>
+            [] ts[p].dec = "remove" /\ found ->
+                 /\ mem' = [mem EXCEPT !.nx[c] = Link(nw.p, TRUE, FALSE)]
+                 /\ abs' = [abs EXCEPT ![K(p)] = None]
+                 /\ hist' = Append(hist, <<K(p), None>>)
+                 /\ ts' = [ts EXCEPT ![p].res = IF o = "rif" THEN ts[p].saw ELSE None,
+                                     ![p].rmv = TRUE, ![p].pc = "R3"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<tb, gcnt, prot>>
+            [] ts[p].dec = "put" /\ FreeNodes = {} ->
+                 /\ err' = Fail("pool")
+                 /\ ts' = Go(p, "done")
+                 /\ UNCHANGED <<mem, tb, gcnt, abs, hist, prot>>
+            [] ts[p].dec = "put" /\ found ->
+                 LET n == Min(FreeNodes) IN
+                 /\ mem' = [Alloc(mem, n, K(p), ts[p].nv, L(nw.p)) EXCEPT !.nx[c] = Link(n, TRUE, FALSE)]
+                 /\ abs' = [abs EXCEPT ![K(p)] = ts[p].nv]
+                 /\ hist' = Append(hist, <<K(p), ts[p].nv>>)
+                 /\ prot' = [prot EXCEPT ![p] = @ \cup {n}]
+                 /\ ts' = [ts EXCEPT ![p].n = n,
+                                     ![p].res = IF o = "rpi" THEN ts[p].saw ELSE ts[p].nv,
+                                     ![p].pc = "I4"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<tb, gcnt>>
+            [] ts[p].dec = "put" ->
+                 LET n == Min(FreeNodes)
+                     m1 == Alloc(mem, n, K(p), ts[p].nv, NilLink)
+                 IN /\ mem' = MemW(m1, ts[p].prev, L(n))
+                    /\ tb' = TbW(tb, ts[p].prev, L(n))
+                    /\ abs' = [abs EXCEPT ![K(p)] = ts[p].nv]
+                    /\ hist' = Append(hist, <<K(p), ts[p].nv>>)
+                    /\ prot' = [prot EXCEPT ![p] = @ \cup {n}]
+                    /\ ts' = [ts EXCEPT ![p].n = n, ![p].res = ts[p].nv, ![p].pc = "I5"]
+                    /\ err' = exact
+                    /\ UNCHANGED gcnt
+            [] MutUnheld ->
+                 /\ ts' = [ts EXCEPT ![p].res = IF o = "rpi" /\ found THEN ts[p].saw ELSE None,
+                                     ![p].pc = "H9"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<mem, tb, gcnt, abs, hist, prot>>
+            [] found ->
+                 /\ mem' = [mem EXCEPT !.nx[c] = nw]
+                 /\ ts' = [ts EXCEPT ![p].res = IF o = "rpi" THEN ts[p].saw ELSE None,
+                                     ![p].pc = "H9"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<tb, gcnt, abs, hist, prot>>
+            [] OTHER ->
+                 /\ mem' = MemW(mem, ts[p].prev, NilLink)
+                 /\ tb' = TbW(tb, ts[p].prev, NilLink)
+                 /\ ts' = [ts EXCEPT ![p].res = None, ![p].pc = "H9"]
+                 /\ err' = exact
+                 /\ UNCHANGED <<gcnt, abs, hist, prot>>
+    /\ UNCHANGED <<cur, latch>>
+
+\* The answer. One that found the key absent (no closure ran) is linearizable: the key was absent
+\* at some moment of the call.
+H9(p) ==
+    /\ ts[p].pc = "H9"
+    /\ Finish(p, IF ts[p].dec # "none" \/ SeenDuring(p, K(p), None) THEN err ELSE Fail("lin_cond"))
+    /\ UNCHANGED <<mem, tb, cur, latch, gcnt, abs, hist>>
+
 \* ---------------------------------------------------------------- get
 
 G0(p) ==
@@ -659,6 +824,8 @@ Z2(p) ==
           THEN /\ ts' = Go(p, "Z5")
                /\ UNCHANGED <<tb, prot>>
           ELSE LET w == tb.head[old][b] IN
+               \* A held link is frozen only once its holder wrote it.
+               /\ ~w.h
                /\ tb' = [tb EXCEPT !.head[old][b] = Freeze(w)]
                /\ prot' = [prot EXCEPT ![p] = Protect(@, w.p)]
                /\ ts' = [ts EXCEPT ![p].c = w.p, ![p].pc = "Z3"]
@@ -676,7 +843,9 @@ Z3(p) ==
                    copy == ~nw.m /\ Rz(p).kind = "resize"
                    bk == Bucket(mem.key[c], tb.cap[nt])
                    m1 == [mem EXCEPT !.nx[c] = Freeze(nw)]
-               IN /\ err' = IF c \in prot[p] THEN err ELSE Fail("uaf")
+               \* A held link is frozen only once its holder wrote it.
+               IN /\ ~nw.h
+                  /\ err' = IF c \in prot[p] THEN err ELSE Fail("uaf")
                   /\ IF copy
                      THEN IF FreeNodes = {}
                           THEN /\ err' = Fail("pool")
@@ -725,6 +894,7 @@ Worker(p) ==
     \/ I1(p) \/ I2(p) \/ I3(p) \/ I4(p) \/ I5(p) \/ I6(p)
     \/ A1(p) \/ A2(p) \/ A5(p) \/ A9(p)
     \/ R1(p) \/ R2(p) \/ R3(p) \/ R4(p) \/ R9(p)
+    \/ H0(p) \/ H1(p) \/ H2(p) \/ H3(p) \/ H9(p)
     \/ G0(p) \/ G1(p) \/ G2(p) \/ G3(p) \/ G9(p)
     \/ T0(p) \/ T1(p) \/ T2(p) \/ T3(p) \/ T4(p) \/ T9(p)
 
@@ -754,6 +924,9 @@ Exactness == err # "iia_exact"
 Linearizable == err \notin {"lin_get", "lin_remove"}
 \* No thread reads a node or entry its guard does not protect.
 NoUseAfterFree == err # "uaf"
+\* A conditional write's closure runs once, on the value the key holds when what it decided is
+\* written, and an answer of absence is linearizable.
+CondExact == err \notin {"cond_exact", "closure_twice", "lin_cond"}
 \* A walk yields every key present throughout once, nothing never present, and no key more
 \* often than its lives during the walk.
 WalkExact == err # "iter"
@@ -798,4 +971,20 @@ NoValidationPass == \A p \in Workers : ~(ts[p].pc \in {"G3", "T4"})
 NoResizeUnderWrite ==
     ~(latch /\ \E p \in Workers : ts[p].pc \in {"I2", "I3", "A2", "R2"})
 NoReplace == \A p \in Workers : ts[p].pc # "I4"
+\* A plain write is about to CAS a link a conditional write holds (its CAS will fail).
+NoHeldMeet ==
+    ~\E q \in Workers :
+        \/ /\ ts[q].pc \in {"R2", "I3"}
+           /\ ts[q].c # 0
+           /\ mem.nx[ts[q].c].h
+        \/ /\ ts[q].pc \in {"I2", "A2", "F3", "R4", "I4"}
+           /\ Rd(ts[q].prev).h
+\* A migration is about to freeze a held link (it waits for the holder).
+NoFreezeWait ==
+    ~\/ /\ ts[RZ].pc = "Z2"
+        /\ ts[RZ].b < tb.cap[ts[RZ].old]
+        /\ tb.head[ts[RZ].old][ts[RZ].b].h
+     \/ /\ ts[RZ].pc = "Z3"
+        /\ ts[RZ].c # 0
+        /\ mem.nx[ts[RZ].c].h
 =============================================================================

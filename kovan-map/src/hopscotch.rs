@@ -32,10 +32,11 @@ use core::sync::atomic::Ordering;
 use displace::{InsertResult, Pending};
 use foldhash::fast::FixedState;
 use kovan::{Atomic, CachePadded, pin, retire};
-use table::{HOP_MASK, Table, Word, hop_bits};
+use table::{HOP_MASK, HomeGuard, Table, Word, hop_bits};
 
 pub use iter::{HopscotchIntoIter, HopscotchIter, HopscotchKeys, HopscotchValues};
 
+mod conditional;
 mod displace;
 mod iter;
 mod resize;
@@ -87,6 +88,19 @@ enum Outcome<R, V> {
     Replaced(V),
     /// The key was present and this call only claims an absent key: its value.
     Present(V),
+}
+
+/// A writer's table and the home guard it holds there ([`HopscotchMap::home_of`]).
+type HeldHome<'g, K, V> = (&'g Table<K, V>, HomeGuard<'g>);
+
+/// What kept a writer from its key's home guard ([`HopscotchMap::home_of`]).
+enum Blocked<'g, K, V> {
+    /// A resize or a clear is in flight: the writer waits for it and reloads the table.
+    Resizing,
+    /// The home holds no entry: its hop bits were clear in the one read of its control word.
+    Vacant,
+    /// Another writer holds the home's guard in this table.
+    Held(&'g Table<K, V>),
 }
 
 // Small accessors that never hash: only the struct's own `'static` bound, as std's equivalent
@@ -198,6 +212,78 @@ where
         }
     }
 
+    /// The writer guard of the home of `hash` in the current table, taken without waiting: the
+    /// first step of every write. `Err` when a resize is in flight, when the home holds no entry
+    /// and `vacant_answers` (seeing that takes no guard: an entry's hop bit stays set from its
+    /// publication to its unlink, and one read of the home's control word serves this test, the
+    /// test of the guard and the compare-exchange that takes it), or when another writer holds
+    /// the guard.
+    ///
+    /// A resize takes every home guard of the table before it copies a slot (`hold_writers`)
+    /// and keeps the guards of a table it replaced, so holding this guard means the table is live
+    /// and every slot the holder writes is copied by any resize that follows. No lock-order
+    /// deadlock: a guard holder never waits for anything (it takes the guards of other homes it
+    /// displaces entries of without waiting).
+    #[inline(always)]
+    fn home_of<'g>(
+        &self,
+        hash: u64,
+        guard: &'g kovan::Guard,
+        vacant_answers: bool,
+    ) -> Result<HeldHome<'g, K, V>, Blocked<'g, K, V>> {
+        let table_ptr = self.table.load(Ordering::Acquire, guard);
+        // SAFETY: loaded under `guard`, which keeps the table from being freed.
+        let table = unsafe { &*table_ptr.as_raw() };
+        if self.resizing.load(Ordering::Acquire) {
+            return Err(Blocked::Resizing);
+        }
+        match table.home_guard_unless(table.bucket_index(hash), |word| {
+            vacant_answers && hop_bits(word) == 0
+        }) {
+            Ok(home) => Ok((table, home)),
+            Err(word) if vacant_answers && hop_bits(word) == 0 => Err(Blocked::Vacant),
+            Err(_) => Err(Blocked::Held(table)),
+        }
+    }
+
+    /// Count in an entry this call linked, before its home guard is released: concurrent removes
+    /// cannot decrement the count below the true entry count, and a clear (which resets the count
+    /// while it holds every home guard) never sees the entry without its count. The capacity to
+    /// grow the table to when it is more than three quarters full.
+    #[inline(always)]
+    fn count_in(&self, table: &Table<K, V>) -> Option<usize> {
+        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        overfull(count, table.capacity).then_some(table.capacity * 2)
+    }
+
+    /// Unlink the entry in the slot `offset` past the home `home` holds, and count it out before
+    /// the guard is released: the capacity to shrink the table to when it is less than a quarter
+    /// full. The caller retires the entry once it released the guard.
+    #[inline(always)]
+    fn unlink_held(
+        &self,
+        table: &Table<K, V>,
+        home: &mut HomeGuard<'_>,
+        offset: usize,
+    ) -> Option<usize> {
+        // A store, not a CAS: no other thread writes an occupied slot of a home whose guard this
+        // call holds. Release: a reader that acquires the free slot sees everything this call
+        // wrote before it.
+        table
+            .get_bucket(home.idx + offset)
+            .store(Word::free(), Ordering::Release);
+        home.stage_unlinked(offset);
+        // Counted down before the home guard is released, as an insert counts up: a clear
+        // resets the count while it holds every home guard, so no decrement for an entry it
+        // already cleared lands after the reset and eats the count of a later insert. One
+        // subtract, no saturation: the entry this call unlinked was counted when it was linked
+        // (before its home guard was released) and no clear ran since (a clear holds every home
+        // guard, this one included), so the count is at least one here.
+        let prev = self.count.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "an unlinked entry was never counted");
+        underfull(prev - 1, table.capacity).then_some(table.capacity / 2)
+    }
+
     /// The one write path of `insert`, `insert_if_absent` and `get_or_insert`: link the key's
     /// entry, or (unless `only_if_absent`) replace the present one, under the key's home guard.
     /// `on_insert` reads the value this call linked.
@@ -215,41 +301,30 @@ where
             self.wait_for_resize();
 
             let guard = pin();
-            let table_ptr = self.table.load(Ordering::Acquire, &guard);
-            let table = unsafe { &*table_ptr.as_raw() };
-
-            if self.resizing.load(Ordering::Acquire) {
-                continue;
-            }
-
-            // Home-bucket writer guard: serialize the writes of one home so the existence scan
-            // and the slot claim inside try_insert are one atomic step, and no displacement
-            // moves an entry of the home meanwhile. Contended -> spin via the outer loop, which
-            // keeps re-checking `resizing` and reloads the table. A resize takes every home
-            // guard of the table before it copies a slot (`hold_writers`) and keeps the guards
-            // of a table it replaced, so holding this guard means the table is live and every
-            // slot this call writes is copied by any resize that follows. No lock-order
-            // deadlock: a guard holder never waits for anything (it takes the guards of other
-            // homes it displaces entries of without waiting).
-            let Some(mut home) = table.home_guard(table.bucket_index(hash)) else {
-                #[cfg(test)]
-                pause::at(pause::Point::WriterMetHeldGuard);
-                // A claim answers a key the holder linked meanwhile without waiting for the
-                // guard, from the same lookup.
-                if only_if_absent && let Some(entry) = table.lookup(hash, pending.key(), &guard) {
-                    return Outcome::Present(entry.value.clone());
+            // The home guard serializes the writes of one home, so the existence scan and the
+            // slot claim inside try_insert are one atomic step, and no displacement moves an
+            // entry of the home meanwhile. A resize in flight sends the loop back to wait for
+            // it; a held guard, to spin and reload the table.
+            let (table, mut home) = match self.home_of(hash, &guard, false) {
+                Ok(held) => held,
+                Err(Blocked::Held(table)) => {
+                    #[cfg(test)]
+                    pause::at(pause::Point::WriterMetHeldGuard);
+                    // A claim answers a key the holder linked meanwhile without waiting for the
+                    // guard, from the same lookup.
+                    if only_if_absent && let Some(entry) = table.lookup(hash, pending.key(), &guard)
+                    {
+                        return Outcome::Present(entry.value.clone());
+                    }
+                    spin_hint();
+                    continue;
                 }
-                spin_hint();
-                continue;
+                Err(_) => continue,
             };
 
             let outcome = Self::try_insert(table, &mut home, pending, only_if_absent, &guard);
-            // A new entry is counted once, before its home guard is released: concurrent
-            // removes cannot decrement the count below the true entry count, and a clear
-            // (which resets the count while it holds every home guard) never sees the entry
-            // without its count.
-            let new_count = match outcome {
-                InsertResult::Linked(_) => Some(self.count.fetch_add(1, Ordering::Relaxed) + 1),
+            let grow_to = match outcome {
+                InsertResult::Linked(_) => self.count_in(table),
                 _ => None,
             };
             // The guard is released (publishing the new entry's hop bit) before the resize arms
@@ -268,12 +343,9 @@ where
                     // SAFETY: linked by this call under `guard`, which keeps it (and its table)
                     // from being freed even if a writer unlinks it now.
                     let answer = on_insert(unsafe { &(*entry).value });
-                    if let Some(new_count) = new_count
-                        && overfull(new_count, table.capacity)
-                    {
-                        let current_capacity = table.capacity;
+                    if let Some(capacity) = grow_to {
                         drop(guard);
-                        self.try_resize(current_capacity * 2);
+                        self.try_resize(capacity);
                     }
                     return Outcome::Linked(answer);
                 }
@@ -364,76 +436,15 @@ where
     }
 
     /// Removes a key from the map, returning the value at the key if the key was previously in the map.
+    ///
+    /// Linearizable at the unlink under the key's home guard: [`remove_if`](Self::remove_if)
+    /// with a predicate that always holds, one write path for both.
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let hash = self.hasher.hash_one(key);
-
-        loop {
-            self.wait_for_resize();
-
-            let guard = pin();
-            let table_ptr = self.table.load(Ordering::Acquire, &guard);
-            let table = unsafe { &*table_ptr.as_raw() };
-
-            if self.resizing.load(Ordering::Acquire) {
-                continue;
-            }
-
-            let home_idx = table.bucket_index(hash);
-            // A home without hop bits has no entry to remove, and seeing that takes no guard:
-            // an entry's bit stays set from its publication to its unlink. Relaxed: no slot is
-            // read.
-            let word = table.get_bucket(home_idx).control.load(Ordering::Relaxed);
-            if hop_bits(word) == 0 {
-                return None;
-            }
-
-            // The home guard, as an insert takes it: the scan below is stable, the unlink cannot
-            // race an update or a move of the entry, and a resize copies the table either before
-            // this call takes the guard (and this call then waits for the new table) or after
-            // the unlink.
-            let Some(mut home) = table.home_guard(home_idx) else {
-                #[cfg(test)]
-                pause::at(pause::Point::WriterMetHeldGuard);
-                spin_hint();
-                continue;
-            };
-            let (offset, word) = table.find(home_idx, home.hops(), hash, key, &guard)?;
-            let entry_ptr = word.ptr();
-            // SAFETY: loaded under `guard`, which keeps it from being freed.
-            let old_value = unsafe { &*entry_ptr }.value.clone();
-            // A store, not a CAS: no other thread writes an occupied slot of a home whose guard
-            // this call holds. Release: a reader that acquires the free slot sees everything this
-            // call wrote before it.
-            table
-                .get_bucket(home_idx + offset)
-                .store(Word::free(), Ordering::Release);
-            home.stage_unlinked(offset);
-
-            // Counted down before the home guard is released, as an insert counts up: a clear
-            // resets the count while it holds every home guard, so no decrement for an entry it
-            // already cleared lands after the reset and eats the count of a later insert.
-            // One subtract, no saturation: the entry this call unlinked was counted when it was
-            // linked (before its home guard was released) and no clear ran since (a clear holds
-            // every home guard, this one included), so the count is at least one here.
-            let prev = self.count.fetch_sub(1, Ordering::Relaxed);
-            debug_assert!(prev > 0, "an unlinked entry was never counted");
-            let shrink_to = underfull(prev - 1, table.capacity).then_some(table.capacity / 2);
-            drop(home);
-
-            // SAFETY: unlinked above under its home guard, so no other thread unlinks or
-            // retires it; a reader that loaded it holds a guard that keeps it alive.
-            unsafe { retire(entry_ptr) };
-
-            if let Some(cap) = shrink_to {
-                drop(guard);
-                self.try_resize(cap);
-            }
-            return Some(old_value);
-        }
+        self.remove_where(key, |_| true)
     }
 
     /// Clears the map, removing all key-value pairs.

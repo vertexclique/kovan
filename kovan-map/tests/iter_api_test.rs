@@ -54,8 +54,16 @@ fn reset() {
     drain();
     LIVE.store(0, Ordering::SeqCst);
 }
+/// Flush until every tracked value is freed, for at most ten seconds. A
+/// value can wait for a thread of an earlier test that still holds a
+/// reservation (it is freed when that thread pins, flushes or exits), so a
+/// count that holds still over a few flushes is no proof that it is final.
 fn assert_no_leak(label: &str) {
-    drain();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while LIVE.load(Ordering::SeqCst) != 0 && std::time::Instant::now() < deadline {
+        kovan::flush();
+        std::thread::yield_now();
+    }
     assert_eq!(
         LIVE.load(Ordering::SeqCst),
         0,

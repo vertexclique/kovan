@@ -162,6 +162,7 @@ fn test_hopscotch_get_or_insert_concurrent_remove() {
 extern crate std;
 
 use super::pause::{self, Point, Stop};
+use super::table::GUARD;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::Hasher;
@@ -344,6 +345,38 @@ impl BuildHasher for Identity {
     }
 }
 
+/// Hashes a `u64` key below 128 to itself with its seven bits repeated at the top of the hash:
+/// the key's bucket is the one it names, as under [`Identity`], and keys of different buckets
+/// differ in their top bits too, which a walk compares first.
+#[derive(Clone, Copy, Default)]
+struct Tagged;
+
+struct TaggedHasher(u64);
+
+impl Hasher for TaggedHasher {
+    fn finish(&self) -> u64 {
+        self.0 | self.0 << 57
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 << 8) | u64::from(*byte);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+impl BuildHasher for Tagged {
+    type Hasher = TaggedHasher;
+
+    fn build_hasher(&self) -> TaggedHasher {
+        TaggedHasher(0)
+    }
+}
+
 /// A walk whose table grows under it keeps walking the table it started on. Key 70's home is
 /// bucket 6 in 64 buckets (it sits in slot 10, the first free slot of bucket 6's neighborhood)
 /// and bucket 70 in 128: a walk that moved to the new table at its position would meet key 70
@@ -410,7 +443,7 @@ fn displacing_layout() -> Arc<HopscotchMap<u64, u64, Identity>> {
 }
 
 /// The key in slot `idx` of the map's current table.
-fn key_at(map: &HopscotchMap<u64, u64, Identity>, idx: usize) -> Option<u64> {
+fn key_at<S>(map: &HopscotchMap<u64, u64, S>, idx: usize) -> Option<u64> {
     let guard = pin();
     let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
     let word = table.get_bucket(idx).load(Ordering::Acquire, &guard);
@@ -631,6 +664,158 @@ fn a_walk_meets_a_key_once_when_it_is_moved_ahead_and_updated() {
     assert_eq!(seen, want, "key 2 once, as the walk first met it");
 }
 
+/// A walk that met key 2 in slot 2 through `next`, and folds the rest after a displacement moved
+/// key 2 to slot 33, does not count it again there: the fold recognizes what `next` met.
+#[test]
+fn a_fold_after_next_meets_a_key_a_displacement_moved_ahead_of_it_once() {
+    let map = displacing_layout();
+    let mut walk = map.iter();
+    let seen: Vec<u64> = walk.by_ref().take(3).map(|(k, _)| k).collect();
+    assert_eq!(seen, [0, 1, 2]);
+    assert_eq!(map.insert(64, 64), None);
+    assert_displaced(&map);
+    // Keys 3..=32 in slots 3..=32, and key 2 in slot 33 once more.
+    assert_eq!(walk.count(), 30, "key 2 once: not met again in slot 33");
+}
+
+/// A 64-bucket map whose keys `32..64` sit each in its home slot (under `Identity` or `Tagged`),
+/// so the neighborhood of bucket 32 (slots 32..64) is full and slots 64.. are free.
+fn upper_half_layout<S: BuildHasher + Default>() -> HopscotchMap<u64, u64, S> {
+    let map = HopscotchMap::with_capacity_and_hasher(64, S::default());
+    for k in 32..64 {
+        map.insert(k, k);
+    }
+    map
+}
+
+/// How many times each key comes out of a fold over `map` whose closure runs `write` once, at
+/// the first entry it gets.
+fn fold_counts<S: BuildHasher>(
+    map: &HopscotchMap<u64, u64, S>,
+    write: impl FnOnce(),
+) -> std::collections::BTreeMap<u64, usize> {
+    let mut write = Some(write);
+    map.iter()
+        .fold(std::collections::BTreeMap::new(), |mut counts, (k, _)| {
+            if let Some(write) = write.take() {
+                write();
+            }
+            *counts.entry(k).or_insert(0) += 1;
+            counts
+        })
+}
+
+/// A fold meets a key once when a displacement, made from the fold's own closure, moves the key
+/// from a slot the fold may already have read to one it reads later: inserting key 96 (home
+/// bucket 32) moves key 33 from slot 33 to slot 64, the first slot of the table's second group
+/// of `u64::BITS` slots, which the fold reads after it yields the first.
+fn a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once<S: BuildHasher + Default>() {
+    let map = upper_half_layout::<S>();
+    let counts = fold_counts(&map, || {
+        assert_eq!(map.insert(96, 96), None);
+        assert_eq!(
+            key_at(&map, 33),
+            Some(96),
+            "key 96 took the slot key 33 left"
+        );
+        assert_eq!(key_at(&map, 64), Some(33), "key 33 moved to slot 64");
+    });
+    for k in 32..64 {
+        assert_eq!(
+            counts.get(&k),
+            Some(&1),
+            "key {k}, present throughout, once"
+        );
+    }
+    assert!(counts.values().all(|&n| n == 1), "no key twice: {counts:?}");
+}
+
+#[test]
+fn a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once_identity() {
+    a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once::<Identity>();
+}
+
+#[test]
+fn a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once_tagged() {
+    a_fold_meets_a_key_a_displacement_moved_ahead_of_it_once::<Tagged>();
+}
+
+/// A fold meets a key once when the fold's own closure removes it from a slot the fold may
+/// already have read and inserts it again into one the fold reads later: key 127 (home bucket
+/// 63) takes slot 63 first, so key 63 lands in slot 64. The new entry is another allocation of
+/// the same key, which the fold recognizes by comparing keys.
+fn a_fold_meets_a_key_reinserted_ahead_of_it_once<S: BuildHasher + Default>() {
+    let map = upper_half_layout::<S>();
+    let counts = fold_counts(&map, || {
+        assert_eq!(map.remove(&63), Some(63));
+        assert_eq!(map.insert(127, 127), None);
+        assert_eq!(map.insert(63, 630), None);
+        assert_eq!(key_at(&map, 63), Some(127));
+        assert_eq!(key_at(&map, 64), Some(63), "key 63 again, in slot 64");
+    });
+    for k in 32..64 {
+        assert_eq!(counts.get(&k), Some(&1), "key {k} once");
+    }
+    assert!(counts.values().all(|&n| n == 1), "no key twice: {counts:?}");
+}
+
+#[test]
+fn a_fold_meets_a_key_reinserted_ahead_of_it_once_identity() {
+    a_fold_meets_a_key_reinserted_ahead_of_it_once::<Identity>();
+}
+
+#[test]
+fn a_fold_meets_a_key_reinserted_ahead_of_it_once_tagged() {
+    a_fold_meets_a_key_reinserted_ahead_of_it_once::<Tagged>();
+}
+
+std::thread_local! {
+    /// The clones of [`Clones`] values made on this thread.
+    static CLONED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// A key or value that counts its clones on the thread that makes them.
+#[derive(PartialEq, Eq, Hash)]
+struct Clones(u64);
+
+impl Clone for Clones {
+    fn clone(&self) -> Self {
+        CLONED.with(|cloned| cloned.set(cloned.get() + 1));
+        Self(self.0)
+    }
+}
+
+/// The clones of [`Clones`] values `walk` makes.
+fn clones_in(walk: impl FnOnce()) -> usize {
+    let before = CLONED.with(core::cell::Cell::get);
+    walk();
+    CLONED.with(core::cell::Cell::get) - before
+}
+
+/// A walk of the keys clones no value and a walk of the values no key, through `next` and
+/// through `fold` alike; a walk of the entries clones both.
+#[test]
+fn keys_and_values_clone_only_what_they_yield() {
+    let by_key = HopscotchMap::<Clones, u64>::new();
+    let by_value = HopscotchMap::<u64, Clones>::new();
+    for k in 0..100 {
+        by_key.insert(Clones(k), k);
+        by_value.insert(k, Clones(k));
+    }
+    assert_eq!(clones_in(|| assert_eq!(by_value.keys().count(), 100)), 0);
+    assert_eq!(
+        clones_in(|| assert_eq!(by_value.keys().collect::<Vec<_>>().len(), 100)),
+        0
+    );
+    assert_eq!(clones_in(|| assert_eq!(by_key.values().count(), 100)), 0);
+    assert_eq!(
+        clones_in(|| assert_eq!(by_key.values().collect::<Vec<_>>().len(), 100)),
+        0
+    );
+    assert_eq!(clones_in(|| assert_eq!(by_key.keys().count(), 100)), 100);
+    assert_eq!(clones_in(|| assert_eq!(by_value.iter().count(), 100)), 100);
+}
+
 /// A displacement whose first candidate's home guard is held by another writer moves the next
 /// candidate instead of growing the table, and never waits for the held guard. Key 66's home is
 /// bucket 2, key 2's home.
@@ -663,3 +848,226 @@ fn a_displacement_moves_another_entry_when_one_home_is_held() {
     }
     assert_eq!(walked_keys(&map), keys_and(&[64, 66]));
 }
+
+/// The identity hash of a key with the tag `tag` (the hash's top bits) and the low bits `low`.
+fn tagged(tag: u64, low: u64) -> u64 {
+    (tag << 60) | low
+}
+
+/// The scan a writer makes under its home's guard (`find_held`, which protects no entry it reads)
+/// answers what a reader's scan (`find`) answers: each key of the home at its slot, past entries
+/// of the home with another tag or with the same tag and another key, and nothing for an absent
+/// key, whether its tag matches an entry's or none. Home 0's keys sit in slots 0..4 and key 1 of
+/// home 1 in slot 4, which home 0's bits do not name.
+#[test]
+fn a_scan_under_the_home_guard_answers_as_a_reader_scan() {
+    let map = HopscotchMap::<u64, u64, Identity>::with_capacity_and_hasher(64, Identity);
+    let home_0 = [tagged(0, 0), tagged(1, 64), tagged(1, 128), tagged(2, 0)];
+    for k in home_0.into_iter().chain([1]) {
+        assert_eq!(map.insert(k, k), None);
+    }
+    let guard = pin();
+    let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
+    let home = table.home_guard(0).expect("no writer holds home 0");
+    assert_eq!(home.hops(), 0b1111, "home 0's keys in slots 0..4");
+    let key_of = |found: Option<(usize, Word<'_, u64, u64>)>| {
+        found.map(|(offset, word)| (offset, word.entry().map(|entry| entry.key)))
+    };
+    for (offset, k) in home_0.into_iter().enumerate() {
+        let held = key_of(table.find_held(&home, k, &k, &guard));
+        assert_eq!(held, Some((offset, Some(k))), "key {k:#x}");
+        assert_eq!(held, key_of(table.find(0, home.hops(), k, &k, &guard)));
+    }
+    for k in [tagged(1, 192), tagged(3, 0), 64] {
+        assert_eq!(
+            key_of(table.find_held(&home, k, &k, &guard)),
+            None,
+            "absent key {k:#x}"
+        );
+        assert_eq!(key_of(table.find(0, home.hops(), k, &k, &guard)), None);
+    }
+    drop(home);
+    for k in home_0.into_iter().chain([1]) {
+        assert_eq!(map.remove(&k), Some(k), "key {k:#x}");
+    }
+    assert!(map.is_empty());
+}
+
+/// A writer takes a home's guard from one read of its control word: the guard it gets names the
+/// home's bits as they were when it took it, a refused or held home is left as it was, and a
+/// remove of a key whose home has no bits answers `None` even while another writer holds that
+/// home, without waiting for it.
+#[test]
+fn a_home_guard_is_taken_from_one_read_of_the_control_word() {
+    let map = Arc::new(HopscotchMap::<u64, u64, Identity>::with_capacity_and_hasher(64, Identity));
+    // Home 3 holds keys 3 and 67 in slots 3 and 4; home 5 has no bits.
+    for k in [3, 67] {
+        assert_eq!(map.insert(k, k), None);
+    }
+    let guard = pin();
+    let table = unsafe { &*map.table.load(Ordering::Acquire, &guard).as_raw() };
+    let control = |idx: usize| table.get_bucket(idx).control.load(Ordering::Relaxed);
+    let before = control(3);
+    assert_eq!(hop_bits(before), 0b11);
+
+    let refused = table.home_guard_unless(3, |word| hop_bits(word) != 0);
+    assert_eq!(refused.err(), Some(before), "refused with the word it read");
+    assert_eq!(control(3), before, "a refused home is left as it was");
+
+    let held = table
+        .home_guard_unless(3, |_| false)
+        .expect("no writer holds home 3");
+    assert_eq!(held.hops(), 0b11);
+    assert_eq!(control(3), before | GUARD);
+    let met = table.home_guard_unless(3, |_| false);
+    assert_eq!(
+        met.err(),
+        Some(before | GUARD),
+        "a held home answers the word it read"
+    );
+    assert_eq!(control(3), before | GUARD, "a held home is left as it was");
+    drop(held);
+    assert_eq!(control(3), before, "the release clears the guard bit alone");
+
+    let empty = table.home_guard(5).expect("no writer holds home 5");
+    let (done, answer) = sync_channel(1);
+    let remover = {
+        let map = Arc::clone(&map);
+        thread::spawn(move || done.send(map.remove(&5)).expect("the test waits"))
+    };
+    assert_eq!(
+        answer
+            .recv_timeout(MEET)
+            .expect("the remove answers while home 5 is held"),
+        None
+    );
+    remover.join().expect("the remove");
+    drop(empty);
+    assert_eq!(map.remove(&67), Some(67));
+    assert_eq!(map.remove(&3), Some(3));
+    assert!(map.is_empty());
+}
+
+/// A writer's scan under its home guard reads the home's entries without protecting them
+/// (`find_held`), so no other thread may unlink, retire or move one of them, or replace the
+/// table holding them, until the holder is done with them. Each writer that scans that way
+/// (a remove, a replace, a claim of an absent key, all of home 2 in `displacing_layout`) is
+/// stopped right after its scan loaded key 2's word and before it read key 2's entry; then a
+/// remove and a replace of key 2 wait for the guard, a resize and a clear wait for it before
+/// they copy or clear a slot (the table is not replaced), and a displacement that would move key
+/// 2 moves key 3 instead, without waiting. Every answer and the final contents are a sequential
+/// map's, the holder's write first.
+#[test]
+fn a_held_scan_holds_off_every_writer_that_could_retire_an_entry_it_read() {
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Remove(u64),
+        Insert(u64, u64),
+        Claim(u64, u64),
+        Resize,
+        Clear,
+    }
+    fn apply(map: &HopscotchMap<u64, u64, Identity>, op: Op) -> Option<u64> {
+        match op {
+            Op::Remove(k) => map.remove(&k),
+            Op::Insert(k, v) => map.insert(k, v),
+            Op::Claim(k, v) => map.insert_if_absent(k, v),
+            Op::Resize => {
+                map.try_resize(128);
+                None
+            }
+            Op::Clear => {
+                map.clear();
+                None
+            }
+        }
+    }
+    fn model(want: &mut BTreeMap<u64, u64>, op: Op) -> Option<u64> {
+        match op {
+            Op::Remove(k) => want.remove(&k),
+            Op::Insert(k, v) => want.insert(k, v),
+            Op::Claim(k, v) => match want.get(&k) {
+                Some(&present) => Some(present),
+                None => want.insert(k, v),
+            },
+            Op::Resize => None,
+            Op::Clear => {
+                want.clear();
+                None
+            }
+        }
+    }
+
+    let holders = [Op::Remove(2), Op::Insert(2, 200), Op::Claim(66, 66)];
+    let rivals = [
+        Op::Remove(2),
+        Op::Insert(2, 7),
+        Op::Resize,
+        Op::Clear,
+        Op::Insert(64, 64),
+    ];
+    for holder_op in holders {
+        for rival_op in rivals {
+            let case = std::format!("holder {holder_op:?}, rival {rival_op:?}");
+            let map = displacing_layout();
+            let mut want: BTreeMap<u64, u64> = (0..=32).map(|k| (k, k)).collect();
+            let (holder, arrival, release) = {
+                let map = Arc::clone(&map);
+                stopped_at(Point::HeldScanLoaded, move || apply(&map, holder_op))
+            };
+            arrival
+                .recv_timeout(MEET)
+                .unwrap_or_else(|_| panic!("{case}: the holder's scan loaded key 2's word"));
+            let holder_want = model(&mut want, holder_op);
+
+            let rival = if let Op::Insert(64, _) = rival_op {
+                // Key 64's home, bucket 0, has its neighborhood full: its insert moves the entry
+                // of the farthest slot it can into slot 33. Key 2's home is held, so key 3 moves.
+                assert_eq!(apply(&map, rival_op), None, "{case}");
+                assert_eq!(
+                    key_at(&map, 3),
+                    Some(64),
+                    "{case}: key 64 took key 3's slot"
+                );
+                assert_eq!(key_at(&map, 33), Some(3), "{case}: key 3 moved, not key 2");
+                None
+            } else {
+                let point = match rival_op {
+                    Op::Resize | Op::Clear => Point::ResizerMetHeldGuard,
+                    _ => Point::WriterMetHeldGuard,
+                };
+                let map = Arc::clone(&map);
+                let (rival, rival_arrival, rival_release) =
+                    stopped_at(point, move || apply(&map, rival_op));
+                rival_arrival
+                    .recv_timeout(MEET)
+                    .unwrap_or_else(|_| panic!("{case}: the rival waits for home 2's guard"));
+                Some((rival, rival_release))
+            };
+            assert_eq!(key_at(&map, 2), Some(2), "{case}: key 2's entry stays put");
+            assert_eq!(map.capacity(), 64, "{case}: the table is not replaced");
+
+            release.send(()).expect("let the holder read key 2's entry");
+            assert_eq!(holder.join().expect("the holder"), holder_want, "{case}");
+            let rival_want = model(&mut want, rival_op);
+            if let Some((rival, rival_release)) = rival {
+                rival_release.send(()).expect("let the rival go on");
+                assert_eq!(rival.join().expect("the rival"), rival_want, "{case}");
+            }
+
+            let mut got: Vec<(u64, u64)> = map.iter().collect();
+            got.sort_unstable();
+            assert_eq!(got, want.into_iter().collect::<Vec<_>>(), "{case}");
+            assert_eq!(map.len(), got.len(), "{case}");
+            for (k, v) in got {
+                assert_eq!(map.get(&k), Some(v), "{case}: key {k}");
+            }
+            let grown = matches!(rival_op, Op::Resize);
+            assert_eq!(map.capacity(), if grown { 128 } else { 64 }, "{case}");
+        }
+    }
+}
+
+mod conditional;

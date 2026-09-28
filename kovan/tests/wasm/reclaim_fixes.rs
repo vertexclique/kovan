@@ -28,7 +28,7 @@
 //!   always pass regardless of whether the underlying starvation bug
 //!   exists, providing zero regression protection.
 //! - `thread_churn_frees_everything` — requires 32+ real OS threads
-//!   exiting and having their tids recycled via `free_tid`'s
+//!   exiting and having their tids recycled after `deactivate_slots`'
 //!   exchange-based deactivation; no analogous event without real threads.
 //!
 //! The 3 tests that survive check properties that don't depend on multiple
@@ -37,7 +37,7 @@
 //!
 //! `TEST_LOCK` below is not a concurrency test fixture — it's the same
 //! cross-test serialization the original file used, kept for the same
-//! reason: kovan's reclamation state (epoch, slots, orphan list) is
+//! reason: kovan's reclamation state (epoch, slots, orphans) is
 //! process-global, and Rust's native test harness still runs the functions
 //! *in this file* as parallel OS threads by default, so one test's guard
 //! or retire activity can perturb another's exact drop counts even though
