@@ -596,24 +596,29 @@ impl<K, V> Table<K, V> {
 
     /// [`find`](Self::find) for the holder of the home's writer guard `held`, the one thread
     /// that unlinks or retires an entry of the home until it releases the guard: the entries
-    /// read need no protection of `guard`.
+    /// read need no protection of `guard`. The word found lives no longer than the borrow of
+    /// `held`, so its entry is read only while the guard is held.
     #[inline]
-    pub(super) fn find_held<'g, Q>(
+    pub(super) fn find_held<'h, Q>(
         &self,
-        held: &HomeGuard<'_>,
+        held: &'h HomeGuard<'_>,
         hash: u64,
         key: &Q,
-        guard: &'g kovan::Guard,
-    ) -> Option<(usize, Word<'g, K, V>)>
+        guard: &'h kovan::Guard,
+    ) -> Option<(usize, Word<'h, K, V>)>
     where
         K: Borrow<Q>,
         Q: Eq + ?Sized,
     {
-        // Acquire: pairs with the release that linked the entry, so its fields are visible.
-        // SAFETY: `held` is the guard of the home whose bits name every slot read, of this
-        // table, which is live while its guard is held (a resize takes every guard first).
-        self.scan(held.idx, held.hops(), hash, key, |bucket| unsafe {
-            bucket.load_held(Ordering::Acquire, guard)
+        debug_assert!(
+            core::ptr::eq(held.control, &self.get_bucket(held.idx).control),
+            "a home guard of another table"
+        );
+        self.scan(held.idx, held.hops(), hash, key, |bucket| {
+            // Acquire: pairs with the release that linked the entry, so its fields are visible.
+            // SAFETY: `held` is the guard of the home whose bits name every slot read, of this
+            // table, which is live while its guard is held (a resize takes every guard first).
+            unsafe { bucket.load_held(Ordering::Acquire, guard) }
         })
     }
 
