@@ -1,13 +1,13 @@
 //! Memory reclamation: Crystalline (WFR) traverse and free_list.
 //!
 //! - `traverse`: exchange-based list walk with INVPTR sentinel
-//! - `traverse_cache`: cached traverse with periodic free_list drain
 //! - `free_list`: walks batch chain and calls per-node destructors
 
 use crate::retired::{INVPTR, RetiredNode, is_rnode, rnode_unmask};
 use core::sync::atomic::Ordering;
 
-/// Maximum cached free-list entries before draining
+/// Traversals whose zero-count batches the free-list cache holds before it
+/// is freed (see `Handle::traverse_into_cache`).
 pub(crate) const MAX_CACHE: usize = 12;
 
 /// Trait for types that can be reclaimed by the wait-free memory
@@ -110,27 +110,6 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
             }
             *free_list = refs;
         }
-    }
-}
-
-/// Traverse with caching: accumulates free-list entries and periodically drains.
-///
-/// # Safety
-///
-/// Same as `traverse`.
-pub(crate) unsafe fn traverse_cache(
-    free_list: &mut *mut RetiredNode,
-    list_count: &mut usize,
-    next: *mut RetiredNode,
-) {
-    if !next.is_null() {
-        if *list_count >= MAX_CACHE {
-            unsafe { free_batch_list(*free_list) };
-            *free_list = core::ptr::null_mut();
-            *list_count = 0;
-        }
-        unsafe { traverse(free_list, next) };
-        *list_count += 1;
     }
 }
 

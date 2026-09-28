@@ -421,24 +421,7 @@ impl Handle {
         if list_lo != 0 {
             let first = slots.first[index].exchange_lo(0, Ordering::AcqRel);
             if first != 0 && first != INVPTR as u64 {
-                let mut free_list = self.free_list.get();
-                let mut list_count = self.list_count.get();
-                // Clear Cell before traverse_cache so re-entrant destructors
-                // (dropping Atoms -> flush()) see an empty list, not stale ptrs.
-                self.free_list.set(core::ptr::null_mut());
-                self.list_count.set(0);
-                let was_reclaiming = self.in_reclaim.get();
-                self.in_reclaim.set(true);
-                unsafe {
-                    crate::reclaim::traverse_cache(
-                        &mut free_list,
-                        &mut list_count,
-                        first as *mut RetiredNode,
-                    );
-                }
-                self.in_reclaim.set(was_reclaiming);
-                self.free_list.set(free_list);
-                self.list_count.set(list_count);
+                unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
             }
 
             curr_epoch = slot::epoch();
@@ -560,7 +543,7 @@ impl Handle {
         let global = self.global();
         let slots = global.thread_slots(tid);
         // Prevent re-entrant flush() from destructors called during
-        // traverse_cache -> free_batch_list in the slow path.
+        // traverse_into_cache -> free_batch_list in the slow path.
         // Save/restore (not set/clear): slow_path can itself run re-entrantly
         // under an outer reclamation operation (a destructor freed by
         // try_retire calling pin() on a guardless thread). Clearing the flag
@@ -623,17 +606,7 @@ impl Handle {
                     break; // goto done
                 }
                 if exchanged != INVPTR as u64 {
-                    let mut free_list = self.free_list.get();
-                    let mut list_count = self.list_count.get();
-                    unsafe {
-                        crate::reclaim::traverse_cache(
-                            &mut free_list,
-                            &mut list_count,
-                            exchanged as *mut RetiredNode,
-                        );
-                    }
-                    self.free_list.set(free_list);
-                    self.list_count.set(list_count);
+                    unsafe { self.traverse_into_cache(exchanged as *mut RetiredNode) };
                 }
                 let _ = slot::epoch(); // re-read after traverse
             }
@@ -698,28 +671,16 @@ impl Handle {
                     (*refs).refs_or_next.fetch_add(1, Ordering::AcqRel);
                 }
 
-                let mut free_list = self.free_list.get();
-                let mut list_count = self.list_count.get();
                 if first as u64 != INVPTR as u64 && !first.is_null() {
-                    unsafe {
-                        crate::reclaim::traverse_cache(&mut free_list, &mut list_count, first);
-                    }
+                    unsafe { self.traverse_into_cache(first) };
                 }
 
                 let rnode = rnode_mark(refs);
                 let old_first = slots.first[index].exchange_lo(rnode as u64, Ordering::AcqRel);
                 // If exchange succeeded and old was not INVPTR, traverse it
                 if old_first != INVPTR as u64 && old_first != 0 {
-                    unsafe {
-                        crate::reclaim::traverse_cache(
-                            &mut free_list,
-                            &mut list_count,
-                            old_first as *mut RetiredNode,
-                        );
-                    }
+                    unsafe { self.traverse_into_cache(old_first as *mut RetiredNode) };
                 }
-                self.free_list.set(free_list);
-                self.list_count.set(list_count);
 
                 global.dec_slow();
                 self.drain_free_list();
@@ -735,13 +696,7 @@ impl Handle {
 
         // Traverse removed list
         if !first.is_null() && first as u64 != INVPTR as u64 {
-            let mut free_list = self.free_list.get();
-            let mut list_count = self.list_count.get();
-            unsafe {
-                crate::reclaim::traverse_cache(&mut free_list, &mut list_count, first);
-            }
-            self.free_list.set(free_list);
-            self.list_count.set(list_count);
+            unsafe { self.traverse_into_cache(first) };
         }
 
         self.drain_free_list();
@@ -863,17 +818,9 @@ impl Handle {
                             {
                                 Ok(_) => {
                                     if old_lo != INVPTR as u64 && old_lo != 0 {
-                                        let mut free_list = self.free_list.get();
-                                        let mut list_count = self.list_count.get();
                                         unsafe {
-                                            crate::reclaim::traverse_cache(
-                                                &mut free_list,
-                                                &mut list_count,
-                                                old_lo as *mut RetiredNode,
-                                            );
-                                        }
-                                        self.free_list.set(free_list);
-                                        self.list_count.set(list_count);
+                                            self.traverse_into_cache(old_lo as *mut RetiredNode)
+                                        };
                                     }
                                     break;
                                 }
@@ -929,17 +876,7 @@ impl Handle {
                 let first = global.thread_slots(mytid).first[hr_num + 1]
                     .exchange_lo(INVPTR as u64, Ordering::AcqRel);
                 if first != INVPTR as u64 && first != 0 {
-                    let mut free_list = self.free_list.get();
-                    let mut list_count = self.list_count.get();
-                    unsafe {
-                        crate::reclaim::traverse_cache(
-                            &mut free_list,
-                            &mut list_count,
-                            first as *mut RetiredNode,
-                        );
-                    }
-                    self.free_list.set(free_list);
-                    self.list_count.set(list_count);
+                    unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
                 }
             }
         }
@@ -968,17 +905,7 @@ impl Handle {
             let first = global.thread_slots(mytid).first[hr_num]
                 .exchange_lo(INVPTR as u64, Ordering::AcqRel);
             if first != INVPTR as u64 && first != 0 {
-                let mut free_list = self.free_list.get();
-                let mut list_count = self.list_count.get();
-                unsafe {
-                    crate::reclaim::traverse_cache(
-                        &mut free_list,
-                        &mut list_count,
-                        first as *mut RetiredNode,
-                    );
-                }
-                self.free_list.set(free_list);
-                self.list_count.set(list_count);
+                unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
             }
         }
 
@@ -1047,7 +974,7 @@ impl Handle {
         if alloc_count.is_multiple_of(EPOCH_FREQ) {
             let tid = self.tid();
             // Set in_reclaim: help_read -> help_thread -> do_update ->
-            // traverse_cache -> free_batch_list can call destructors which
+            // traverse_into_cache -> free_batch_list can call destructors which
             // drop Atoms triggering flush(). The flag prevents re-entrant
             // flush from reading stale free_list Cell state.
             let was_reclaiming = self.in_reclaim.get();
@@ -1412,6 +1339,37 @@ impl Handle {
         true
     }
 
+    /// Traverse a captured slot list into this thread's free-list cache
+    /// (the one traversal every transition, helper and exit path uses).
+    ///
+    /// The cache holds batches whose count reached zero; once it holds
+    /// `MAX_CACHE` traversals' worth it is freed before the next traversal.
+    /// Destructors run in that free and may re-enter this thread's
+    /// reclamation (pin, retire and through it help another thread,
+    /// traverse), so the cache leaves its cell before any of them runs, and
+    /// the traversal, which runs no destructor, pushes onto what the cell
+    /// holds when it runs. A re-entrant traversal's entries are kept, never
+    /// overwritten by a copy taken before it ran, and no batch is freed
+    /// twice from a copy of the cell.
+    ///
+    /// # Safety
+    ///
+    /// `first` must be a slot list head captured by exchange (not null, not
+    /// INVPTR), as `reclaim::traverse` requires.
+    unsafe fn traverse_into_cache(&self, first: *mut RetiredNode) {
+        if self.list_count.get() >= crate::reclaim::MAX_CACHE {
+            let full = self.free_list.replace(core::ptr::null_mut());
+            self.list_count.set(0);
+            let was_reclaiming = self.in_reclaim.replace(true);
+            unsafe { crate::reclaim::free_batch_list(full) };
+            self.in_reclaim.set(was_reclaiming);
+        }
+        let mut free_list = self.free_list.get();
+        unsafe { crate::reclaim::traverse(&mut free_list, first) };
+        self.free_list.set(free_list);
+        self.list_count.set(self.list_count.get() + 1);
+    }
+
     /// Drain cached free list.
     ///
     /// Clears the Cell **before** calling `free_batch_list` so that any
@@ -1492,19 +1450,7 @@ impl Handle {
             for i in 0..hr_num {
                 let first = global.thread_slots(tid).first[i].exchange_lo(0, Ordering::AcqRel);
                 if first != 0 && first != INVPTR as u64 {
-                    let mut free_list = self.free_list.get();
-                    let mut list_count = self.list_count.get();
-                    self.free_list.set(core::ptr::null_mut());
-                    self.list_count.set(0);
-                    unsafe {
-                        crate::reclaim::traverse_cache(
-                            &mut free_list,
-                            &mut list_count,
-                            first as *mut RetiredNode,
-                        );
-                    }
-                    self.free_list.set(free_list);
-                    self.list_count.set(list_count);
+                    unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
                 }
             }
         }
@@ -1606,22 +1552,7 @@ impl Handle {
             let captured = global.deactivate_slots(tid);
             for first in captured {
                 if first != 0 {
-                    // Take ownership of the Cell's free_list and clear it
-                    // before traverse_cache, so re-entrant destructors see
-                    // an empty list instead of stale pointers.
-                    let mut free_list = self.free_list.get();
-                    let mut list_count = self.list_count.get();
-                    self.free_list.set(core::ptr::null_mut());
-                    self.list_count.set(0);
-                    unsafe {
-                        crate::reclaim::traverse_cache(
-                            &mut free_list,
-                            &mut list_count,
-                            first as *mut RetiredNode,
-                        );
-                    }
-                    self.free_list.set(free_list);
-                    self.list_count.set(list_count);
+                    unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
                 }
             }
 

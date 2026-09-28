@@ -219,3 +219,70 @@ fn exit_keeps_its_tid_until_its_destructors_ran() {
         "destructors ran after the exiting thread released its tid"
     );
 }
+
+/// The slow path of a transition frees the full free-list cache, and a
+/// destructor it runs retires a full epoch's worth, which helps the pending
+/// slow-path threads, this one among them: the helper traverses this
+/// thread's list into the cache. That traversal must push onto the cache
+/// the outer free already took out of its cell, never onto a copy of it:
+/// freeing the copy once more would free every batch in it twice.
+#[test]
+fn slow_path_free_survives_helping_itself() {
+    /// Its destructor retires a full epoch's worth of counted values.
+    #[repr(C)]
+    struct RetiresAnEpoch {
+        retired: RetiredNode,
+        live: Arc<AtomicUsize>,
+    }
+    impl Drop for RetiresAnEpoch {
+        fn drop(&mut self) {
+            for _ in 0..EPOCH_FREQ {
+                Counted::retire_one(&self.live);
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let l = Arc::clone(&live);
+    thread::spawn(move || {
+        drop(pin());
+        // One batch, the trigger in it, into this thread's slot.
+        {
+            let _guard = pin();
+            l.fetch_add(1, Ordering::SeqCst);
+            let node = Box::into_raw(Box::new(RetiresAnEpoch {
+                retired: RetiredNode::new(),
+                live: Arc::clone(&l),
+            }));
+            unsafe { retire(node) };
+            for _ in 1..RETIRE_FREQ {
+                Counted::retire_one(&l);
+            }
+        }
+        // A transition moves it to the free-list cache.
+        crate::slot::advance_epoch();
+        drop(pin());
+        // The next traversal frees the cache first.
+        with_handle(|h| h.list_count.set(MAX_CACHE));
+        // One more batch into the slot. Its last retire advances the
+        // epoch, so a transition is due.
+        {
+            let _guard = pin();
+            for _ in 0..RETIRE_FREQ {
+                Counted::retire_one(&l);
+            }
+        }
+        // The transition, taken through its slow path (as when the epoch
+        // does not settle within the fast attempts), inside a pin.
+        with_handle(|h| {
+            h.pin_count.set(1);
+            h.slow_path(0, h.tid());
+            h.pin_count.set(0);
+        });
+    })
+    .join()
+    .unwrap();
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}
