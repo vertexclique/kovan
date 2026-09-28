@@ -322,12 +322,13 @@ fn exit_keeps_its_tid_until_its_destructors_ran() {
     );
 }
 
-/// The slow path of a transition frees the full free-list cache, and a
-/// destructor it runs retires a full epoch's worth, which helps the pending
-/// slow-path threads, this one among them: the helper traverses this
-/// thread's list into the cache. That traversal must push onto the cache
-/// the outer free already took out of its cell, never onto a copy of it:
-/// freeing the copy once more would free every batch in it twice.
+/// The slow path of a transition frees the full free-list cache once its
+/// slot is live again (never before: see `slow_path`), and a destructor it
+/// runs retires a full epoch's worth, which submits two batches and helps
+/// the pending slow-path threads before it advances the epoch. Traversals
+/// that re-entrant work makes push onto the cache the free already took out
+/// of its cell, never onto a copy of it: freeing the copy once more would
+/// free every batch in it twice. Everything is freed once.
 #[test]
 fn slow_path_free_survives_helping_itself() {
     /// Its destructor retires a full epoch's worth of counted values.
@@ -799,4 +800,127 @@ fn exit_takes_its_slot_list_a_fixed_number_of_times() {
     })
     .join()
     .unwrap();
+}
+
+/// A pin's slow path runs no destructor before it republishes its slot. A
+/// helper that completed the pending thread's request holds the slot in
+/// its hand-over (the epoch seqno odd: new batches skip the slot) and is
+/// held there; the pending thread, let go, finishes its slow path without
+/// it, and the destructors of what it frees (its free-list cache is full,
+/// and its loop traverses a list) run only once its slot is live again.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn slow_path_frees_nothing_before_it_republishes() {
+    /// Records whether its thread's slot was closed to new batches (an odd
+    /// epoch or list seqno) when it ran: a load it made then would be
+    /// unprotected.
+    #[repr(C)]
+    struct ChecksOpen {
+        retired: RetiredNode,
+        tid: usize,
+        closed: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for ChecksOpen {
+        fn drop(&mut self) {
+            let slots = crate::slot::global().thread_slots(self.tid);
+            if (slots.epoch[0].load_hi() | slots.first[0].load_hi()) & 1 != 0 {
+                self.closed.fetch_add(1, Ordering::SeqCst);
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let _l = lock();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let live = Arc::new(AtomicUsize::new(0));
+    let (pending, handing_over) = (Hold::new(), Hold::new());
+    let pending_tid = Arc::new(AtomicUsize::new(usize::MAX));
+    let finished = Arc::new(AtomicBool::new(false));
+
+    let helpee = {
+        let (closed, dropped, live) =
+            (Arc::clone(&closed), Arc::clone(&dropped), Arc::clone(&live));
+        let (pending, pending_tid, finished) = (
+            pending.clone(),
+            Arc::clone(&pending_tid),
+            Arc::clone(&finished),
+        );
+        thread::spawn(move || {
+            let tid = own_tid();
+            // One batch of checkers into this thread's slot (the only
+            // active one), moved to the free-list cache by a transition.
+            {
+                let _guard = pin();
+                for _ in 0..RETIRE_FREQ {
+                    let node = Box::into_raw(Box::new(ChecksOpen {
+                        retired: RetiredNode::new(),
+                        tid,
+                        closed: Arc::clone(&closed),
+                        dropped: Arc::clone(&dropped),
+                    }));
+                    unsafe { retire(node) };
+                }
+            }
+            crate::slot::advance_epoch();
+            drop(pin());
+            // The next traversal frees the cache first.
+            with_handle(|h| h.list_count.set(MAX_CACHE));
+            // One more batch into the slot, for the slow path's loop to
+            // traverse; no epoch advance on the way.
+            with_handle(|h| h.alloc_counter.set(1));
+            {
+                let _guard = pin();
+                for _ in 0..RETIRE_FREQ {
+                    Counted::retire_one(&live);
+                }
+                // Publish the current epoch, as a protected load does, so
+                // the helper's empty epoch transition closes the slot.
+                let shared = crate::Atomic::<u64>::null();
+                let _ = shared.load(Ordering::Acquire, &_guard);
+            }
+            pending_tid.store(tid, Ordering::SeqCst);
+            pending.arm(Step::SlowPending, tid);
+            // The transition, taken through its slow path, inside a pin.
+            with_handle(|h| {
+                h.pin_count.set(1);
+                h.slow_path(0, tid);
+                h.pin_count.set(0);
+            });
+            finished.store(true, Ordering::SeqCst);
+        })
+    };
+    pending.reached("the pending thread");
+    let pending_tid = pending_tid.load(Ordering::SeqCst);
+
+    let helper = {
+        let handing_over = handing_over.clone();
+        thread::spawn(move || {
+            let tid = own_tid();
+            handing_over.arm(Step::HelpHandOver, tid);
+            with_handle(|h| h.help_thread(pending_tid, 0, tid));
+        })
+    };
+    handing_over.reached("the helper");
+    let seqno = crate::slot::global().thread_slots(pending_tid).epoch[0].load_hi();
+    assert_eq!(seqno & 1, 1, "the helper did not close the slot");
+
+    // The pending thread completes while the helper stays held.
+    pending.release();
+    assert!(
+        eventually(|| finished.load(Ordering::SeqCst)),
+        "the slow path did not complete while its helper was held"
+    );
+    handing_over.release();
+    join_within(helper, "the helper");
+    join_within(helpee, "the pending thread");
+
+    assert_eq!(dropped.load(Ordering::SeqCst), RETIRE_FREQ);
+    assert_eq!(
+        closed.load(Ordering::SeqCst),
+        0,
+        "destructors ran while their thread's slot was closed to new batches"
+    );
+    assert_eq!(live.load(Ordering::SeqCst), 0);
 }

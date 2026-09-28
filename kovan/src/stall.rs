@@ -22,6 +22,12 @@ pub(crate) enum Step {
     OrphanPark,
     /// A flushing thread has taken a chain of orphans and not yet merged it.
     OrphanAdopt,
+    /// A pin's slow path has published its help request (result pending)
+    /// and not yet entered its loop.
+    SlowPending,
+    /// A helper has set a pending thread's result and made its empty epoch
+    /// transition, and not yet taken over its slot list.
+    HelpHandOver,
 }
 
 type Hook = Box<dyn FnMut() -> bool + Send>;

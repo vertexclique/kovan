@@ -547,6 +547,14 @@ impl Handle {
     /// Slow path for pin when epoch keeps changing.
     /// Sets up helping state so other threads can assist.
     ///
+    /// No destructor runs before the slot is republished at the end: every
+    /// traversal here only moves zero-count batches onto the free-list
+    /// cache (`traverse_onto_cache`), and the drain after the
+    /// republication frees them. While a helper holds the slot in its
+    /// hand-over (the epoch or list seqno odd), new batches skip the slot,
+    /// so a load made by a destructor run then would go unprotected; and
+    /// such a load could raise the slot's epoch under the transition.
+    ///
     /// # Wait-free bound: O(T) where T = number of active threads
     ///
     /// The main loop (lines ~294-344) exits when either:
@@ -563,7 +571,7 @@ impl Handle {
         let global = self.global();
         let slots = global.thread_slots(tid);
         // Prevent re-entrant flush() from destructors called during
-        // traverse_into_cache -> free_batch_list in the slow path.
+        // drain_free_list -> free_batch_list in the slow path.
         // Save/restore (not set/clear): slow_path can itself run re-entrantly
         // under an outer reclamation operation (a destructor freed by
         // try_retire calling pin() on a guardless thread). Clearing the flag
@@ -587,6 +595,8 @@ impl Handle {
         slots.state[index]
             .result
             .store(INVPTR as u64, seqno, Ordering::Release);
+        #[cfg(test)]
+        crate::stall::at(crate::stall::Step::SlowPending, tid);
 
         // Wait for stable epoch (other threads to complete their updates)
         #[allow(unused_assignments)]
@@ -611,6 +621,9 @@ impl Handle {
                     // section's pointer loads (Dekker pairing, see
                     // protect_load).
                     fence(Ordering::SeqCst);
+                    // The slot is live again: free what the loop's
+                    // traversals moved to the cache.
+                    self.drain_free_list();
                     self.in_reclaim.set(was_reclaiming);
                     return;
                 }
@@ -626,9 +639,8 @@ impl Handle {
                     break; // goto done
                 }
                 if exchanged != INVPTR as u64 {
-                    unsafe { self.traverse_into_cache(exchanged as *mut RetiredNode) };
+                    unsafe { self.traverse_onto_cache(exchanged as *mut RetiredNode) };
                 }
-                let _ = slot::epoch(); // re-read after traverse
             }
 
             first = core::ptr::null_mut();
@@ -692,14 +704,14 @@ impl Handle {
                 }
 
                 if first as u64 != INVPTR as u64 && !first.is_null() {
-                    unsafe { self.traverse_into_cache(first) };
+                    unsafe { self.traverse_onto_cache(first) };
                 }
 
                 let rnode = rnode_mark(refs);
                 let old_first = slots.first[index].exchange_lo(rnode as u64, Ordering::AcqRel);
                 // If exchange succeeded and old was not INVPTR, traverse it
                 if old_first != INVPTR as u64 && old_first != 0 {
-                    unsafe { self.traverse_into_cache(old_first as *mut RetiredNode) };
+                    unsafe { self.traverse_onto_cache(old_first as *mut RetiredNode) };
                 }
 
                 global.dec_slow();
@@ -716,7 +728,7 @@ impl Handle {
 
         // Traverse removed list
         if !first.is_null() && first as u64 != INVPTR as u64 {
-            unsafe { self.traverse_into_cache(first) };
+            unsafe { self.traverse_onto_cache(first) };
         }
 
         self.drain_free_list();
@@ -828,6 +840,8 @@ impl Handle {
                             prev_epoch,
                             seqno + 1,
                         );
+                        #[cfg(test)]
+                        crate::stall::at(crate::stall::Step::HelpHandOver, mytid);
 
                         // Clean up list
                         let (mut old_lo, mut old_hi) =
@@ -1412,6 +1426,18 @@ impl Handle {
             unsafe { crate::reclaim::free_batch_list(full) };
             self.in_reclaim.set(was_reclaiming);
         }
+        unsafe { self.traverse_onto_cache(first) };
+    }
+
+    /// Traverse a captured slot list onto this thread's free-list cache and
+    /// free nothing: no destructor runs. The one step every traversal takes
+    /// [Traverse]: `reclaim::traverse` over the captured list, whose length
+    /// was fixed by the exchange that captured it.
+    ///
+    /// # Safety
+    ///
+    /// As for `traverse_into_cache`.
+    unsafe fn traverse_onto_cache(&self, first: *mut RetiredNode) {
         let mut free_list = self.free_list.get();
         unsafe { crate::reclaim::traverse(&mut free_list, first) };
         self.free_list.set(free_list);
