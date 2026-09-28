@@ -325,6 +325,8 @@ impl Handle {
             self.cached_epoch.set(curr_epoch);
 
             let ptr = data.load(order);
+            #[cfg(test)]
+            crate::stall::at(crate::stall::Step::LoadAttempt, tid);
             let e = slot::epoch();
             if e == curr_epoch {
                 return ptr;
@@ -531,6 +533,8 @@ impl Handle {
         let mut attempts = 16usize;
         loop {
             let prev_epoch = self.do_update(curr_epoch, index, tid);
+            #[cfg(test)]
+            crate::stall::at(crate::stall::Step::TransitionAttempt, tid);
             attempts -= 1;
             if attempts == 0 {
                 break;
@@ -603,6 +607,8 @@ impl Handle {
         let mut first: *mut RetiredNode = core::ptr::null_mut();
 
         loop {
+            #[cfg(test)]
+            crate::stall::at(crate::stall::Step::SlowPass, tid);
             let curr_epoch = slot::epoch();
             if curr_epoch == prev_epoch {
                 // Try to self-complete: CAS result from (INVPTR, seqno) to (0, 0)
@@ -1355,6 +1361,8 @@ impl Handle {
 
             // Exchange our node in as the new list head
             let prev = slot_first_ref.exchange_lo(curr as u64, Ordering::AcqRel);
+            #[cfg(test)]
+            crate::stall::at(crate::stall::Step::InsertExchanged, self.tid());
 
             if prev != 0 {
                 if prev == INVPTR as u64 {
@@ -1456,6 +1464,8 @@ impl Handle {
     ///
     /// As for `traverse_into_cache`.
     unsafe fn traverse_onto_cache(&self, first: *mut RetiredNode) {
+        #[cfg(test)]
+        crate::stall::at(crate::stall::Step::Traverse, self.tid());
         let mut free_list = self.free_list.get();
         unsafe { crate::reclaim::traverse(&mut free_list, first) };
         self.free_list.set(free_list);

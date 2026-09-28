@@ -32,6 +32,19 @@ pub(crate) enum Step {
     /// transition has read the slot and not yet tried to empty it (one
     /// pass of the take's loop).
     HandOverTake,
+    /// A protected load's convergence pass has loaded the pointer and not
+    /// yet read the epoch again.
+    LoadAttempt,
+    /// An outermost pin's transition has made one attempt (traversed and
+    /// published) and not yet read the epoch again.
+    TransitionAttempt,
+    /// A pin's slow path is about to make one pass of its loop.
+    SlowPass,
+    /// A retire's insert has exchanged its node into a slot and not yet
+    /// linked the list it displaced behind it.
+    InsertExchanged,
+    /// A thread holds a slot list it captured and has not yet walked it.
+    Traverse,
 }
 
 type Hook = Box<dyn FnMut() -> bool + Send>;
@@ -50,6 +63,15 @@ fn hooks() -> MutexGuard<'static, Vec<(Step, usize, Hook)>> {
 pub(crate) fn arm(step: Step, tid: usize, hook: impl FnMut() -> bool + Send + 'static) {
     hooks().push((step, tid, Box::new(hook)));
     ARMED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Drop the hooks armed for the thread holding `tid` at `step` that have
+/// not ended themselves.
+pub(crate) fn disarm(step: Step, tid: usize) {
+    let mut hooks = hooks();
+    let before = hooks.len();
+    hooks.retain(|(s, t, _)| !(*s == step && *t == tid));
+    ARMED.fetch_sub(before - hooks.len(), Ordering::SeqCst);
 }
 
 /// The thread holding `tid` reached `step`: run the hook armed for it, if
