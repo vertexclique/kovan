@@ -286,3 +286,90 @@ fn slow_path_free_survives_helping_itself() {
     .unwrap();
     assert_eq!(live.load(Ordering::SeqCst), 0);
 }
+
+/// A retire whose count reaches both the epoch-advance and the batch
+/// boundary helps pending slow-path threads first, and the help may free
+/// cached batches whose destructors retire in turn, a full batch among
+/// them. The batch this retire then submits must be the one in the cells
+/// at that point, never one sized from a count read before the help (the
+/// nested retires may have submitted and emptied it).
+#[test]
+fn retire_submits_the_batch_left_after_helping() {
+    /// Its destructor retires one full batch of counted values.
+    #[repr(C)]
+    struct RetiresABatch {
+        retired: RetiredNode,
+        live: Arc<AtomicUsize>,
+    }
+    impl Drop for RetiresABatch {
+        fn drop(&mut self) {
+            for _ in 0..RETIRE_FREQ {
+                Counted::retire_one(&self.live);
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let l = Arc::clone(&live);
+    thread::spawn(move || {
+        let global = crate::slot::global();
+        drop(pin());
+        // One batch, the trigger in it, into this thread's slot, then into
+        // the free-list cache through a transition.
+        {
+            let _guard = pin();
+            l.fetch_add(1, Ordering::SeqCst);
+            let node = Box::into_raw(Box::new(RetiresABatch {
+                retired: RetiredNode::new(),
+                live: Arc::clone(&l),
+            }));
+            unsafe { retire(node) };
+            for _ in 1..RETIRE_FREQ {
+                Counted::retire_one(&l);
+            }
+        }
+        crate::slot::advance_epoch();
+        drop(pin());
+        // The next traversal frees the cache first.
+        with_handle(|h| h.list_count.set(MAX_CACHE));
+
+        // Another thread pending in the slow path: an active slot whose
+        // help request is open.
+        let pending = global.alloc_tid();
+        let slots = global.thread_slots(pending);
+        slots.epoch[0].store_lo(crate::slot::epoch(), Ordering::SeqCst);
+        slots.first[0].store_lo(0, Ordering::SeqCst);
+        slots.state[0].pointer.store(0, Ordering::SeqCst);
+        slots.state[0].parent.store(0, Ordering::SeqCst);
+        slots.state[0].epoch.store(0, Ordering::SeqCst);
+        let seqno = slots.epoch[0].load_hi();
+        slots.state[0]
+            .result
+            .store(super::INVPTR as u64, seqno, Ordering::SeqCst);
+        global.inc_slow();
+
+        // Three batches: the first two leave nodes in the pending slot; the
+        // third one's last retire is both an epoch-advance and a batch
+        // boundary, and its help traverses the pending slot's list, which
+        // frees the cache and so runs the trigger.
+        {
+            let _guard = pin();
+            for _ in 0..3 * RETIRE_FREQ {
+                Counted::retire_one(&l);
+            }
+        }
+
+        global.dec_slow();
+        for first in global.deactivate_slots(pending) {
+            if first != 0 {
+                with_handle(|h| unsafe { h.traverse_into_cache(first as *mut RetiredNode) });
+            }
+        }
+        global.release_tid(pending);
+    })
+    .join()
+    .unwrap();
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}

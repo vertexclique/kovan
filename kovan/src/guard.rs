@@ -968,22 +968,6 @@ impl Handle {
         let count = self.batch_count.get() + 1;
         self.batch_count.set(count);
 
-        // Advance epoch periodically
-        let alloc_count = self.alloc_counter.get() + 1;
-        self.alloc_counter.set(alloc_count);
-        if alloc_count.is_multiple_of(EPOCH_FREQ) {
-            let tid = self.tid();
-            // Set in_reclaim: help_read -> help_thread -> do_update ->
-            // traverse_into_cache -> free_batch_list can call destructors which
-            // drop Atoms triggering flush(). The flag prevents re-entrant
-            // flush from reading stale free_list Cell state.
-            let was_reclaiming = self.in_reclaim.get();
-            self.in_reclaim.set(true);
-            self.help_read(tid);
-            self.in_reclaim.set(was_reclaiming);
-            slot::advance_epoch();
-        }
-
         if count.is_multiple_of(RETIRE_FREQ) {
             // Set in_reclaim: try_retire -> free_batch_list can call
             // destructors which drop Atoms triggering flush().
@@ -1022,6 +1006,28 @@ impl Handle {
                 self.merge_batch(first, last);
             }
             self.in_reclaim.set(was_reclaiming);
+        }
+
+        // Advance epoch periodically, after the batch step above, not
+        // before it: help_read can free cached batches whose destructors
+        // retire on this thread, and nested retires may submit and empty
+        // the batch. The batch step reads `count` before anything re-enters
+        // and the batch cells right before it detaches them; run after the
+        // help, it would size the batch from a stale `count` and could
+        // finalize an emptied one.
+        let alloc_count = self.alloc_counter.get() + 1;
+        self.alloc_counter.set(alloc_count);
+        if alloc_count.is_multiple_of(EPOCH_FREQ) {
+            let tid = self.tid();
+            // Set in_reclaim: help_read -> help_thread -> do_update ->
+            // traverse_into_cache -> free_batch_list can call destructors which
+            // drop Atoms triggering flush(). The flag prevents re-entrant
+            // flush from reading stale free_list Cell state.
+            let was_reclaiming = self.in_reclaim.get();
+            self.in_reclaim.set(true);
+            self.help_read(tid);
+            self.in_reclaim.set(was_reclaiming);
+            slot::advance_epoch();
         }
     }
 
