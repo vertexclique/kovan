@@ -123,15 +123,34 @@ struct Handle {
     /// 128-bit WordPair on every load. Updated on the rare (slow) path only
     /// (when global epoch has advanced since last check).
     cached_epoch: Cell<u64>,
+    /// Epoch this thread's reservation slot published at its last
+    /// transition (`do_update` or the slow path on slot 0), which traverses
+    /// the slot list and then publishes. `protect_load` may raise the
+    /// published epoch (and `cached_epoch`) inside a critical section
+    /// without traversing and leaves this value alone, so the outermost
+    /// `pin()` compares the global epoch with it, never with the published
+    /// epoch: a pin that took a raised epoch for "unchanged" would leave
+    /// the list untraversed.
+    ///
+    /// Invariant: `drained_epoch <= cached_epoch`, and after a raise since
+    /// the last transition `drained_epoch` is below the global epoch (the
+    /// raise publishes a global epoch read that differed from
+    /// `cached_epoch`, and the global epoch only grows). 0 means no
+    /// transition yet: the global epoch starts at 1, so the first `pin()`
+    /// transitions.
+    drained_epoch: Cell<u64>,
     /// Thread-cached global epoch for stamping `birth_epoch` on allocation,
     /// avoiding a contended `Acquire` load of the global epoch counter on
-    /// every `RetiredNode::new`. Refreshed in `pin()` (which every
-    /// `Atom::new`/`store`/`swap` performs right after boxing the node, and
-    /// which read/CAS workloads perform constantly), seeded lazily on first
-    /// use. A stale value is always *low* — the global epoch is monotone —
-    /// which lowers a batch's `min_epoch`, making more slots eligible in
-    /// `try_retire` (strictly more conservative deferral). It can never
-    /// exceed the true epoch, so it can never cause premature reclamation.
+    /// every `RetiredNode::new`. Refreshed at every outermost `pin()`
+    /// (which every `Atom::new`/`store`/`swap` performs right after boxing
+    /// the node, and which read/CAS workloads perform constantly): a pin
+    /// either finds the global epoch equal to `drained_epoch`, which the
+    /// last slot transition also stored here, or transitions and stores the
+    /// epoch it publishes. Seeded lazily on first use. A stale value is
+    /// always *low*, the global epoch being monotone, which lowers a
+    /// batch's `min_epoch`, making more slots eligible in `try_retire`
+    /// (strictly more conservative deferral). It can never exceed the true
+    /// epoch, so it can never cause premature reclamation.
     cached_birth_epoch: Cell<u64>,
     /// Re-entrancy guard: set while executing `free_batch_list` or other
     /// reclamation operations that call type-erased destructors. When set,
@@ -158,6 +177,7 @@ impl Handle {
             free_list: Cell::new(core::ptr::null_mut()),
             list_count: Cell::new(0),
             cached_epoch: Cell::new(0),
+            drained_epoch: Cell::new(0),
             cached_birth_epoch: Cell::new(0),
             in_reclaim: Cell::new(false),
         }
@@ -226,7 +246,8 @@ impl Handle {
     /// into this thread's slot and the batch is deferred until the slot's
     /// next traversal (which only happens at `pin()` boundaries — protection
     /// is guard-wide, so this loop never traverses, it only *raises* the
-    /// published epoch).
+    /// published epoch; the raise leaves `drained_epoch` behind the global
+    /// epoch, so the next outermost `pin()` traverses).
     ///
     /// The read order is critical: data.load() MUST come before the epoch
     /// load. This guarantees (via the Release-Acquire chain through the
@@ -306,6 +327,9 @@ impl Handle {
             // Raising the published epoch never releases protection of
             // pointers loaded earlier in this critical section (their
             // batches stay parked in the slot list until the next pin()).
+            // `drained_epoch` stays at the last transition's epoch, below
+            // `curr_epoch`, so that next outermost pin() traverses the list
+            // even if the global epoch does not move again.
             slots.epoch[0].store_lo(curr_epoch, Ordering::SeqCst);
             fence(Ordering::SeqCst);
             self.cached_epoch.set(curr_epoch);
@@ -403,9 +427,18 @@ impl Handle {
         // for another tid when helping) must not pollute the cache that
         // protect_load checks against epoch[0].
         if index == 0 && tid == self.tid() {
-            self.cached_epoch.set(curr_epoch);
+            self.mirror_transition(curr_epoch);
         }
         curr_epoch
+    }
+
+    /// Record a transition of this thread's own reservation slot (slot 0)
+    /// that traversed the slot list and then published `epoch`.
+    #[inline]
+    fn mirror_transition(&self, epoch: u64) {
+        self.cached_epoch.set(epoch);
+        self.drained_epoch.set(epoch);
+        self.cached_birth_epoch.set(epoch);
     }
 
     /// Pin: enter a critical section (matches ASMR reserve_slot).
@@ -414,6 +447,20 @@ impl Handle {
     /// (epoch check + do_update). Inner calls just increment the pin count
     /// and return a Guard. Guard::drop decrements the count, so the epoch
     /// slot is only eligible for transition once all Guards are dropped.
+    ///
+    /// The outermost pin transitions (traverses the slot list, then
+    /// publishes the current epoch) unless the global epoch equals
+    /// `drained_epoch`, the epoch of the last transition. Comparing with the
+    /// published epoch instead would miss every critical section whose
+    /// protected load raised the reservation: the next pin would see the
+    /// raised epoch as current and skip, and a thread whose retire advances
+    /// the epoch with a protected load after it in the same section would
+    /// never traverse its list, so nothing it retired would be freed before
+    /// `flush()` or thread exit. Skipping is safe: `global ==
+    /// drained_epoch` means no raise happened since the transition (see
+    /// `drained_epoch`), so the slot is active and publishes
+    /// `drained_epoch == cached_epoch`, and that publication was followed by
+    /// its `fence(SeqCst)`.
     ///
     /// # Wait-free bound: O(T) where T = number of active threads
     ///
@@ -427,50 +474,41 @@ impl Handle {
         let count = self.pin_count.get();
         self.pin_count.set(count + 1);
 
-        if count > 0 {
-            // Nested pin — skip epoch check entirely.
-            // The outermost guard's epoch is still protecting us.
-            return Guard {
-                _private: (),
-                marker,
-            };
-        }
-
-        // Outermost pin — original logic unchanged
-        let tid = self.tid();
-        let global = self.global();
-        let index = 0; // kovan uses only slot index 0
-
-        let mut prev_epoch = global.thread_slots(tid).epoch[index].load_lo();
-        let mut attempts = 16usize;
-
-        loop {
-            let curr_epoch = global.get_epoch();
-            // Refresh the birth-epoch cache for free: we already hold a
-            // fresh global epoch here, and every Atom::new/store/swap pins
-            // immediately after boxing its node, so the next allocation's
-            // birth stamp reads this without touching the global counter.
-            self.cached_birth_epoch.set(curr_epoch);
-            if curr_epoch == prev_epoch {
-                return Guard {
-                    _private: (),
-                    marker,
-                };
-            }
-            prev_epoch = self.do_update(curr_epoch, index, tid);
-            attempts -= 1;
-            if attempts == 0 {
-                // Fall through to slow path
-                break;
+        // Nested pin: the outermost guard's reservation protects us. The
+        // outermost pin skips too when no transition is due.
+        if count == 0 {
+            let curr_epoch = self.global().get_epoch();
+            if curr_epoch != self.drained_epoch.get() {
+                self.transition(curr_epoch);
             }
         }
-
-        // Slow path: set up helping state and wait for stable epoch
-        self.slow_path(index, tid);
         Guard {
             _private: (),
             marker,
         }
+    }
+
+    /// Transition this thread's reservation slot at an outermost `pin()`:
+    /// traverse the slot list and publish the current epoch, retrying until
+    /// the epoch is stable (at most 16 times), then the helping slow path.
+    #[cold]
+    fn transition(&self, mut curr_epoch: u64) {
+        let tid = self.tid();
+        let index = 0; // kovan uses only slot index 0
+        let mut attempts = 16usize;
+        loop {
+            let prev_epoch = self.do_update(curr_epoch, index, tid);
+            attempts -= 1;
+            if attempts == 0 {
+                break;
+            }
+            curr_epoch = self.global().get_epoch();
+            if curr_epoch == prev_epoch {
+                return;
+            }
+        }
+        // Slow path: set up helping state and wait for stable epoch
+        self.slow_path(index, tid);
     }
 
     /// Slow path for pin when epoch keeps changing.
@@ -535,7 +573,7 @@ impl Handle {
                     global.dec_slow();
                     // Slot epoch ends at prev_epoch (== curr, stable);
                     // mirror it so protect_load's fast path is exact.
-                    self.cached_epoch.set(prev_epoch);
+                    self.mirror_transition(prev_epoch);
                     // Order the epoch publication before the critical
                     // section's pointer loads (Dekker pairing, see
                     // protect_load).
@@ -613,7 +651,7 @@ impl Handle {
         slots.epoch[index].store_lo(result_epoch, Ordering::Release);
         // Mirror the published epoch and order it before this critical
         // section's pointer loads (Dekker pairing, see protect_load).
-        self.cached_epoch.set(result_epoch);
+        self.mirror_transition(result_epoch);
         fence(Ordering::SeqCst);
 
         // Set up first for the new seqno
@@ -1531,8 +1569,13 @@ impl Handle {
             self.pin_count.set(saved_pin);
             self.in_reclaim.set(false);
 
-            // Mark TID as unused so cleanup is idempotent
+            // Mark TID as unused so cleanup is idempotent. The slot is gone:
+            // a later pin on this thread (a TLS destructor running after
+            // this one) must allocate a tid and transition before any load
+            // is protected, so no cached epoch may claim a publication.
             self.tid.set(None);
+            self.cached_epoch.set(0);
+            self.drained_epoch.set(0);
         }
     }
 }
