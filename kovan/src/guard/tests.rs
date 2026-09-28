@@ -629,3 +629,65 @@ fn orphans_and_ids_change_hands_while_threads_stall() {
         "the drain",
     );
 }
+
+/// A destructor that a thread's exit runs is a critical section and a
+/// retirer like any other, also where the exit runs inside the handle's own
+/// thread-local destructor: a load it makes after the epoch moved raises
+/// the thread's reservation (it is protected), and a value it retires is
+/// freed, never leaked.
+#[test]
+fn exit_destructors_reach_the_handle() {
+    /// Its destructor loads under a guard after an epoch advance, records
+    /// whether the load raised its thread's reservation, then retires one
+    /// counted value.
+    #[repr(C)]
+    struct LoadsAndRetires {
+        retired: RetiredNode,
+        tid: usize,
+        shared: Arc<crate::Atomic<u64>>,
+        raised: Arc<AtomicBool>,
+        live: Arc<AtomicUsize>,
+    }
+    impl Drop for LoadsAndRetires {
+        fn drop(&mut self) {
+            crate::slot::advance_epoch();
+            let guard = pin();
+            let _ = self.shared.load(Ordering::Acquire, &guard);
+            let published = crate::slot::global().thread_slots(self.tid).epoch[0].load_lo();
+            self.raised
+                .store(published == crate::slot::epoch(), Ordering::SeqCst);
+            drop(guard);
+            Counted::retire_one(&self.live);
+        }
+    }
+
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let raised = Arc::new(AtomicBool::new(false));
+    let shared = Arc::new(crate::Atomic::<u64>::null());
+    let (l, r) = (Arc::clone(&live), Arc::clone(&raised));
+    thread::spawn(move || {
+        let tid = own_tid();
+        // A lone batch, left unsubmitted: the exit submits it, no other
+        // slot is active, so it is freed at once, inside the exit.
+        let node = Box::into_raw(Box::new(LoadsAndRetires {
+            retired: RetiredNode::new(),
+            tid,
+            shared,
+            raised: r,
+            live: l,
+        }));
+        unsafe { retire(node) };
+    })
+    .join()
+    .unwrap();
+    assert!(
+        raised.load(Ordering::SeqCst),
+        "a load made by a destructor the exit ran did not raise the reservation"
+    );
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "a value retired by a destructor the exit ran was not freed"
+    );
+}

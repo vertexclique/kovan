@@ -79,7 +79,9 @@ impl Drop for Guard {
             // Use try_with to handle process teardown gracefully.
             // During static destructor execution, TLS may already be destroyed.
             // Panicking in a destructor during cleanup causes SIGABRT.
-            let _ = HANDLE.try_with(Handle::unpin);
+            if HANDLE.try_with(Handle::unpin).is_err() {
+                on_exiting_handle(Handle::unpin);
+            }
         }
     }
 }
@@ -1538,6 +1540,10 @@ impl Handle {
     /// Extracted from Drop so it can also be called by the nightly sentinel.
     fn cleanup(&self) {
         if let Some(tid) = self.tid.get() {
+            // The destructors this exit runs reach this handle, `HANDLE`
+            // being the thread-local whose destructor runs it.
+            #[cfg(not(feature = "nightly"))]
+            let _ = EXITING.try_with(|exiting| exiting.set(self));
             // Prevent re-entrant flush() from destructors during cleanup.
             self.in_reclaim.set(true);
             // Bump pin_count so that any destructor calling pin() during
@@ -1659,6 +1665,8 @@ impl Handle {
             self.tid.set(None);
             self.cached_epoch.set(0);
             self.drained_epoch.set(0);
+            #[cfg(not(feature = "nightly"))]
+            let _ = EXITING.try_with(|exiting| exiting.set(core::ptr::null()));
         }
     }
 }
@@ -1723,6 +1731,22 @@ thread_local! {
 #[cfg(not(feature = "nightly"))]
 thread_local! {
     static HANDLE: Handle = const { Handle::new() };
+    /// This thread's handle while its exit runs, null otherwise. `HANDLE`
+    /// no longer answers then (its destructor is the exit), yet the
+    /// destructors the exit runs are critical sections and retirers like any
+    /// others and must reach the handle: through this. It has no destructor,
+    /// so it answers during every thread-local destructor.
+    static EXITING: Cell<*const Handle> = const { Cell::new(core::ptr::null()) };
+}
+
+/// Run `f` on this thread's handle if its exit is running (see `EXITING`).
+#[cfg(not(feature = "nightly"))]
+#[cold]
+fn on_exiting_handle<R>(f: impl FnOnce(&Handle) -> R) -> Option<R> {
+    let handle = EXITING.try_with(Cell::get).unwrap_or(core::ptr::null());
+    // SAFETY: `cleanup` stores its own handle here and clears it before it
+    // returns, on this thread; the handle outlives the store.
+    (!handle.is_null()).then(|| f(unsafe { &*handle }))
 }
 
 /// Current epoch for stamping a freshly allocated node's `birth_epoch`.
@@ -1740,10 +1764,13 @@ pub(crate) fn current_birth_epoch() -> u64 {
     #[cfg(not(feature = "nightly"))]
     {
         // During process teardown TLS may be destroyed. Fall back to the
-        // global counter (always correct, just not cached).
+        // exiting handle, else to the global counter (always correct, just
+        // not cached).
         HANDLE
             .try_with(|handle| handle.current_birth_epoch())
-            .unwrap_or_else(|_| slot::epoch())
+            .unwrap_or_else(|_| {
+                on_exiting_handle(Handle::current_birth_epoch).unwrap_or_else(slot::epoch)
+            })
     }
 }
 
@@ -1758,10 +1785,14 @@ pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. Fall back to raw load.
+        // During process teardown TLS may be destroyed. Fall back to the
+        // exiting handle (a destructor the exit runs), else to a raw load.
         HANDLE
             .try_with(|handle| handle.protect_load(data, order))
-            .unwrap_or_else(|_| data.load(order))
+            .unwrap_or_else(|_| {
+                on_exiting_handle(|handle| handle.protect_load(data, order))
+                    .unwrap_or_else(|| data.load(order))
+            })
     }
 }
 
@@ -1778,7 +1809,8 @@ pub fn pin() -> Guard {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. Return a dummy guard
+        // During process teardown TLS may be destroyed. Pin the exiting
+        // handle (a destructor the exit runs), else return a dummy guard
         // whose drop is also a no-op (try_with in Guard::drop handles this).
         //
         // unwrap_or_else (lazy), NOT unwrap_or: unwrap_or evaluates its
@@ -1786,12 +1818,12 @@ pub fn pin() -> Guard {
         // call whose immediate Drop decremented pin_count right back —
         // silently cancelling the pin and disabling nested-pin /
         // critical-section tracking on stable builds.
-        HANDLE
-            .try_with(|handle| handle.pin())
-            .unwrap_or_else(|_| Guard {
+        HANDLE.try_with(|handle| handle.pin()).unwrap_or_else(|_| {
+            on_exiting_handle(Handle::pin).unwrap_or_else(|| Guard {
                 _private: (),
                 marker,
             })
+        })
     }
 }
 
@@ -1850,9 +1882,15 @@ pub unsafe fn retire<T: 'static>(ptr: *mut T) {
     #[cfg(not(feature = "nightly"))]
     {
         // SAFETY: Caller upholds the safety contract.
-        // During process teardown TLS may be destroyed. Leak the pointer —
+        // During process teardown TLS may be destroyed. Retire through the
+        // exiting handle (a destructor the exit runs), else leak the pointer:
         // process memory is reclaimed by the OS on exit.
-        let _ = HANDLE.try_with(|handle| unsafe { handle.retire(ptr) });
+        if HANDLE
+            .try_with(|handle| unsafe { handle.retire(ptr) })
+            .is_err()
+        {
+            on_exiting_handle(|handle| unsafe { handle.retire(ptr) });
+        }
     }
 }
 
@@ -1874,8 +1912,11 @@ pub fn flush() {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. No-op in that case.
-        let _ = HANDLE.try_with(|handle| handle.flush());
+        // During process teardown TLS may be destroyed. Flush the exiting
+        // handle (a no-op: its exit is reclaiming), else nothing.
+        if HANDLE.try_with(|handle| handle.flush()).is_err() {
+            on_exiting_handle(Handle::flush);
+        }
     }
 }
 
@@ -1898,7 +1939,13 @@ pub(crate) unsafe fn retire_raw(node_ptr: *mut RetiredNode) {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. Leak the node.
-        let _ = HANDLE.try_with(|handle| unsafe { handle.retire_raw(node_ptr) });
+        // During process teardown TLS may be destroyed. Retire through the
+        // exiting handle (a destructor the exit runs), else leak the node.
+        if HANDLE
+            .try_with(|handle| unsafe { handle.retire_raw(node_ptr) })
+            .is_err()
+        {
+            on_exiting_handle(|handle| unsafe { handle.retire_raw(node_ptr) });
+        }
     }
 }
