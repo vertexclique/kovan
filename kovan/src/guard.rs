@@ -990,17 +990,23 @@ impl Handle {
     /// - `birth_epoch` must already be set correctly.
     /// - The node must not be enqueued more than once.
     unsafe fn enqueue_node(&self, node_ptr: *mut RetiredNode) {
-        unsafe {
-            (*node_ptr)
-                .batch_link
-                .store(core::ptr::null_mut(), Ordering::Relaxed);
-        }
-
+        // Relaxed stores throughout: the batch is this thread's alone until
+        // `try_retire` publishes it, and another thread reads these words
+        // only after reaching the batch through a slot list, with an acquire
+        // that synchronizes with the release half of the exchange that
+        // inserted a node of it (or of an exchange whose release sequence
+        // contains that one: later insertions are RMWs on the same word), or
+        // through the orphan list's lock. These stores are sequenced before
+        // that exchange or that unlock, so they happen before every such
+        // read.
         let first = self.batch_first.get();
         if first.is_null() {
             // First node in batch -> becomes batch_last (refs-node)
             self.batch_last.set(node_ptr);
             unsafe {
+                (*node_ptr)
+                    .batch_link
+                    .store(core::ptr::null_mut(), Ordering::Relaxed);
                 (*node_ptr)
                     .refs_or_next
                     .store(REFC_PROTECT, Ordering::Relaxed);
@@ -1014,7 +1020,7 @@ impl Handle {
                 unsafe { (*last).set_birth_epoch(birth_epoch) };
             }
             unsafe {
-                (*node_ptr).batch_link.store(last, Ordering::SeqCst);
+                (*node_ptr).batch_link.store(last, Ordering::Relaxed);
                 (*node_ptr).set_batch_next(first);
             }
         }
@@ -1168,10 +1174,11 @@ impl Handle {
             unsafe { (*cur_refs).set_birth_epoch(old_min) };
         }
         // Re-point every chain node (including the former refs-node) at the
-        // surviving refs-node.
+        // surviving refs-node. Relaxed, as in `enqueue_node`: the chain is
+        // unpublished and its readers acquire it through a slot list.
         let mut cur = first;
         loop {
-            unsafe { (*cur).batch_link.store(cur_refs, Ordering::SeqCst) };
+            unsafe { (*cur).batch_link.store(cur_refs, Ordering::Relaxed) };
             if cur == refs {
                 break;
             }

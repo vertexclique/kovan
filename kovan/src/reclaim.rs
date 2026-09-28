@@ -99,8 +99,9 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
         // Follow batch_link to refs-node and decrement.
         // Ordering: Relaxed is sufficient because the happens-before chain is
         // established through the slot exchange (AcqRel) that delivered current slot
-        // to this thread. The batch_link was written (SeqCst) before the slot
-        // insertion, which happens-before current thread's slot extraction. shrug.
+        // to this thread. The batch_link was written before the slot insertion
+        // (sequenced before the inserting exchange's release), which
+        // happens-before current thread's slot extraction.
         let refs = unsafe { (*curr).batch_link.load(Ordering::Relaxed) };
         let old = unsafe { (*refs).refs_or_next.fetch_sub(1, Ordering::AcqRel) };
         if old == 1 {
