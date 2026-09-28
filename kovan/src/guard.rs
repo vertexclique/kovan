@@ -1000,25 +1000,10 @@ impl Handle {
             // threads parked, work a retire does not take on. Orphans
             // (created only at thread exit) are adopted by flush().
 
-            // Capture and detach the batch BEFORE try_retire: destructors
-            // running inside try_retire (via free_batch_list) may re-enter
-            // retire()/flush() and must see empty batch cells — never the
-            // batch currently being submitted (re-submitting it would
-            // double-insert and double-free the whole batch).
-            let first = self.batch_first.get();
-            let last = self.batch_last.get();
-            self.batch_first.set(core::ptr::null_mut());
-            self.batch_last.set(core::ptr::null_mut());
-            self.batch_count.set(0);
-
-            // Finalize batch: set refs-node's batch_link to RNODE(batch_first)
-            unsafe {
-                (*last)
-                    .batch_link
-                    .store(rnode_mark(first), Ordering::SeqCst);
-            }
-
-            if !self.try_retire(first, last, None) {
+            // Detach the batch BEFORE try_retire (see `take_batch`).
+            if let Some((first, last)) = self.take_batch()
+                && !self.try_retire(first, last, None)
+            {
                 // Fewer assignable nodes than eligible slots: nothing was
                 // published, so keep accumulating. The merged batch retries
                 // at the next RETIRE_FREQ multiple with more nodes, and
@@ -1097,6 +1082,33 @@ impl Handle {
     /// - The node must not be retired more than once.
     unsafe fn retire_raw(&self, node_ptr: *mut RetiredNode) {
         unsafe { self.enqueue_node(node_ptr) };
+    }
+
+    /// Detach the accumulating batch, if any, and finalize it: the
+    /// refs-node's batch_link becomes RNODE(batch_first). Returns
+    /// `(batch_first, refs)`.
+    ///
+    /// The batch cells are left empty before the caller submits: destructors
+    /// running inside try_retire (via free_batch_list) may re-enter
+    /// retire()/flush() and must see empty batch cells, never the batch
+    /// being submitted (re-submitting it would double-insert and double-free
+    /// the whole batch).
+    #[inline]
+    fn take_batch(&self) -> Option<(*mut RetiredNode, *mut RetiredNode)> {
+        let first = self.batch_first.get();
+        if first.is_null() {
+            return None;
+        }
+        let last = self.batch_last.get();
+        self.batch_first.set(core::ptr::null_mut());
+        self.batch_last.set(core::ptr::null_mut());
+        self.batch_count.set(0);
+        unsafe {
+            (*last)
+                .batch_link
+                .store(rnode_mark(first), Ordering::SeqCst);
+        }
+        Some((first, last))
     }
 
     /// Merge a detached batch chain (`first` → … → `refs`) into the
@@ -1494,18 +1506,7 @@ impl Handle {
         // Adopt any orphaned batch, then finalize and submit the partial
         // batch. On failure, keep accumulating — never leaked.
         self.adopt_orphans();
-        let count = self.batch_count.get();
-        if count > 0 {
-            let first = self.batch_first.get();
-            let last = self.batch_last.get();
-            self.batch_first.set(core::ptr::null_mut());
-            self.batch_last.set(core::ptr::null_mut());
-            self.batch_count.set(0);
-            unsafe {
-                (*last)
-                    .batch_link
-                    .store(rnode_mark(first), Ordering::SeqCst);
-            }
+        if let Some((first, last)) = self.take_batch() {
             let own = (saved_pin == 0).then_some(tid);
             if !self.try_retire(first, last, own) {
                 self.merge_batch(first, last);
@@ -1561,41 +1562,29 @@ impl Handle {
             // before it is released.
             let mut parked = Parked::new();
 
-            // Everything that can run a destructor runs while this thread's
-            // slot is still active and published: a destructor is a critical
-            // section of its own, and its loads need this reservation as any
-            // load does. A destructor may retire again, so this repeats
-            // until no batch is left to submit.
-            loop {
-                // Drain partial batch: if the thread exits with fewer than
-                // RETIRE_FREQ nodes in its batch, those nodes were never
-                // published via try_retire. We cannot call their destructors
-                // directly because other threads may still hold
-                // guard-protected references to the underlying objects (e.g.
-                // a resized table that readers loaded before the CAS...
-                // Hopscotch Map like data structures does that).
-                //
-                // Finalize the batch and submit it through try_retire so the
-                // normal epoch-based safety checks apply. If try_retire
-                // cannot place the batch (fewer nodes than eligible slots),
-                // park it: another thread adopts and retires it through its
-                // own accumulating batch. Nothing leaks.
-                let count = self.batch_count.get();
-                if count > 0 {
-                    let first = self.batch_first.get();
-                    let last = self.batch_last.get();
-                    self.batch_first.set(core::ptr::null_mut());
-                    self.batch_last.set(core::ptr::null_mut());
-                    self.batch_count.set(0);
-                    unsafe {
-                        (*last)
-                            .batch_link
-                            .store(rnode_mark(first), Ordering::SeqCst);
-                    }
-                    if !self.try_retire(first, last, own) {
-                        parked.push(last);
-                    }
-                }
+            // The exit takes a fixed number of steps, all while this
+            // thread's slot is still active and published: a destructor
+            // that runs here is a critical section of its own, and its loads
+            // need this reservation as any load does. Two rounds: the first
+            // frees what the thread holds, the second what the destructors
+            // of the first retired (a batch they fill is submitted by their
+            // own retire, into this slot among others).
+            for _ in 0..EXIT_ROUNDS {
+                // [ExitSubmit] The partial batch (fewer than RETIRE_FREQ
+                // nodes, never published) goes out through try_retire so the
+                // normal epoch-based safety checks apply: other threads may
+                // still hold guard-protected references to its values (a
+                // resized table that readers loaded before the CAS, say), so
+                // they cannot just be dropped. A batch try_retire cannot
+                // place (fewer nodes than eligible slots) is parked: a live
+                // thread adopts it and retires it through its own batch.
+                // Nothing leaks.
+                self.submit_at_exit(own, &mut parked);
+                // [ExitTake] With no guard of this thread live, its slot
+                // list is taken with one exchange per reservation: what
+                // other threads insert afterwards, however much they retire,
+                // waits in the slot for the next round or the deactivation
+                // below.
                 if own.is_some() {
                     for i in 0..global.hr_num() {
                         let first =
@@ -1605,10 +1594,16 @@ impl Handle {
                         }
                     }
                 }
+                // [ExitFree] The destructors of every batch freed so far run.
                 self.drain_free_list();
-                if self.batch_count.get() == 0 {
-                    break;
-                }
+            }
+            // [ExitParkRest] What the destructors of the last round retired
+            // is parked, not submitted: a further round can free batches
+            // whose destructors retire again, for as long as other threads
+            // keep retiring such values into this slot, and the exit ends in
+            // a bounded number of its own steps.
+            if let Some((_, last)) = self.take_batch() {
+                parked.push(last);
             }
 
             // Leave the protocol: deactivate all slots. deactivate_slots
@@ -1669,6 +1664,16 @@ impl Handle {
             let _ = EXITING.try_with(|exiting| exiting.set(core::ptr::null()));
         }
     }
+
+    /// Submit the accumulating batch through try_retire at exit, leaving
+    /// `own`'s slots out; park it when it cannot be placed.
+    fn submit_at_exit(&self, own: Option<usize>, parked: &mut Parked) {
+        if let Some((first, last)) = self.take_batch()
+            && !self.try_retire(first, last, own)
+        {
+            parked.push(last);
+        }
+    }
 }
 
 impl Drop for Handle {
@@ -1676,6 +1681,10 @@ impl Drop for Handle {
         self.cleanup();
     }
 }
+
+/// Rounds of submitting, taking the slot list and freeing that a thread's
+/// exit runs (see `Handle::cleanup`).
+const EXIT_ROUNDS: usize = 2;
 
 /// The orphaned batches an exiting thread collects, a chain of finalized
 /// refs-nodes linked through `next`, parked on its ID in one step.

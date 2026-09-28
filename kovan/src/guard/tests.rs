@@ -36,6 +36,22 @@ fn with_handle<R>(f: impl FnOnce(&Handle) -> R) -> R {
     }
 }
 
+/// `with_handle`, also inside this thread's exit, where `HANDLE` itself no
+/// longer answers on builds whose handle is a destructed thread-local.
+fn with_current_handle<R>(f: impl FnOnce(&Handle) -> R) -> R {
+    #[cfg(feature = "nightly")]
+    {
+        f(&HANDLE)
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        match HANDLE.try_with(|h| h as *const Handle) {
+            Ok(h) => f(unsafe { &*h }),
+            Err(_) => super::on_exiting_handle(f).expect("no handle on this thread"),
+        }
+    }
+}
+
 /// The epoch this thread's reservation slot publishes.
 fn published_epoch() -> u64 {
     with_handle(|h| h.global().thread_slots(h.tid()).epoch[0].load_lo())
@@ -690,4 +706,97 @@ fn exit_destructors_reach_the_handle() {
         0,
         "a value retired by a destructor the exit ran was not freed"
     );
+}
+
+/// A thread's exit takes its slot list a fixed number of times: other
+/// threads that keep retiring into the slot while the exit runs, with
+/// values whose destructors retire in turn, cannot keep it running. Each
+/// value freed from the slot here places one more such batch in the
+/// exiting thread's slot, as another thread's retire would, and retires one
+/// value of its own. The exit runs one generation of them per round; the
+/// next waits in the slot, is parked when the slot is deactivated, and is
+/// freed by an adopter.
+#[test]
+fn exit_takes_its_slot_list_a_fixed_number_of_times() {
+    /// Places one more generation in this thread's slot while its exit
+    /// runs, `left` more at most.
+    #[repr(C)]
+    struct Feeds {
+        retired: RetiredNode,
+        left: usize,
+        exiting: Arc<AtomicBool>,
+        fed: Arc<AtomicUsize>,
+        live: Arc<AtomicUsize>,
+    }
+    impl Feeds {
+        /// A batch of a feeder and a counted value, submitted through
+        /// try_retire into this thread's slot (the only active one).
+        fn place(
+            left: usize,
+            exiting: &Arc<AtomicBool>,
+            fed: &Arc<AtomicUsize>,
+            live: &Arc<AtomicUsize>,
+        ) {
+            with_current_handle(|h| {
+                live.fetch_add(1, Ordering::SeqCst);
+                let node = Box::into_raw(Box::new(Feeds {
+                    retired: RetiredNode::new(),
+                    left,
+                    exiting: Arc::clone(exiting),
+                    fed: Arc::clone(fed),
+                    live: Arc::clone(live),
+                }));
+                unsafe { retire(node) };
+                Counted::retire_one(live);
+                let (first, last) = h.take_batch().expect("the batch just retired");
+                assert!(h.try_retire(first, last, None), "the batch was not placed");
+            });
+        }
+    }
+    impl Drop for Feeds {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            if self.left == 0 || !self.exiting.load(Ordering::SeqCst) {
+                return;
+            }
+            self.fed.fetch_add(1, Ordering::SeqCst);
+            Feeds::place(self.left - 1, &self.exiting, &self.fed, &self.live);
+            Counted::retire_one(&self.live);
+        }
+    }
+
+    const GENERATIONS: usize = 64;
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let exiting = Arc::new(AtomicBool::new(false));
+    let fed = Arc::new(AtomicUsize::new(0));
+    let (l, e, f) = (Arc::clone(&live), Arc::clone(&exiting), Arc::clone(&fed));
+    thread::spawn(move || {
+        own_tid();
+        Feeds::place(GENERATIONS, &e, &f, &l);
+        e.store(true, Ordering::SeqCst);
+    })
+    .join()
+    .unwrap();
+    exiting.store(false, Ordering::SeqCst);
+    // One per round: the one each take of the slot list found.
+    let generations = fed.load(Ordering::SeqCst);
+    assert_eq!(
+        generations,
+        super::EXIT_ROUNDS,
+        "the exit ran {generations} generations while its slot kept being fed"
+    );
+
+    // Nothing leaks: the parked generation is adopted and freed.
+    let l = Arc::clone(&live);
+    thread::spawn(move || {
+        own_tid();
+        let freed = eventually(|| {
+            flush();
+            l.load(Ordering::SeqCst) == 0
+        });
+        assert!(freed, "{} values never freed", l.load(Ordering::SeqCst));
+    })
+    .join()
+    .unwrap();
 }
