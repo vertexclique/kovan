@@ -279,8 +279,8 @@ impl Handle {
     /// between the previous publication and the pointer load. After
     /// MAX_LOAD_ATTEMPTS failed attempts the load escalates to the
     /// unconditional reservation and completes with a single further load,
-    /// independent of all other threads. Fast path cost is unchanged: one
-    /// pointer load, one epoch load, two register compares.
+    /// independent of all other threads. Fast path cost: one pointer load,
+    /// one epoch load, one compare against the thread-local cache.
     #[inline]
     fn protect_load(&self, data: &AtomicUsize, order: Ordering) -> usize {
         // Hot path: straight-line, no loop in the inlined body.
@@ -293,9 +293,14 @@ impl Handle {
 
         // Step 3: protected if the epoch is unchanged since our last
         // publication, or if we already hold the unconditional
-        // reservation (under which every load is protected).
-        let cached = self.cached_epoch.get();
-        if curr_epoch == cached || cached == EPOCH_UNCONDITIONAL {
+        // reservation (under which every load is protected). One compare
+        // covers both. `cached_epoch` is either an epoch read from the
+        // global counter before this load (by this thread, or by a helper
+        // whose result this thread acquired), so `curr_epoch >= cached` by
+        // read-read coherence and `<=` means equal; or 0 (no publication
+        // yet), below every epoch; or `EPOCH_UNCONDITIONAL` (`u64::MAX`),
+        // above every epoch.
+        if curr_epoch <= self.cached_epoch.get() {
             return ptr;
         }
 

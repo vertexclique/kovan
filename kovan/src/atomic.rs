@@ -85,7 +85,7 @@ impl<T> Atomic<T> {
     /// the thread's slot era is updated so `try_retire()` counts this thread
     /// as protecting the loaded pointer's batch.
     ///
-    /// Fast path cost: 3 words (1 atomic load, 2 word compares)
+    /// Fast path cost: 1 atomic pointer load, 1 epoch load, 1 compare
     ///
     /// # Examples
     ///
