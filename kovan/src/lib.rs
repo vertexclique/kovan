@@ -89,7 +89,8 @@
 //! A thread's reservation slot stays active after its last `Guard` drops;
 //! it is refreshed/drained on the next `pin()`, `flush()`, or thread exit.
 //! Long-idle threads that once pinned should call [`flush`] before idling
-//! to release retained garbage promptly.
+//! to release retained garbage promptly: with no guard live, `flush()`
+//! also leaves the slot holding nothing back until the thread pins again.
 //!
 //! # Example
 //!

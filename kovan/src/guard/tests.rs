@@ -723,4 +723,44 @@ fn an_epoch_advance_refreshes_the_birth_stamp() {
     assert_eq!(live.load(Ordering::SeqCst), 0);
 }
 
+/// A thread that flushes with no guard live and then idles holds nothing
+/// back: batches retired afterwards by other threads, even of values born
+/// before its last reservation, skip its slot and are freed while it stays
+/// idle.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn flushed_idle_thread_holds_nothing_back() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let (idle, done) = (Hold::new(), Hold::new());
+    let idler = {
+        let (idle, done) = (idle.clone(), done.clone());
+        thread::spawn(move || {
+            own_tid();
+            drop(pin());
+            flush();
+            idle.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| done.go.load(Ordering::SeqCst)));
+        })
+    };
+    idle.reached("the idle thread");
+    let l = Arc::clone(&live);
+    thread::spawn(move || {
+        own_tid();
+        for _ in 0..4 * RETIRE_FREQ {
+            Counted::retire_oldest(&l);
+        }
+        flush();
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "values waited for a thread that flushed and went idle"
+    );
+    done.release();
+    idler.join().unwrap();
+}
+
 mod progress;

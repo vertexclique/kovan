@@ -58,7 +58,9 @@ const MAX_LOAD_ATTEMPTS: usize = 16;
 /// indefinitely retains every batch containing at least one node born
 /// before its last published epoch (younger batches skip the slot and
 /// remain reclaimable). Pooled/long-idle threads should call
-/// [`flush()`](crate::flush) before going idle.
+/// [`flush()`](crate::flush) before going idle: called with no guard live,
+/// it frees what the slot holds and leaves it holding nothing back until
+/// the thread pins again.
 pub struct Guard {
     _private: (),
     // Psy szczekają, a karawana jedzie dalej.
@@ -124,8 +126,9 @@ struct Handle {
     /// the last transition `drained_epoch` is below the global epoch (the
     /// raise publishes a global epoch read that differed from
     /// `cached_epoch`, and the global epoch only grows). 0 means no
-    /// transition yet: the global epoch starts at 1, so the first `pin()`
-    /// transitions.
+    /// transition since the reservation was last cleared (never, or by
+    /// `flush()` outside a critical section): the global epoch starts at 1,
+    /// so the next outermost `pin()` transitions.
     drained_epoch: Cell<u64>,
     /// Thread-cached global epoch for stamping `birth_epoch` on allocation,
     /// avoiding a contended `Acquire` load of the global epoch counter on
@@ -1559,15 +1562,30 @@ impl Handle {
 
         self.drain_free_list();
 
-        // The destructors run above (under the raised pin count, so their
-        // guards are nested) may have escalated their critical section.
-        // With no guard of the caller live this is where that section ends,
-        // as the outermost guard drop is for any other. Returning with the
+        // [FlushClear] With no guard of the caller live, flush() ends the
+        // thread's reservation as the end of an operation does. It takes the
+        // list once more (what other threads inserted while it ran) and
+        // frees what that releases while the slot still protects the
+        // destructors that free runs, then publishes epoch 0, below every
+        // birth: no batch retired from then on waits for this thread, which
+        // may go idle, until it pins again (that pin transitions,
+        // `drained_epoch` 0 being below every epoch). This also ends a
+        // section a destructor run above escalated: returning with the
         // unconditional reservation published would put a node of every
-        // batch retired anywhere into this thread's slot until it pins
-        // again, forever if it goes idle.
-        if saved_pin == 0 && self.cached_epoch.get() == EPOCH_UNCONDITIONAL {
-            self.do_update(slot::epoch(), 0, tid);
+        // batch retired anywhere into this thread's slot.
+        if saved_pin == 0 {
+            for i in 0..hr_num {
+                let first = global.thread_slots(tid).first[i].exchange_lo(0, Ordering::AcqRel);
+                if first != 0 && first != INVPTR as u64 {
+                    unsafe { self.traverse_into_cache(first as *mut RetiredNode) };
+                }
+            }
+            self.drain_free_list();
+            for i in 0..hr_num {
+                global.thread_slots(tid).epoch[i].store_lo(0, Ordering::Release);
+            }
+            self.cached_epoch.set(0);
+            self.drained_epoch.set(0);
         }
 
         self.pin_count.set(saved_pin);
