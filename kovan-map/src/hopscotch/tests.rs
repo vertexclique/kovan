@@ -763,3 +763,125 @@ fn a_home_guard_is_taken_from_one_read_of_the_control_word() {
     assert_eq!(map.remove(&3), Some(3));
     assert!(map.is_empty());
 }
+
+/// A writer's scan under its home guard reads the home's entries without protecting them
+/// (`find_held`), so no other thread may unlink, retire or move one of them, or replace the
+/// table holding them, until the holder is done with them. Each writer that scans that way
+/// (a remove, a replace, a claim of an absent key, all of home 2 in `displacing_layout`) is
+/// stopped right after its scan loaded key 2's word and before it read key 2's entry; then a
+/// remove and a replace of key 2 wait for the guard, a resize and a clear wait for it before
+/// they copy or clear a slot (the table is not replaced), and a displacement that would move key
+/// 2 moves key 3 instead, without waiting. Every answer and the final contents are a sequential
+/// map's, the holder's write first.
+#[test]
+fn a_held_scan_holds_off_every_writer_that_could_retire_an_entry_it_read() {
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Remove(u64),
+        Insert(u64, u64),
+        Claim(u64, u64),
+        Resize,
+        Clear,
+    }
+    fn apply(map: &HopscotchMap<u64, u64, Identity>, op: Op) -> Option<u64> {
+        match op {
+            Op::Remove(k) => map.remove(&k),
+            Op::Insert(k, v) => map.insert(k, v),
+            Op::Claim(k, v) => map.insert_if_absent(k, v),
+            Op::Resize => {
+                map.try_resize(128);
+                None
+            }
+            Op::Clear => {
+                map.clear();
+                None
+            }
+        }
+    }
+    fn model(want: &mut BTreeMap<u64, u64>, op: Op) -> Option<u64> {
+        match op {
+            Op::Remove(k) => want.remove(&k),
+            Op::Insert(k, v) => want.insert(k, v),
+            Op::Claim(k, v) => match want.get(&k) {
+                Some(&present) => Some(present),
+                None => want.insert(k, v),
+            },
+            Op::Resize => None,
+            Op::Clear => {
+                want.clear();
+                None
+            }
+        }
+    }
+
+    let holders = [Op::Remove(2), Op::Insert(2, 200), Op::Claim(66, 66)];
+    let rivals = [
+        Op::Remove(2),
+        Op::Insert(2, 7),
+        Op::Resize,
+        Op::Clear,
+        Op::Insert(64, 64),
+    ];
+    for holder_op in holders {
+        for rival_op in rivals {
+            let case = std::format!("holder {holder_op:?}, rival {rival_op:?}");
+            let map = displacing_layout();
+            let mut want: BTreeMap<u64, u64> = (0..=32).map(|k| (k, k)).collect();
+            let (holder, arrival, release) = {
+                let map = Arc::clone(&map);
+                stopped_at(Point::HeldScanLoaded, move || apply(&map, holder_op))
+            };
+            arrival
+                .recv_timeout(MEET)
+                .unwrap_or_else(|_| panic!("{case}: the holder's scan loaded key 2's word"));
+            let holder_want = model(&mut want, holder_op);
+
+            let rival = if let Op::Insert(64, _) = rival_op {
+                // Key 64's home, bucket 0, has its neighborhood full: its insert moves the entry
+                // of the farthest slot it can into slot 33. Key 2's home is held, so key 3 moves.
+                assert_eq!(apply(&map, rival_op), None, "{case}");
+                assert_eq!(
+                    key_at(&map, 3),
+                    Some(64),
+                    "{case}: key 64 took key 3's slot"
+                );
+                assert_eq!(key_at(&map, 33), Some(3), "{case}: key 3 moved, not key 2");
+                None
+            } else {
+                let point = match rival_op {
+                    Op::Resize | Op::Clear => Point::ResizerMetHeldGuard,
+                    _ => Point::WriterMetHeldGuard,
+                };
+                let map = Arc::clone(&map);
+                let (rival, rival_arrival, rival_release) =
+                    stopped_at(point, move || apply(&map, rival_op));
+                rival_arrival
+                    .recv_timeout(MEET)
+                    .unwrap_or_else(|_| panic!("{case}: the rival waits for home 2's guard"));
+                Some((rival, rival_release))
+            };
+            assert_eq!(key_at(&map, 2), Some(2), "{case}: key 2's entry stays put");
+            assert_eq!(map.capacity(), 64, "{case}: the table is not replaced");
+
+            release.send(()).expect("let the holder read key 2's entry");
+            assert_eq!(holder.join().expect("the holder"), holder_want, "{case}");
+            let rival_want = model(&mut want, rival_op);
+            if let Some((rival, rival_release)) = rival {
+                rival_release.send(()).expect("let the rival go on");
+                assert_eq!(rival.join().expect("the rival"), rival_want, "{case}");
+            }
+
+            let mut got: Vec<(u64, u64)> = map.iter().collect();
+            got.sort_unstable();
+            assert_eq!(got, want.into_iter().collect::<Vec<_>>(), "{case}");
+            assert_eq!(map.len(), got.len(), "{case}");
+            for (k, v) in got {
+                assert_eq!(map.get(&k), Some(v), "{case}: key {k}");
+            }
+            let grown = matches!(rival_op, Op::Resize);
+            assert_eq!(map.capacity(), if grown { 128 } else { 64 }, "{case}");
+        }
+    }
+}

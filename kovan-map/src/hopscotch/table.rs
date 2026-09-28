@@ -618,7 +618,10 @@ impl<K, V> Table<K, V> {
             // Acquire: pairs with the release that linked the entry, so its fields are visible.
             // SAFETY: `held` is the guard of the home whose bits name every slot read, of this
             // table, which is live while its guard is held (a resize takes every guard first).
-            unsafe { bucket.load_held(Ordering::Acquire, guard) }
+            let word = unsafe { bucket.load_held(Ordering::Acquire, guard) };
+            #[cfg(test)]
+            pause::at(pause::Point::HeldScanLoaded);
+            word
         })
     }
 

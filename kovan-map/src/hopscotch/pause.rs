@@ -23,6 +23,9 @@ pub(super) enum Point {
     WriterMetHeldGuard,
     /// A lookup read its home's hop bits and has not read a slot yet.
     LookupReadHops,
+    /// A writer's scan under its home guard loaded the word of a slot the home's bits name,
+    /// without protecting the entry it names, and has not read the entry yet.
+    HeldScanLoaded,
     /// A displacement linked the entry it moves at its new slot and published the new slot's
     /// hop bit and the advanced move stamp; the entry is still in its old slot too.
     MoveLinkedTwice,
