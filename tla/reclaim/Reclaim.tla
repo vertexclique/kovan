@@ -96,6 +96,7 @@ MutExitHandle == Mutation = "exit_handle_unreachable"
 MutSlowFrees == Mutation = "slow_path_frees"
 MutDetachUnclosed == Mutation = "detach_unclosed"
 MutHelpFollows == Mutation = "help_follows_next_request"
+MutNoSeqnoCheck == Mutation = "help_no_seqno_check"
 MutStaleBirth == Mutation = "stale_birth"
 MutFlushKeep == Mutation = "flush_keeps_reservation"
 \* Mechanisms taken out, to show the properties depend on them.
@@ -721,19 +722,22 @@ HandOverEpoch3: \* the new era set while the seqno is seqno + 1, a strong CAS lo
 HandOverList: \* first.compare_exchange_hi(seqno + 1, seqno + 2)
     if fst[he][0].hi = hsq + 1 then fst[he][0].hi := hsq + 2 end if;
     goto HelperLeave;
-HT12: \* result.load(): lo
+HT12: \* result.load_lo()
     hol := res[he].lo;
-HT12b: \* then hi; another pass while the request is the one read first; (0.1.21: while
-       \* pending, the CAS expecting the request read last)
+HT12b: \* result.load_hi(): the request the one read first; (0.1.21: while pending, the CAS
+       \* expecting the request read last; help_no_seqno_check: no era check after it)
     if MutHelpFollows /\ hol = INV then
         hh := res[he].hi || hol := 0;
         goto HelpPass;
     elsif ~MutHelpFollows /\ hol = INV /\ res[he].hi = hh then
         hol := 0;
-        goto HelpPass;
+        if MutNoSeqnoCheck then goto HelpPass else goto HT12c end if;
     else
         hol := 0;
+        goto HelperLeave;
     end if;
+HT12c: \* the era's seqno still the request's: another pass
+    if sep[he][0].hi = hsq then goto HelpPass end if;
 HelperLeave: \* the helper slot's first.exchange_lo(INVPTR), the list traversed
     hol := fst[hme][2].lo || fst[hme][2].lo := INV;
     if hol \notin {NULL, INV} then call TIC(hol) end if;
@@ -1623,7 +1627,7 @@ TidClaim3(self) == /\ pc[self] = "TidClaim3"
 TidFresh(self) == /\ pc[self] = "TidFresh"
                   /\ ah' = [ah EXCEPT ![self] = ntid]
                   /\ Assert(ntid < MaxTid, 
-                            "Failure of assertion at line 253, column 5.")
+                            "Failure of assertion at line 254, column 5.")
                   /\ pc' = [pc EXCEPT ![self] = "TidFresh2"]
                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
                                   fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
@@ -4000,7 +4004,9 @@ HT12b(self) == /\ pc[self] = "HT12b"
                           /\ pc' = [pc EXCEPT ![self] = "HelpPass"]
                      ELSE /\ IF ~MutHelpFollows /\ hol[self] = INV /\ res[he[self]].hi = hh[self]
                                 THEN /\ hol' = [hol EXCEPT ![self] = 0]
-                                     /\ pc' = [pc EXCEPT ![self] = "HelpPass"]
+                                     /\ IF MutNoSeqnoCheck
+                                           THEN /\ pc' = [pc EXCEPT ![self] = "HelpPass"]
+                                           ELSE /\ pc' = [pc EXCEPT ![self] = "HT12c"]
                                 ELSE /\ hol' = [hol EXCEPT ![self] = 0]
                                      /\ pc' = [pc EXCEPT ![self] = "HelperLeave"]
                           /\ hh' = hh
@@ -4019,6 +4025,26 @@ HT12b(self) == /\ pc[self] = "HT12b"
                                ef, el, ewas, pce, pa, lc, lp, le, la, uc, wc, 
                                fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
                                xu, xr, xph, xpt >>
+
+HT12c(self) == /\ pc[self] = "HT12c"
+               /\ IF sep[he[self]][0].hi = hsq[self]
+                     THEN /\ pc' = [pc EXCEPT ![self] = "HelpPass"]
+                     ELSE /\ pc' = [pc EXCEPT ![self] = "HelperLeave"]
+               /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
+                               fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                               nalloc, tid, pinc, bfst, blst, bcnt, acnt, flst, 
+                               lcnt, cep, dep, cbe, inr, held, lvl, gdep, rv, 
+                               rok, opi, afr, acl, detaching, adv, errs, stack, 
+                               which, ah, aseen, rt, pk, ph, pt, pe, ai, am, 
+                               ac, tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                               fnx, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
+                               dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                               spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+                               hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
+                               rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
+                               rn, ecnt, ef, el, ewas, pce, pa, lc, lp, le, la, 
+                               uc, wc, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
+                               xcap, xu, xr, xph, xpt >>
 
 HelperLeave(self) == /\ pc[self] = "HelperLeave"
                      /\ /\ fst' = [fst EXCEPT ![hme[self]][2].lo = INV]
@@ -4108,7 +4134,7 @@ HelpThread(self) == HT1(self) \/ HT2(self) \/ HT3(self) \/ HT4(self)
                        \/ HT10(self) \/ HandOverEpoch(self)
                        \/ HandOverEpoch2(self) \/ HandOverEpoch3(self)
                        \/ HandOverList(self) \/ HT12(self) \/ HT12b(self)
-                       \/ HelperLeave(self) \/ HT20(self)
+                       \/ HT12c(self) \/ HelperLeave(self) \/ HT20(self)
 
 TR1(self) == /\ pc[self] = "TR1"
              /\ /\ radj' = [radj EXCEPT ![self] = - BIAS]
@@ -5242,7 +5268,7 @@ LoadU(self) == LU1(self)
 
 WR1(self) == /\ pc[self] = "WR1"
              /\ Assert(nalloc < MaxNodes, 
-                       "Failure of assertion at line 194, column 5 of macro called at line 1019, column 5.")
+                       "Failure of assertion at line 195, column 5 of macro called at line 1023, column 5.")
              /\ /\ cbe' = [cbe EXCEPT ![self] = IF cbe[self] = 0 THEN ep ELSE cbe[self]]
                 /\ errs' = (errs \cup (IF (IF cbe[self] = 0 THEN ep ELSE cbe[self]) < adv[self]
                                        THEN {"stale_birth"} ELSE {}))
@@ -5293,7 +5319,7 @@ Write(self) == WR1(self)
 
 RN1(self) == /\ pc[self] = "RN1"
              /\ Assert(nalloc < MaxNodes, 
-                       "Failure of assertion at line 194, column 5 of macro called at line 1036, column 5.")
+                       "Failure of assertion at line 195, column 5 of macro called at line 1040, column 5.")
              /\ /\ cbe' = [cbe EXCEPT ![self] = IF cbe[self] = 0 THEN ep ELSE cbe[self]]
                 /\ errs' = (errs \cup (IF (IF cbe[self] = 0 THEN ep ELSE cbe[self]) < adv[self]
                                        THEN {"stale_birth"} ELSE {}))
@@ -6726,10 +6752,10 @@ DetachCtl == 1 + 3 * DetachBound
 \* SP1-SP5; per pass SL1-SL7 with SL5b and a traversal; the self-completion (SL2a-SL2d, a
 \* drain) or the end (DN1, a detach, Produced-Produced4, DN9-DN12, a traversal, a drain).
 SlowCtl == 5 + (MaxTid + 2) * (8 + TICCtl) + (4 + DrainCtl) + (9 + DetachCtl + TICCtl + DrainCtl)
-\* HT1-HT4; per pass HelpPass, a do_update, HT6, HT12, HT12b; the answering pass's HT7, a
+\* HT1-HT4; per pass HelpPass, a do_update, HT6, HT12, HT12b, HT12c; the answering pass's HT7, a
 \* detach, HT10 and its traversal, the hand-over epoch loop (two compare-exchanges and the check
 \* that ends it), HandOverList, HelperLeave and its traversal, HT20 and a drain.
-HelpCtl == 4 + (MaxTid + 2) * (4 + DoUpdCtl) + (10 + DetachCtl + 2 * TICCtl + DrainCtl)
+HelpCtl == 4 + (MaxTid + 2) * (5 + DoUpdCtl) + (10 + DetachCtl + 2 * TICCtl + DrainCtl)
 HelpReadCtl == 3 + MaxTid * (1 + HelpCtl)
 TryCtl == 5 + 7 * MaxTid
 RetireCtl == 7 + TryCtl + TidCtl + HelpReadCtl

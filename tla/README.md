@@ -4,12 +4,11 @@ Three models, each at the grain of its code's atomic steps, checked by TLC: kova
 reclamation (the `kovan` crate) and the two concurrent maps of `kovan-map`. Each carries the
 defects fixed so far as mutations, one at a time (the maps' 0.1.20 rules and the fixes merged into
 this branch, the reclamation's 0.1.21 rules and the later defects this branch fixed): TLC finds a
-counterexample for every one, and none for the code as built but one bound of the reclamation's
-helper loop, recorded as a finding (`RC_find_help_torn_request`).
+counterexample for every one, and none for the code as built.
 
 | where | what | run |
 |-------|------|-----|
-| `reclaim/` | `kovan`'s memory reclamation: the global epoch, each thread's reservation and helper slots, pin (the drained-epoch skip, the transition attempts, the helped slow path and the detach of its slot list), the protected load (the raise, the escalation to the unconditional reservation), the guard's drop, retire (batches, their placement in the eligible slots, the count, the merge of a batch that cannot be placed), the traversal and the free-list cache, destructors that pin, load and retire from inside a free, flush, a thread's exit (two rounds, the deactivation, the batches parked on its tid) and the tid's hand-over | `bash tla/run_tlc.sh reclaim` (about 30 minutes) |
+| `reclaim/` | `kovan`'s memory reclamation: the global epoch, each thread's reservation and helper slots, pin (the drained-epoch skip, the transition attempts, the helped slow path and the detach of its slot list), the protected load (the raise, the escalation to the unconditional reservation), the guard's drop, retire (batches, their placement in the eligible slots, the count, the merge of a batch that cannot be placed), the traversal and the free-list cache, destructors that pin, load and retire from inside a free, flush, a thread's exit (two rounds, the deactivation, the batches parked on its tid) and the tid's hand-over | `bash tla/run_tlc.sh reclaim` (about 37 minutes) |
 | `chained/` | `kovan_map::HashMap`, the chained map: link words with a deleted mark, a frozen flag and a held flag, one CAS per write, the unlink-then-retire rule, the walk that steps past a deleted node only through a live link, the conditional writes that hold the key's link while their closure runs, the freezing migration (which waits for a hold) and clear, the bucket-snapshot walk | `bash tla/run_tlc.sh chained` (about 23 minutes) |
 | `hopscotch/` | `kovan_map::HopscotchMap`: home buckets with hop bits, writer guard and move stamp, the guarded insert (existence scan, the bit published before the link, displacement toward the home), the guarded remove, the conditional writes (closure under the home guard, a compute of an absent key reserving its slot first), the lookup that rescans on a moved stamp, the resize that holds every writer guard, the clear, the walk across a table swap | `bash tla/run_tlc.sh hopscotch` (about 12 minutes) |
 
@@ -131,8 +130,8 @@ destructors (`DetachBound` = 2 + threads x (1 + drops with a program)); `alloc_t
 one bit per released id and retries its compare-exchange at most once per id another thread
 took; an exit runs `EXIT_ROUNDS` rounds. The pass counters count where `CountSteps` is set (the
 `RC_wf_*`, `RC_hand_over` and `RC_help_follows` configurations and the configurations that break
-a bound); elsewhere `LoopBounds` checks only the exit's rounds. Every loop keeps its bound in the code
-as built but `help_thread`'s, which a torn read of the request breaks (see Findings).
+a bound); elsewhere `LoopBounds` checks only the exit's rounds. `help_thread`'s bound rests on the
+era's seqno check this branch added (see Findings).
 
 `WaitFree` bounds every operation's steps. `wf[t]` keeps one count per operation in progress on
 thread t, its own program's and each destructor's; a step counts for the innermost operation, so
@@ -148,7 +147,7 @@ label by label (`Reclaim.tla`): for instance a slow path takes 5 steps to publis
 at most T + 2 passes of 8 steps and a traversal's last step each, then either the self-completion
 (4 steps and a drain) or the detach and the republication (9 steps, a detach of at most
 1 + 3 x `DetachBound` steps, a traversal and a drain); a `help_thread` takes 4 steps to read the
-request, at most T + 2 passes of a `do_update` and 4 steps, then the answer, a detach, the
+request, at most T + 2 passes of a `do_update` and 5 steps, then the answer, a detach, the
 hand-over and the helper slot left (10 steps, a detach, two traversals and a drain).
 
 A stalled thread delays no one: `RC_live_stall` schedules only thread 2 fairly and lets thread 1
@@ -156,8 +155,9 @@ stop for good at any step of its exit, the park of its orphans and the release o
 included, and thread 2's first pin, load, retire and flush still end (`Thread2Ends`). `RC_wf_pin` and
 `RC_wf_load` count steps against a thread that moves the epoch at every flush or retire. The
 mutations take each mechanism a bound rests on out: `no_help` (a slow path passes T + 3 times),
-`no_escalate` (a load retries without bound), `help_follows_next_request`, `detach_unclosed`,
-`exit_loop` and `ttas_locks` (a thread stopped holding a lock stops every first pin).
+`no_escalate` (a load retries without bound), `help_follows_next_request`,
+`help_no_seqno_check`, `detach_unclosed`, `exit_loop` and `ttas_locks` (a thread stopped holding a
+lock stops every first pin).
 
 ### Code map
 
@@ -182,17 +182,17 @@ that does nothing without it).
 | `OrphanAdopt3` | `adopt_orphans` | `slot.rs:715` | a tid's orphan word loaded |
 | `OrphanAdopt4` | `adopt_orphans` | `slot.rs:719` | swapped to null |
 | `OrphanAdopt5` | `adopt_orphans` | `slot.rs:721` | orphaned.fetch_sub |
-| `OrphanMerge` | `Handle::adopt_orphans` | `guard.rs:1204-1212` | each batch of the chain merged (merge_batch) |
+| `OrphanMerge` | `Handle::adopt_orphans` | `guard.rs:1220-1228` | each batch of the chain merged (merge_batch) |
 | `TV1` | `traverse` | `reclaim.rs:81-100` | the end of the list; next swapped with INVPTR |
 | `TV2` | `traverse` | `reclaim.rs:108` | batch_link.load |
 | `TV3` | `traverse` | `reclaim.rs:109-114` | refs fetch_sub; the count's last decrement pushes the batch |
 | `DS1` | `free_batch_list` | `reclaim.rs:145-152` | the destructor called |
-| `DS2` | `retire::destructor` | `guard.rs:1079-1081` | the value's drop, then its memory freed |
+| `DS2` | `retire::destructor` | `guard.rs:1095-1097` | the value's drop, then its memory freed |
 | `FB1` | `free_batch_list` | `reclaim.rs:131-160` | one node: the batch words, batch_next, its destructor called |
-| `TC1` | `traverse_into_cache` | `guard.rs:1433-1437` | a full cache taken out of its cell and freed |
-| `TC2` | `traverse_into_cache` | `guard.rs:1438-1440` | in_reclaim restored; traverse_onto_cache |
-| `DF1` | `drain_free_list` | `guard.rs:1468-1482` | in_reclaim; the cache taken out of its cell and freed |
-| `DF2` | `drain_free_list` | `guard.rs:1474-1485` | again until the cell stays empty |
+| `TC1` | `traverse_into_cache` | `guard.rs:1449-1453` | a full cache taken out of its cell and freed |
+| `TC2` | `traverse_into_cache` | `guard.rs:1454-1456` | in_reclaim restored; traverse_onto_cache |
+| `DF1` | `drain_free_list` | `guard.rs:1484-1498` | in_reclaim; the cache taken out of its cell and freed |
+| `DF2` | `drain_free_list` | `guard.rs:1490-1501` | again until the cell stays empty |
 | `DU1` | `do_update` | `guard.rs:450` | first.load_lo |
 | `DU2` | `do_update` | `guard.rs:452-454` | exchange_lo(0); the list traversed |
 | `DU3` | `do_update` | `guard.rs:457` | epoch() after the traversal |
@@ -230,44 +230,45 @@ that does nothing without it).
 | `HR1` | `help_read` | `guard.rs:785` | slow_counter |
 | `HR2` | `help_read` | `guard.rs:789` | max_threads |
 | `HR3` | `help_read` | `guard.rs:797-799` | each result.load_lo; help_thread |
-| `HT1` | `help_thread` | `guard.rs:832-834` | result.load(): lo; nothing to help unless pending |
-| `HT2` | `help_thread` | `guard.rs:832` | then hi |
-| `HT3` | `help_thread` | `guard.rs:837-851` | state words (0, no parent); seqno = epoch.load_hi |
-| `HT4` | `help_thread` | `guard.rs:852` | curr_epoch = epoch() |
-| `HelpPass` | `help_thread` | `guard.rs:860` | do_update of the helper slot hr_num + 1 |
-| `HT6` | `help_thread` | `guard.rs:864-866` | epoch() compared |
-| `HT7` | `help_thread` | `guard.rs:870-873` | the result CAS; detach_nodes |
-| `HT10` | `help_thread` | `guard.rs:874-875` | traverse_into_cache |
-| `HandOverEpoch` | `help_thread` | `guard.rs:886` | epoch.load(): lo |
-| `HandOverEpoch2` | `help_thread` | `guard.rs:886` | then hi |
-| `HandOverEpoch3` | `help_thread` | `guard.rs:887-894` | the strong CAS loop |
-| `HandOverList` | `help_thread` | `guard.rs:904` | first.compare_exchange_hi(seqno + 1, seqno + 2) |
-| `HT12` | `help_thread` | `guard.rs:909` | result.load(): lo |
-| `HT12b` | `help_thread` | `guard.rs:909` | then hi; another pass while the same request is open |
-| `HelperLeave` | `help_thread` | `guard.rs:915-917` | the helper slot's first.exchange_lo(INVPTR); traversed |
-| `HT20` | `help_thread` | `guard.rs:921-943` | the parent words (no parent); drain_free_list |
-| `TR1` | `try_retire` | `guard.rs:1245-1254` | max_threads, min_epoch, the fence |
-| `TS2` | `try_retire` | `guard.rs:1265` | first.load_lo (reservation slot) |
-| `TS3` | `try_retire` | `guard.rs:1271` | first.load_hi odd |
-| `TS4` | `try_retire` | `guard.rs:1275` | epoch.load_lo |
-| `TS5` | `try_retire` | `guard.rs:1281-1292` | epoch.load_hi odd; a node assigned |
-| `TG1` | `try_retire` | `guard.rs:1297` | first.load_lo (helper slot) |
-| `TG2` | `try_retire` | `guard.rs:1302-1314` | epoch.load_lo; a node assigned |
-| `TN2` | `try_retire` | `guard.rs:1327-1337` | slot info, next null; first.load_lo |
-| `TN3` | `try_retire` | `guard.rs:1343` | epoch re-checked |
-| `TN4` | `try_retire` | `guard.rs:1352` | exchange_lo(curr) |
-| `InsertRollback` | `try_retire` | `guard.rs:1365-1373` | compare_exchange_lo(curr, INVPTR); a node captured counts |
-| `TL1` | `try_retire` | `guard.rs:1380` | next CAS null -> prev |
-| `TL2` | `try_retire` | `guard.rs:1392-1393` | the list it displaced traversed and freed |
-| `TL3` | `try_retire` | `guard.rs:1399` | counted |
-| `TF1` | `try_retire` | `guard.rs:1404-1409` | refs fetch_add(adjs); zero frees the batch |
-| `TF2` | `try_retire` | `guard.rs:1412` | placed |
-| `RE1` | `enqueue_node` | `guard.rs:973-1001` | the node linked into the batch, the count |
-| `RE2` | `enqueue_node` | `guard.rs:1003-1016` | in_reclaim; take_batch, try_retire |
-| `RE3` | `enqueue_node` | `guard.rs:1022-1024` | merge_batch; in_reclaim restored |
-| `RE4` | `enqueue_node` | `guard.rs:1034-1037` | alloc_counter; tid() |
-| `RE5` | `increment_era` | `guard.rs:1050-1051` | in_reclaim; help_read |
-| `RE6` | `increment_era` | `guard.rs:1052-1053` | advance_epoch; the birth stamp |
+| `HT1` | `help_thread` | `guard.rs:833-835` | result.load(): lo; nothing to help unless pending |
+| `HT2` | `help_thread` | `guard.rs:833` | then hi |
+| `HT3` | `help_thread` | `guard.rs:838-852` | state words (0, no parent); seqno = epoch.load_hi |
+| `HT4` | `help_thread` | `guard.rs:853` | curr_epoch = epoch() |
+| `HelpPass` | `help_thread` | `guard.rs:861` | do_update of the helper slot hr_num + 1 |
+| `HT6` | `help_thread` | `guard.rs:865-867` | epoch() compared |
+| `HT7` | `help_thread` | `guard.rs:871-874` | the result CAS; detach_nodes |
+| `HT10` | `help_thread` | `guard.rs:875-876` | traverse_into_cache |
+| `HandOverEpoch` | `help_thread` | `guard.rs:887` | epoch.load(): lo |
+| `HandOverEpoch2` | `help_thread` | `guard.rs:887` | then hi |
+| `HandOverEpoch3` | `help_thread` | `guard.rs:888-895` | the strong CAS loop |
+| `HandOverList` | `help_thread` | `guard.rs:905` | first.compare_exchange_hi(seqno + 1, seqno + 2) |
+| `HT12` | `help_thread` | `guard.rs:921` | result.load_lo() |
+| `HT12b` | `help_thread` | `guard.rs:924-925` | result.load_hi(); the request the one read first? |
+| `HT12c` | `help_thread` | `guard.rs:925` | the era's seqno still the request's: another pass |
+| `HelperLeave` | `help_thread` | `guard.rs:931-933` | the helper slot's first.exchange_lo(INVPTR); traversed |
+| `HT20` | `help_thread` | `guard.rs:937-959` | the parent words (no parent); drain_free_list |
+| `TR1` | `try_retire` | `guard.rs:1261-1270` | max_threads, min_epoch, the fence |
+| `TS2` | `try_retire` | `guard.rs:1281` | first.load_lo (reservation slot) |
+| `TS3` | `try_retire` | `guard.rs:1287` | first.load_hi odd |
+| `TS4` | `try_retire` | `guard.rs:1291` | epoch.load_lo |
+| `TS5` | `try_retire` | `guard.rs:1297-1308` | epoch.load_hi odd; a node assigned |
+| `TG1` | `try_retire` | `guard.rs:1313` | first.load_lo (helper slot) |
+| `TG2` | `try_retire` | `guard.rs:1318-1330` | epoch.load_lo; a node assigned |
+| `TN2` | `try_retire` | `guard.rs:1343-1353` | slot info, next null; first.load_lo |
+| `TN3` | `try_retire` | `guard.rs:1359` | epoch re-checked |
+| `TN4` | `try_retire` | `guard.rs:1368` | exchange_lo(curr) |
+| `InsertRollback` | `try_retire` | `guard.rs:1381-1389` | compare_exchange_lo(curr, INVPTR); a node captured counts |
+| `TL1` | `try_retire` | `guard.rs:1396` | next CAS null -> prev |
+| `TL2` | `try_retire` | `guard.rs:1408-1409` | the list it displaced traversed and freed |
+| `TL3` | `try_retire` | `guard.rs:1415` | counted |
+| `TF1` | `try_retire` | `guard.rs:1420-1425` | refs fetch_add(adjs); zero frees the batch |
+| `TF2` | `try_retire` | `guard.rs:1428` | placed |
+| `RE1` | `enqueue_node` | `guard.rs:989-1017` | the node linked into the batch, the count |
+| `RE2` | `enqueue_node` | `guard.rs:1019-1032` | in_reclaim; take_batch, try_retire |
+| `RE3` | `enqueue_node` | `guard.rs:1038-1040` | merge_batch; in_reclaim restored |
+| `RE4` | `enqueue_node` | `guard.rs:1050-1053` | alloc_counter; tid() |
+| `RE5` | `increment_era` | `guard.rs:1066-1067` | in_reclaim; help_read |
+| `RE6` | `increment_era` | `guard.rs:1068-1069` | advance_epoch; the birth stamp |
 | `PN1` | `pin` | `guard.rs:517-525` | the count; epoch() vs drained_epoch |
 | `PNU` | `transition` | `guard.rs:545` | do_update |
 | `PNC` | `transition` | `guard.rs:548-558` | attempts; epoch() compared; slow_path |
@@ -283,33 +284,33 @@ that does nothing without it).
 | `LU1` | `Atomic::load_unprotected` | `atomic.rs:140` | data.load, no era check |
 | `WR1` | `Atomic::swap` | `atomic.rs:247` | the swap (after RetiredNode::new; then retire) |
 | `RN1` | `RetiredNode::new` | `retired.rs:118` | a node allocated, its birth stamped (then retire) |
-| `FL1` | `flush` | `guard.rs:1500-1518` | tid, in_reclaim, the pin count |
-| `FL2` | `flush` | `guard.rs:1542-1544` | the own list exchanged to 0 |
-| `FL3` | `flush` | `guard.rs:1551` | adopt_orphans |
-| `FL4` | `flush` | `guard.rs:1552-1554` | take_batch, try_retire |
-| `FL6` | `flush` | `guard.rs:1555-1561` | merge_batch; increment_era: help_read |
-| `FL7` | `flush` | `guard.rs:1561-1563` | increment_era: advance_epoch, the birth stamp; drain_free_list |
-| `FlushClear` | `flush` | `guard.rs:1578-1580` | the own list exchanged to 0 once more |
-| `FlushClear2` | `flush` | `guard.rs:1583` | drain_free_list |
-| `FlushClear3` | `flush` | `guard.rs:1585-1588` | epoch.store_lo(0); cached and drained epochs 0 |
-| `FL9` | `flush` | `guard.rs:1591-1592` | restored |
-| `EX1` | `cleanup` | `guard.rs:1600-1620` | in_reclaim, the pin count, own |
-| `ExitSubmit` | `cleanup` | `guard.rs:1639` | submit_at_exit: take_batch, try_retire |
-| `ExitSubmit2` | `submit_at_exit` | `guard.rs:1733` | not placed: parked |
-| `ExitTake` | `cleanup` | `guard.rs:1648-1650` | the own list taken |
-| `ExitFree` | `cleanup` | `guard.rs:1654-1655` | drain_free_list |
-| `ExitRound` | `cleanup` | `guard.rs:1629` | EXIT_ROUNDS rounds |
-| `ExitParkRest` | `cleanup` | `guard.rs:1662-1663` | the last batch parked |
+| `FL1` | `flush` | `guard.rs:1516-1534` | tid, in_reclaim, the pin count |
+| `FL2` | `flush` | `guard.rs:1558-1560` | the own list exchanged to 0 |
+| `FL3` | `flush` | `guard.rs:1567` | adopt_orphans |
+| `FL4` | `flush` | `guard.rs:1568-1570` | take_batch, try_retire |
+| `FL6` | `flush` | `guard.rs:1571-1577` | merge_batch; increment_era: help_read |
+| `FL7` | `flush` | `guard.rs:1577-1579` | increment_era: advance_epoch, the birth stamp; drain_free_list |
+| `FlushClear` | `flush` | `guard.rs:1594-1596` | the own list exchanged to 0 once more |
+| `FlushClear2` | `flush` | `guard.rs:1599` | drain_free_list |
+| `FlushClear3` | `flush` | `guard.rs:1601-1604` | epoch.store_lo(0); cached and drained epochs 0 |
+| `FL9` | `flush` | `guard.rs:1607-1608` | restored |
+| `EX1` | `cleanup` | `guard.rs:1616-1636` | in_reclaim, the pin count, own |
+| `ExitSubmit` | `cleanup` | `guard.rs:1655` | submit_at_exit: take_batch, try_retire |
+| `ExitSubmit2` | `submit_at_exit` | `guard.rs:1749` | not placed: parked |
+| `ExitTake` | `cleanup` | `guard.rs:1664-1666` | the own list taken |
+| `ExitFree` | `cleanup` | `guard.rs:1670-1671` | drain_free_list |
+| `ExitRound` | `cleanup` | `guard.rs:1645` | EXIT_ROUNDS rounds |
+| `ExitParkRest` | `cleanup` | `guard.rs:1678-1679` | the last batch parked |
 | `EX6` | `deactivate_slots` | `slot.rs:646` | the reservation's epoch lo 0 |
 | `EX7` | `deactivate_slots` | `slot.rs:647-649` | its first exchanged to INVPTR |
 | `EX7b` | `deactivate_slots` | `slot.rs:646` | the helper slot's epoch lo 0 |
 | `EX7c` | `deactivate_slots` | `slot.rs:647-649` | its first exchanged to INVPTR |
-| `EX8` | `cleanup` | `guard.rs:1674-1680` | each captured list traversed |
-| `EX9` | `cleanup` | `guard.rs:1681` | the batches released |
-| `EX10` | `cleanup` | `guard.rs:1682-1692` | re-armed, parked |
-| `EX12` | `cleanup` | `guard.rs:1700-1701` | park_orphans |
-| `EX12b` | `cleanup` | `guard.rs:1710` | release_tid |
-| `EX13` | `cleanup` | `guard.rs:1712-1721` | restored, the tid unset |
+| `EX8` | `cleanup` | `guard.rs:1690-1696` | each captured list traversed |
+| `EX9` | `cleanup` | `guard.rs:1697` | the batches released |
+| `EX10` | `cleanup` | `guard.rs:1698-1708` | re-armed, parked |
+| `EX12` | `cleanup` | `guard.rs:1716-1717` | park_orphans |
+| `EX12b` | `cleanup` | `guard.rs:1726` | release_tid |
+| `EX13` | `cleanup` | `guard.rs:1728-1737` | restored, the tid unset |
 | `SK1` | (model) | | the spin lock's test (ttas_locks only) |
 | `SK2` | (model) | | its test-and-set (ttas_locks only) |
 | `SK3` | (model) | | the lock taken (ttas_locks only) |
@@ -382,7 +383,8 @@ step counts. RF, EF, cache and epochs abbreviate `RetireFreq`, `EpochFreq`, `Max
 | `RC_mut_slow_path_frees` | slow_path_frees: a slow path frees the full cache at its traversals, the detached list's before the republication, running drops while its slot is closed to new batches: a batch a drop retires skips the slot. | cells 2, nodes 8, RF 2, cache 0, pin attempts 1 | `NoUseAfterFree` broken |
 | `RC_mut_detach_unclosed` | detach_unclosed: a detach retries its compare-exchange of the list without closing the era first, so new retires keep failing it. | threads 3, tids 3, nodes 4, pin attempts 1 | `DetachNotStarved` broken |
 | `RC_mut_help_follows_next_request` | help_follows_next_request: a helper's loop goes on while the pending thread has any request open, its compare-exchange expecting the request read last, so it runs through the epoch advances of the pending thread's later requests. | nodes 6, RF 6, EF 1, pin attempts 1, epochs 8, steps counted yes | `LoopBounds` broken |
-| `RC_find_help_torn_request` | help_torn_request: a helper that read a thread's first request, (INVPTR, 0), goes on while its two-word reads of the result pair the pending signal of a later request with the 0 of that request's self-completion, running through the epoch advances of the later requests. | nodes 5, RF 5, EF 1, pin attempts 1, epochs 8, steps counted yes | `LoopBounds` broken |
+| `RC_find_help_torn_request` | A helper that read a pinner's first request, (INVPTR, 0), while the pinner goes through later cycles: its check of the request can read a later request's INVPTR with the 0 of that request's self-completion; the era's seqno ends its loop. | nodes 5, RF 5, EF 1, pin attempts 1, epochs 8, steps counted yes | pass |
+| `RC_mut_help_no_seqno_check` | help_no_seqno_check: a helper goes on while its check reads the request it started with, without the era's seqno, so a torn read of a later request keeps it passing through the pinner's later cycles. | nodes 5, RF 5, EF 1, pin attempts 1, epochs 8, steps counted yes | `LoopBounds` broken |
 | `RC_mut_stale_birth` | stale_birth: a thread that advances the epoch keeps stamping its allocations with the epoch it cached before. | threads 1, tids 1, nodes 3, EF 1 | `BirthFresh` broken |
 | `RC_mut_flush_keeps_reservation` | flush_keeps_reservation: flush with no guard live ends only an escalated section, leaving the reservation at the epoch it published. | threads 1, tids 1, nodes 3, load attempts 1 | `FlushReleases` broken |
 | `RC_mut_load_traverses` | load_traverses: a protected load that sees the epoch move traverses the slot list instead of only raising the reservation, releasing what the section loaded first. | nodes 5, cache 0 | `NoUseAfterFree` broken |
@@ -409,22 +411,23 @@ step counts. RF, EF, cache and epochs abbreviate `RetireFreq`, `EpochFreq`, `Max
 
 ### Findings
 
-In the code as built, the model found one bound its code states broken:
+The model found one defect in the code it was built against, fixed on this branch:
 
-- **A helper loop that outlives the request it helps** (`RC_find_help_torn_request`, 2,351,551
-  states; `EXPECTED.txt` records the violation until the code changes). `help_thread` reads the
-  request as a pair, `(INVPTR, seqno)` while open, and goes on to another pass while `result.load()`
-  still returns that pair. `WordPair::load` reads the low word, then the high one. A self-completion
-  stores `(0, 0)`, and a thread's first request is `(INVPTR, 0)`: a read whose low word is a later
-  request's `INVPTR` and whose high word is that request's self-completion 0 returns `(INVPTR, 0)`.
-  A helper that read a thread's first request so goes on through the thread's later requests, one
-  more pass for every epoch advance between them, past T + 2 (five passes with T = 2 in the
-  counterexample), bounded by the other thread's progress and not by T. Safety is not at stake: the
-  helper's answer expects `(INVPTR, 0)`, which no later request is, so it never answers one. The
-  loop ends once the request's era sequence number moves on (a self-completion and a republication
-  store `seqno + 2` in the era's high word, a single word no read tears): with `epoch.load_hi() ==
-  seqno` checked beside the request before another pass, a copy of the model passes this
-  configuration (3,360,969 distinct states) and `RC_help_follows`.
+- **A helper loop that outlived the request it helps** (`RC_mut_help_no_seqno_check`, 2,351,551
+  states; `RC_find_help_torn_request` passes the same scenario with the fix). `help_thread` went on
+  to another pass while its check read the request it started with, `(INVPTR, seqno)`, the request's
+  two words read one at a time, the low one first. A self-completion stores `(0, 0)`, and a thread's
+  first request is `(INVPTR, 0)`: a check whose low word is a later request's `INVPTR` and whose
+  high word is that request's self-completion 0 reads `(INVPTR, 0)` (an answer's epoch equal to the
+  request's seqno pairs the same way). A helper that read a thread's first request so went on
+  through the thread's later cycles, one more pass for every epoch advance between them, past T + 2
+  (five passes with T = 2 in the counterexample): bounded by the other thread's progress, not by T.
+  Safety was not at stake, the helper's answer expecting a request no later cycle makes. Fix:
+  another pass only while the era's seqno is still the request's (one word, which a cycle leaves at
+  seqno + 2 and never brings back). The unit test
+  `help_ends_with_its_cycle_across_a_torn_request_read` holds the helper between the two halves of
+  its check and forces the torn read: without the seqno check the helper passes more than T + 2
+  times, with it once.
 
 On the code before the slow path's detach (the list hand-over of `take_over_list`), the first
 compare-exchange of the hand-over epoch loop could also fail on a torn read (the low word read
@@ -483,8 +486,8 @@ The defects this branch fixed, each put back by a mutation:
   era's sequence number goes odd), and scans skip a closed slot.
 - **A helper that follows the next request** (`RC_mut_help_follows_next_request`, 820,966 states): a
   helper went on while the pending thread had any request open, through the epoch advances of its
-  later requests. Fix: the loop ends once the request it read changes (`RC_find_help_torn_request`
-  above is the case this check misses).
+  later requests. Fix: the loop ends once the request it read changes (and, since a torn read can
+  hide that change, once the era's seqno moves on: `RC_mut_help_no_seqno_check` above).
 - **A stale birth stamp** (`RC_mut_stale_birth`, 29 states): a thread that advanced the epoch kept
   stamping allocations with an older epoch, so what it retired waited for slots stalled below the
   epoch it had made. Fix: an advance refreshes the stamp.
@@ -504,12 +507,12 @@ configuration did not finish.
 ### TLC results
 
 The run recorded in `reclaim/tlc-run.txt` (8 workers for a passing configuration, one for a
-violation, beside other work on a 36-core machine): 68 of 68 configurations match `EXPECTED.txt`, in
-1825 s. The largest passing ones are `RC_wf_mix` (8,363,530 distinct states, 241 s), `RC_hand_over`
-(5,601,019 distinct states, 202 s), `RC_two_loads` (2,790,043 distinct states, 122 s), `RC_slow`
-(1,731,159 distinct states, 56 s); the longest runs that break a property, on one worker, are
-`RC_find_help_torn_request` (2,351,551 distinct states, 268 s) and `RC_mut_tid_released_early`
-(1,544,254 distinct states, 246 s).
+violation, beside other work on a 36-core machine): 69 of 69 configurations match `EXPECTED.txt`, in
+2247 s. The largest passing ones are `RC_wf_mix` (8,363,530 distinct states, 218 s), `RC_hand_over`
+(5,601,019 distinct states, 200 s), `RC_find_help_torn_request` (3,371,877 distinct states, 89 s),
+`RC_two_loads` (2,790,043 distinct states, 84 s); the longest runs that break a property, on one
+worker, are `RC_mut_help_no_seqno_check` (2,351,551 distinct states, 412 s) and
+`RC_mut_tid_released_early` (1,544,254 distinct states, 337 s).
 
 ## What the map models check
 

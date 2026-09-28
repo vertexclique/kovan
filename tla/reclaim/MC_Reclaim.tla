@@ -158,7 +158,8 @@ P_wf_pin == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, P, U, P, U>>
 P_help_follows == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Rt, P, U, Rt, P, U, Rt, P, U, Rt, P, U,
                                                       Rt, P, U>>
                                             ELSE <<After(1, 2), P, U, Fl>>]
-\* The same, the flush free to help its first request.
+\* The same, the flush free to help the pinner's first request, whose seqno is 0: the helper's
+\* check of that request can read a later request's INVPTR with the 0 its self-completion left.
 P_help_torn == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Rt, P, U, Rt, P, U, Rt, P, U, Rt, P, U>>
                                          ELSE <<P, U, Fl>>]
 \* A loader against a writer that advances the epoch at every retire.

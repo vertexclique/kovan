@@ -43,7 +43,8 @@ RC_mut_exit_handle_unreachable     MC_Reclaim         violated:NoUseAfterFree
 RC_mut_slow_path_frees             MC_Reclaim         violated:NoUseAfterFree
 RC_mut_detach_unclosed             MC_Reclaim         violated:DetachNotStarved
 RC_mut_help_follows_next_request   MC_Reclaim         violated:LoopBounds
-RC_find_help_torn_request          MC_Reclaim         violated:LoopBounds
+RC_find_help_torn_request          MC_Reclaim         pass
+RC_mut_help_no_seqno_check         MC_Reclaim         violated:LoopBounds
 RC_mut_stale_birth                 MC_Reclaim         violated:BirthFresh
 RC_mut_flush_keeps_reservation     MC_Reclaim         violated:FlushReleases
 RC_mut_load_traverses              MC_Reclaim         violated:NoUseAfterFree
