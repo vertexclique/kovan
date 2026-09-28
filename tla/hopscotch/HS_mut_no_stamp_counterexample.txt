@@ -22,6 +22,7 @@ State 1: <Initial predicate>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -57,6 +58,7 @@ State 1: <Initial predicate>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -92,6 +94,7 @@ State 1: <Initial predicate>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -123,7 +126,7 @@ State 1: <Initial predicate>
 /\ latch = FALSE
 /\ err = "none"
 
-State 2: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
+State 2: <Dispatch line 143, col 5 to line 154, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -145,6 +148,7 @@ State 2: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -180,6 +184,7 @@ State 2: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -215,6 +220,7 @@ State 2: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -246,7 +252,7 @@ State 2: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 3: <IW line 161, col 5 to line 164, col 69 of module HopscotchMap>
+State 3: <IW line 165, col 5 to line 168, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -268,6 +274,7 @@ State 3: <IW line 161, col 5 to line 164, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -303,6 +310,7 @@ State 3: <IW line 161, col 5 to line 164, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -338,6 +346,7 @@ State 3: <IW line 161, col 5 to line 164, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -369,7 +378,7 @@ State 3: <IW line 161, col 5 to line 164, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 4: <IC line 168, col 5 to line 176, col 65 of module HopscotchMap>
+State 4: <IC line 172, col 5 to line 180, col 65 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -391,6 +400,7 @@ State 4: <IC line 168, col 5 to line 176, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -426,6 +436,7 @@ State 4: <IC line 168, col 5 to line 176, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -461,6 +472,7 @@ State 4: <IC line 168, col 5 to line 176, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -492,7 +504,7 @@ State 4: <IC line 168, col 5 to line 176, col 65 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 5: <IS line 181, col 5 to line 208, col 38 of module HopscotchMap>
+State 5: <IS line 185, col 5 to line 187, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -508,12 +520,13 @@ State 5: <IS line 181, col 5 to line 208, col 38 of module HopscotchMap>
   stamp |-> <<(0 :> 0 @@ 1 :> 0)>>,
   grd |-> <<(0 :> TRUE @@ 1 :> FALSE)>> ]
 /\ ts = ( 1 :>
-      [ pc |-> "IFr",
+      [ pc |-> "IU",
         t |-> 1,
         i |-> 1,
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 1 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -549,6 +562,7 @@ State 5: <IS line 181, col 5 to line 208, col 38 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -584,6 +598,7 @@ State 5: <IS line 181, col 5 to line 208, col 38 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -615,7 +630,7 @@ State 5: <IS line 181, col 5 to line 208, col 38 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 6: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
+State 6: <IU line 191, col 5 to line 220, col 44 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -637,6 +652,133 @@ State 6: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
+        abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
+        inv |-> 0,
+        hw |-> [hops |-> {0}, stamp |-> 0],
+        off |-> 0,
+        n |-> 0,
+        out |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        free |-> 0,
+        from |-> 0,
+        con |-> FALSE,
+        own |-> 0,
+        ow |-> [hops |-> {}, stamp |-> 0],
+        rest |-> {},
+        idx |-> 0,
+        recent |-> (0 :> 0 @@ 1 :> 0),
+        ycnt |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        gc |-> 0,
+        rsc |-> FALSE,
+        skp |-> FALSE,
+        rk |-> "none",
+        rc |-> 0,
+        ce |-> 0 ] @@
+  2 :>
+      [ pc |-> "next",
+        t |-> 0,
+        i |-> 1,
+        h |-> 0,
+        j |-> 1,
+        e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
+        abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
+        inv |-> 0,
+        hw |-> [hops |-> {}, stamp |-> 0],
+        off |-> 0,
+        n |-> 0,
+        out |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        free |-> 0,
+        from |-> 0,
+        con |-> FALSE,
+        own |-> 0,
+        ow |-> [hops |-> {}, stamp |-> 0],
+        rest |-> {},
+        idx |-> 0,
+        recent |-> (0 :> 0 @@ 1 :> 0),
+        ycnt |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        gc |-> 0,
+        rsc |-> FALSE,
+        skp |-> FALSE,
+        rk |-> "none",
+        rc |-> 0,
+        ce |-> 0 ] @@
+  9 :>
+      [ pc |-> "next",
+        t |-> 0,
+        i |-> 1,
+        h |-> 0,
+        j |-> 1,
+        e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
+        abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
+        inv |-> 0,
+        hw |-> [hops |-> {}, stamp |-> 0],
+        off |-> 0,
+        n |-> 0,
+        out |-> "none",
+        res |-> 0,
+        ins |-> FALSE,
+        cnt |-> FALSE,
+        rmv |-> FALSE,
+        free |-> 0,
+        from |-> 0,
+        con |-> FALSE,
+        own |-> 0,
+        ow |-> [hops |-> {}, stamp |-> 0],
+        rest |-> {},
+        idx |-> 0,
+        recent |-> (0 :> 0 @@ 1 :> 0),
+        ycnt |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
+        yv |-> {},
+        old |-> 0,
+        nt |-> 0,
+        gc |-> 0,
+        rsc |-> FALSE,
+        skp |-> FALSE,
+        rk |-> "none",
+        rc |-> 0,
+        ce |-> 0 ] )
+/\ latch = FALSE
+/\ err = "none"
+
+State 7: <IFr line 228, col 5 to line 253, col 55 of module HopscotchMap>
+/\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
+/\ cur = 1
+/\ hist = <<>>
+/\ abs = (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0)
+/\ ent = [ st |-> <<"live", "live", "free", "free">>,
+  key |-> <<0, 1, 0, 0>>,
+  val |-> <<1, 1, 0, 0>> ]
+/\ count = 2
+/\ tb = [ cap |-> <<2>>,
+  st |-> <<"current">>,
+  hops |-> <<(0 :> {0} @@ 1 :> {0})>>,
+  slot |-> <<(0 :> 1 @@ 1 :> 2 @@ 2 :> 0 @@ 3 :> 0)>>,
+  stamp |-> <<(0 :> 0 @@ 1 :> 0)>>,
+  grd |-> <<(0 :> TRUE @@ 1 :> FALSE)>> ]
+/\ ts = ( 1 :>
+      [ pc |-> "IFr",
+        t |-> 1,
+        i |-> 1,
+        h |-> 0,
+        j |-> 1,
+        e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -672,6 +814,7 @@ State 6: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -707,6 +850,7 @@ State 6: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -738,7 +882,7 @@ State 6: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 7: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
+State 8: <IFr line 228, col 5 to line 253, col 55 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -760,6 +904,7 @@ State 7: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -795,6 +940,7 @@ State 7: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -830,6 +976,7 @@ State 7: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -861,7 +1008,7 @@ State 7: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 8: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
+State 9: <IFr line 228, col 5 to line 253, col 55 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -883,6 +1030,7 @@ State 8: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -918,6 +1066,7 @@ State 8: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -953,6 +1102,7 @@ State 8: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -984,7 +1134,7 @@ State 8: <IFr line 216, col 5 to line 241, col 55 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 9: <D0 line 268, col 5 to line 274, col 69 of module HopscotchMap>
+State 10: <D0 line 280, col 5 to line 286, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1006,6 +1156,7 @@ State 9: <D0 line 268, col 5 to line 274, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1041,6 +1192,7 @@ State 9: <D0 line 268, col 5 to line 274, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1076,6 +1228,7 @@ State 9: <D0 line 268, col 5 to line 274, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1107,7 +1260,7 @@ State 9: <D0 line 268, col 5 to line 274, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 10: <D1 line 278, col 5 to line 282, col 69 of module HopscotchMap>
+State 11: <D1 line 290, col 5 to line 294, col 69 of module HopscotchMap>
 /\ prot = (1 :> {} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1129,6 +1282,7 @@ State 10: <D1 line 278, col 5 to line 282, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1164,6 +1318,7 @@ State 10: <D1 line 278, col 5 to line 282, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1199,6 +1354,7 @@ State 10: <D1 line 278, col 5 to line 282, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1230,7 +1386,7 @@ State 10: <D1 line 278, col 5 to line 282, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 11: <D2 line 288, col 5 to line 316, col 54 of module HopscotchMap>
+State 12: <D2 line 300, col 5 to line 328, col 54 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1252,6 +1408,7 @@ State 11: <D2 line 288, col 5 to line 316, col 54 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1287,6 +1444,7 @@ State 11: <D2 line 288, col 5 to line 316, col 54 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1322,6 +1480,7 @@ State 11: <D2 line 288, col 5 to line 316, col 54 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1353,7 +1512,7 @@ State 11: <D2 line 288, col 5 to line 316, col 54 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 12: <M1 line 324, col 5 to line 335, col 65 of module HopscotchMap>
+State 13: <M1 line 336, col 5 to line 347, col 65 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1375,6 +1534,7 @@ State 12: <M1 line 324, col 5 to line 335, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1410,6 +1570,7 @@ State 12: <M1 line 324, col 5 to line 335, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1445,6 +1606,7 @@ State 12: <M1 line 324, col 5 to line 335, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1476,7 +1638,7 @@ State 12: <M1 line 324, col 5 to line 335, col 65 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 13: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
+State 14: <Dispatch line 143, col 5 to line 154, col 69 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1498,6 +1660,7 @@ State 13: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1533,6 +1696,7 @@ State 13: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1568,6 +1732,7 @@ State 13: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1599,7 +1764,7 @@ State 13: <Dispatch line 139, col 5 to line 150, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 14: <G0 line 600, col 5 to line 605, col 69 of module HopscotchMap>
+State 15: <G0 line 622, col 5 to line 627, col 69 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1621,6 +1786,7 @@ State 14: <G0 line 600, col 5 to line 605, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1656,6 +1822,7 @@ State 14: <G0 line 600, col 5 to line 605, col 69 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1691,6 +1858,7 @@ State 14: <G0 line 600, col 5 to line 605, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1722,7 +1890,7 @@ State 14: <G0 line 600, col 5 to line 605, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 15: <M2 line 339, col 5 to line 345, col 65 of module HopscotchMap>
+State 16: <M2 line 351, col 5 to line 357, col 65 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1744,6 +1912,7 @@ State 15: <M2 line 339, col 5 to line 345, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1779,6 +1948,7 @@ State 15: <M2 line 339, col 5 to line 345, col 65 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1814,6 +1984,7 @@ State 15: <M2 line 339, col 5 to line 345, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1845,7 +2016,7 @@ State 15: <M2 line 339, col 5 to line 345, col 65 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 16: <M3 line 349, col 5 to line 353, col 65 of module HopscotchMap>
+State 17: <M3 line 361, col 5 to line 365, col 65 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1867,6 +2038,7 @@ State 16: <M3 line 349, col 5 to line 353, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1902,6 +2074,7 @@ State 16: <M3 line 349, col 5 to line 353, col 65 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -1937,6 +2110,7 @@ State 16: <M3 line 349, col 5 to line 353, col 65 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -1968,7 +2142,7 @@ State 16: <M3 line 349, col 5 to line 353, col 65 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 17: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
+State 18: <G2 line 631, col 5 to line 645, col 58 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -1990,6 +2164,7 @@ State 17: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2025,6 +2200,7 @@ State 17: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2060,6 +2236,7 @@ State 17: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -2091,7 +2268,7 @@ State 17: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 18: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
+State 19: <G2 line 631, col 5 to line 645, col 58 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -2113,6 +2290,7 @@ State 18: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2148,6 +2326,7 @@ State 18: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2183,6 +2362,7 @@ State 18: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -2214,7 +2394,7 @@ State 18: <G2 line 609, col 5 to line 623, col 58 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 19: <G3 line 627, col 5 to line 632, col 69 of module HopscotchMap>
+State 20: <G3 line 649, col 5 to line 654, col 69 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -2236,6 +2416,7 @@ State 19: <G3 line 627, col 5 to line 632, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2271,6 +2452,7 @@ State 19: <G3 line 627, col 5 to line 632, col 69 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2306,6 +2488,7 @@ State 19: <G3 line 627, col 5 to line 632, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -2337,7 +2520,7 @@ State 19: <G3 line 627, col 5 to line 632, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 20: <G8 line 635, col 5 to line 637, col 69 of module HopscotchMap>
+State 21: <G8 line 657, col 5 to line 659, col 69 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -2359,6 +2542,7 @@ State 20: <G8 line 635, col 5 to line 637, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2394,6 +2578,7 @@ State 20: <G8 line 635, col 5 to line 637, col 69 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2429,6 +2614,7 @@ State 20: <G8 line 635, col 5 to line 637, col 69 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -2460,7 +2646,7 @@ State 20: <G8 line 635, col 5 to line 637, col 69 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "none"
 
-State 21: <G9 line 640, col 5 to line 642, col 58 of module HopscotchMap>
+State 22: <G9 line 662, col 5 to line 664, col 58 of module HopscotchMap>
 /\ prot = (1 :> {2} @@ 2 :> {} @@ 9 :> {})
 /\ cur = 1
 /\ hist = <<>>
@@ -2482,6 +2668,7 @@ State 21: <G9 line 640, col 5 to line 642, col 58 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 2,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2517,6 +2704,7 @@ State 21: <G9 line 640, col 5 to line 642, col 58 of module HopscotchMap>
         h |-> 1,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 1 @@ 1 :> 1 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {0}, stamp |-> 0],
@@ -2552,6 +2740,7 @@ State 21: <G9 line 640, col 5 to line 642, col 58 of module HopscotchMap>
         h |-> 0,
         j |-> 1,
         e |-> 0,
+        rd |-> (0 :> 0 @@ 1 :> 0),
         abs0 |-> (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0),
         inv |-> 0,
         hw |-> [hops |-> {}, stamp |-> 0],
@@ -2583,4 +2772,4 @@ State 21: <G9 line 640, col 5 to line 642, col 58 of module HopscotchMap>
 /\ latch = FALSE
 /\ err = "lin_get"
 
-1046 states generated, 485 distinct states found, 67 states left on queue.
+1109 states generated, 511 distinct states found, 67 states left on queue.

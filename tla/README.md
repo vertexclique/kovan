@@ -183,11 +183,13 @@ The run recorded in `chained/tlc-run.txt` (8 workers, beside other work on a 36-
   slot, the new bit published with the stamp advanced, the old slot emptied, the old bit cleared at
   the release), DL (the link into the freed slot, through IL), ICnt, IR (the guard released,
   `table.rs:125`), IA, and NR (no room: the writer resizes itself, `hopscotch.rs:199`).
-- `hopscotch.rs:351` `remove`: RW, RC, RS (the key's entry unlinked under the guard), RN, RR, RT.
-  RS, and IS for an insert, read the entries the home's bits name without protecting them
-  (`table.rs` `find_held`): the guard's holder is the only thread that unlinks or retires an
-  entry of the home, so each checks that every entry it reads is live (`HeldScan`, a use after
-  free otherwise).
+- `hopscotch.rs:351` `remove`: RW, RC, RS and RU (the key's entry unlinked under the guard), RN,
+  RR, RT. RS, and IS for an insert, load the words of the slots the home's bits name without
+  protecting the entries (`table.rs` `find_held`); RU and IU use those entries a step later (keys
+  compared, the value read, the entry unlinked or replaced). The guard's holder is the only thread
+  that unlinks or retires an entry of the home, so each entry loaded must still be live at its use
+  (`HeldUse`, a use after free otherwise); another thread's step can fall between the load and
+  the use.
 - `hopscotch/iter.rs:97` `next` and `:77` `met_before`: T0, T1, T9 (the walk keeps its table and
   skips a key it met in the lower slots of the key's neighborhood).
 - `hopscotch/resize.rs:103` `try_resize`, `:32` `hold_writers`, `:170` `copy_into`: Z0 to Z4 (every
@@ -232,6 +234,7 @@ key 2 finds home 0's neighborhood full and moves key 1 to slot 2.
 | `HS_mut_iter_no_recent` | a walk that does not recognize a key it met meets a moved key twice | none | `WalkExact` broken |
 | `HS_mut_link_then_publish` | the guard fix merged from `vclq/hopscotch-resize-fixes`: an insert links its entry before it publishes the bit (at the guard's release) | none | `Linearizable` broken |
 | `HS_mut_link_then_publish_iter` | the same, as a walk sees it | none | `WalkExact` broken |
+| `HS_mut_held_scan` | 0.1.20's unguarded remove racing a claim whose scan under the guard loads the key's entry unprotected | none | `NoUseAfterFree` broken |
 | `HS_wit_move` | witness: a move empties its old slot | none | `NoMove` broken |
 | `HS_wit_stamp_rescan` | witness: a lookup rescans after a move | none | `NoStampRescan` broken |
 | `HS_wit_resize_waits` | witness: a resize waits for a writer holding a home guard | grow | `NoResizeWaitsForWriter` broken |
@@ -240,31 +243,39 @@ key 2 finds home 0's neighborhood full and moves key 1 to slot 2.
 
 ### Findings
 
-- **An insert's entry lost to a racing remove of the same home** (`HS_mut_unguarded_remove`, 13
+- **An insert's entry lost to a racing remove of the same home** (`HS_mut_unguarded_remove`, 14
   states). 0.1.20's remove emptied the slot and then cleared the bit with no guard; an insert of
   the same home took the freed slot and set the same bit in between, and the remove's clear left
   the new entry in its slot with no bit naming it: invisible to lookups and removes, and a later
   `get_or_insert` inserted a second one. Racing a move, its unlink CAS failed on the moved entry
-  and it answered `None` for a present key (`HS_mut_unguarded_remove_moved`, 19 states). Fix: a remove holds
+  and it answered `None` for a present key (`HS_mut_unguarded_remove_moved`, 20 states). Fix: a remove holds
   the home guard.
-- **A lookup missing a key being moved** (`HS_mut_move_clear_first`, 19 states; `HS_mut_no_stamp`, 21 states). 0.1.20
+- **A lookup missing a key being moved** (`HS_mut_move_clear_first`, 20 states; `HS_mut_no_stamp`, 22 states). 0.1.20
   moved a copy, cleared the old bit before setting the new one, and gave a lookup no way to notice
   a move. Fix: the moved entry's home guard, the same allocation linked at its new slot and named
   by its bit before the old slot empties, and the move stamp a missing lookup rereads.
-- **`insert_if_absent` reporting its own insert as present** (`HS_mut_resize_retry`, 26 states).
+- **`insert_if_absent` reporting its own insert as present** (`HS_mut_resize_retry`, 28 states).
   Fix: the resize holds every writer guard before it copies, and a landed insert is final.
-- **A walk skipping or repeating entries across a resize** (`HS_mut_iter_index`, 31 states). Fix: the walk
+- **A walk skipping or repeating entries across a resize** (`HS_mut_iter_index`, 32 states). Fix: the walk
   keeps the table it started on (a replaced table keeps its guards held, so its entries stay put).
-- **A lookup seeing an insert that a later lookup misses** (`HS_mut_link_then_publish`, 18 states, found in
+- **A lookup seeing an insert that a later lookup misses** (`HS_mut_link_then_publish`, 20 states, found in
   `HS_big_disp` while this model was written, then reduced). The guard fix merged from
   `vclq/hopscotch-resize-fixes` linked a new entry before publishing its bit (published at the
   guard's release). A lookup holding a control word read before a remove of the same key cleared
   the slot's bit finds the new entry through that stale bit, while a lookup that starts after it
   answered still misses it: no linearization exists. A walk, which reads slots, yields it the same
-  way (`HS_mut_link_then_publish_iter`, 22 states). Fix: the insert publishes the bit before the link CAS
+  way (`HS_mut_link_then_publish_iter`, 24 states). Fix: the insert publishes the bit before the link CAS
   (`displace.rs:93`), taking it back if the CAS loses the slot.
+- **A scan under the guard reading an entry another thread retired** (`HS_mut_held_scan`, 14
+  states). A writer's scan under its home guard loads the entries its bits name without
+  protecting them, so it relies on no other thread unlinking or retiring one of them before it
+  is done. With 0.1.20's remove, which takes no guard, a claim loads the key's entry, the remove
+  unlinks and retires it, and the claim then reads the retired entry. A check of the slots at the
+  scan alone cannot see this (a retired entry is never in a slot, `RetiredUnreachable`): the load
+  and the use are separate steps. Holds with the guard: every remove, replace, move, resize and
+  clear of the home's entries holds its guard.
 
 ### TLC results
 
-The run recorded in `hopscotch/tlc-run.txt` (8 workers): 31 of 31 configurations match
-`EXPECTED.txt`; the largest passing one is `HS_big_disp` (4,400,666 distinct states, 63 s).
+The run recorded in `hopscotch/tlc-run.txt` (8 workers): 32 of 32 configurations match
+`EXPECTED.txt`; the largest passing one is `HS_big_disp` (4,588,001 distinct states, 109 s).

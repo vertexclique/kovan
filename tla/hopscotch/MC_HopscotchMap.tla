@@ -65,6 +65,9 @@ P_big_claims == [w \in {1, 2, 3} |-> CASE w = 1 -> <<Iia(2, 1)>>
 P_stale == [w \in {1, 2} |-> IF w = 1 THEN <<Rem(1), Iia(1, 2)>> ELSE <<Get(1)>>]
 \* A remove and a re-claim of one key racing a walk.
 P_stale_iter == [w \in {1, 2} |-> IF w = 1 THEN <<Rem(1), Iia(1, 2)>> ELSE <<Iter>>]
+\* A claim of a present key racing a remove of it: the claim's scan under its home guard reads
+\* the key's entry without protecting it.
+P_held_scan == [w \in {1, 2} |-> IF w = 1 THEN <<Rem(0)>> ELSE <<Iia(0, 2)>>]
 \* Only the reader (worker 2) is scheduled fairly: a writer may stop anywhere, holding a home
 \* guard or in the middle of a move, and the reader must still end (lookups and walks take no
 \* guard and wait for nobody).
