@@ -114,7 +114,11 @@ impl<T> Atomic<T> {
     ///
     /// # Safety
     ///
-    /// Until the caller's last use of the returned pointer, no thread retires the pointee.
+    /// If the pointer loaded is not null, its pointee stays allocated until the caller's last use
+    /// of the returned [`Shared`]: it was not retired when it was loaded, no thread retires it
+    /// before that use, and nothing frees it any other way meanwhile (a retired value that owns
+    /// it, say). The guard gives it no protection: a retired pointee may be freed while the guard
+    /// is still held.
     ///
     /// # Examples
     ///
@@ -124,7 +128,8 @@ impl<T> Atomic<T> {
     ///
     /// let atomic = Atomic::new(Box::into_raw(Box::new(42)));
     /// let guard = pin();
-    /// // SAFETY: no thread retires the value.
+    /// // SAFETY: no other thread can reach `atomic`, so nothing retires or frees the value before
+    /// // its last use below.
     /// let ptr = unsafe { atomic.load_unprotected(Ordering::Acquire, &guard) };
     /// assert_eq!(unsafe { *ptr.deref() }, 42);
     /// drop(unsafe { Box::from_raw(ptr.as_raw()) });
