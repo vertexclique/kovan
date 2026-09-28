@@ -17,7 +17,6 @@ authors = ["Theo M. Bulut <vertexclique@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/vertexclique/kovan"
 readme = "README.md"
-exclude = ["model_chk"]
 
 [workspace.dependencies]
 kovan = { version = "0.1.21", path = "kovan" }
