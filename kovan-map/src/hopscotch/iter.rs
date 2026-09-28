@@ -84,9 +84,12 @@ struct Seen<K, V> {
     /// `i % NEIGHBORHOOD_SIZE`, null until the walk meets an entry there), loaded under the
     /// walk's guard.
     recent: [*const Entry<K, V>; NEIGHBORHOOD_SIZE],
-    /// The hash of the entry in each slot of `recent` (meaningless for a free slot): the walk
-    /// compares hashes here, in its own memory, and reads an earlier entry only on a match.
-    recent_hash: [u64; NEIGHBORHOOD_SIZE],
+    /// For each home the walk met an entry of (home `h` at `h % NEIGHBORHOOD_SIZE`): the home's
+    /// low 32 bits over a 32-bit filter of the hashes of the home's entries the walk met, bit
+    /// `hash >> 59` of each. A walk meets a key again only as an entry of the same hash, so the
+    /// same home and the same bit: an entry whose bit is clear in its home's filter is one the
+    /// walk has not met, known without a scan.
+    homes: [u64; NEIGHBORHOOD_SIZE],
     /// `K`'s equality, taken where `iter` is built.
     same_key: fn(&K, &K) -> bool,
 }
@@ -96,7 +99,7 @@ impl<K, V> Seen<K, V> {
     fn new(same_key: fn(&K, &K) -> bool) -> Self {
         Self {
             recent: [core::ptr::null(); NEIGHBORHOOD_SIZE],
-            recent_hash: [0; NEIGHBORHOOD_SIZE],
+            homes: [0; NEIGHBORHOOD_SIZE],
             same_key,
         }
     }
@@ -106,32 +109,40 @@ impl<K, V> Seen<K, V> {
     /// Every walk step, `next` and `fold` alike, is this call.
     #[inline(always)]
     fn first_meeting(&mut self, entry: &Entry<K, V>, idx: usize, mask: usize) -> bool {
-        // A free slot leaves its cell as it was. A stale cell (an entry met at least
-        // `NEIGHBORHOOD_SIZE` slots back) never matches: an entry's two slots in a move, or two
-        // entries of one key, share a home and so lie within one neighborhood, and `met_before`
-        // reads no cell below the home. The walk's guard keeps a stale entry allocated.
         self.recent[idx % NEIGHBORHOOD_SIZE] = entry;
-        self.recent_hash[idx % NEIGHBORHOOD_SIZE] = entry.hash;
-        !self.met_before((entry.hash as usize) & mask, idx, entry)
+        let home = (entry.hash as usize) & mask;
+        // The filter of `home` as the walk left it at its last entry of `home`, or an empty one
+        // when the cell names another home. Every entry of `home` lies in its neighborhood,
+        // `home..home + NEIGHBORHOOD_SIZE`, so no entry of another home of this cell lies
+        // between two entries of `home` in slot order: the cell holds `home`'s filter from the
+        // walk's first entry of `home` to its last. (A home equal to `home` in its low 32 bits
+        // only is `NEIGHBORHOOD_SIZE` homes away or more: its bits can only add a scan.)
+        let cell = &mut self.homes[home % NEIGHBORHOOD_SIZE];
+        let bit = 1u32 << (entry.hash >> 59);
+        let filter =
+            core::hint::select_unpredictable((*cell >> 32) as u32 == home as u32, *cell as u32, 0);
+        *cell = (u64::from(home as u32) << 32) | u64::from(filter | bit);
+        filter & bit == 0 || !self.met_before(home, idx, entry)
     }
 
     /// Whether the walk already met the key of `entry`, read at slot `idx`, in a lower slot of
     /// the key's neighborhood (which starts at `home`). A move carries an entry to a higher slot
     /// of its neighborhood, so the walk can meet it a second time there (or a newer entry of its
     /// key, after an update or a re-insert). Every slot of that neighborhood below `idx` is still
-    /// in `recent`: the neighborhood spans `NEIGHBORHOOD_SIZE` slots.
+    /// in `recent`: the neighborhood spans `NEIGHBORHOOD_SIZE` slots. A cell the walk last wrote
+    /// at least `NEIGHBORHOOD_SIZE` slots back (a free slot leaves its cell as it was) holds an
+    /// entry of a lower home, whose hash differs; the walk's guard keeps it allocated.
+    #[cold]
+    #[inline(never)]
     fn met_before(&self, home: usize, idx: usize, entry: &Entry<K, V>) -> bool {
         let lowest = home.max(idx.saturating_sub(NEIGHBORHOOD_SIZE - 1));
         (lowest..idx).any(|seen_idx| {
-            let slot = seen_idx % NEIGHBORHOOD_SIZE;
-            if self.recent_hash[slot] != entry.hash {
-                return false;
-            }
-            let seen = self.recent[slot];
+            let seen = self.recent[seen_idx % NEIGHBORHOOD_SIZE];
             // SAFETY: null for a slot where the walk met no entry yet, else loaded under the
             // walk's guard, which keeps it from being freed.
             unsafe { seen.as_ref() }.is_some_and(|seen| {
-                core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key)
+                seen.hash == entry.hash
+                    && (core::ptr::eq(seen, entry) || (self.same_key)(&seen.key, &entry.key))
             })
         })
     }
