@@ -165,3 +165,57 @@ fn escalated_unpin_keeps_the_batches_its_destructors_free() {
         "values retired by a destructor were lost"
     );
 }
+
+/// A thread's exit runs the destructors of what its slot held, and such a
+/// destructor may pin and load, publishing into the thread's slot. Until
+/// they have all run the thread must keep its ID: a thread that took the ID
+/// over meanwhile would own the slot those publications write.
+#[test]
+fn exit_keeps_its_tid_until_its_destructors_ran() {
+    #[repr(C)]
+    struct ChecksTid {
+        retired: RetiredNode,
+        tid: usize,
+        released_early: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for ChecksTid {
+        fn drop(&mut self) {
+            if crate::slot::global().tid_is_released(self.tid) {
+                self.released_early.fetch_add(1, Ordering::SeqCst);
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let _l = lock();
+    let released_early = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let r = Arc::clone(&released_early);
+    let d = Arc::clone(&dropped);
+    thread::spawn(move || {
+        drop(pin());
+        let tid = with_handle(|h| h.tid());
+        // A full batch into this thread's slot (no other slot is active),
+        // left there for the exit to traverse and free.
+        let _guard = pin();
+        for _ in 0..RETIRE_FREQ {
+            let node = Box::into_raw(Box::new(ChecksTid {
+                retired: RetiredNode::new(),
+                tid,
+                released_early: Arc::clone(&r),
+                dropped: Arc::clone(&d),
+            }));
+            unsafe { retire(node) };
+        }
+    })
+    .join()
+    .unwrap();
+    // The exit freed the whole batch.
+    assert_eq!(dropped.load(Ordering::SeqCst), RETIRE_FREQ);
+    assert_eq!(
+        released_early.load(Ordering::SeqCst),
+        0,
+        "destructors ran after the exiting thread released its tid"
+    );
+}

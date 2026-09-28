@@ -352,7 +352,7 @@ fn pin_completes_under_flush_storm() {
 }
 
 /// Thread churn: many short-lived threads retire and exit concurrently with
-/// pinned readers. Exercises free_tid's exchange-based deactivation and tid
+/// pinned readers. Exercises deactivate_slots' exchange-based deactivation and tid
 /// recycling; everything must be freed after the unwind.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model

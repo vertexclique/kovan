@@ -1599,11 +1599,11 @@ impl Handle {
                 }
             }
 
-            // Deactivate all slots. free_tid uses exchange (not blind
-            // stores) so a node inserted by a concurrent try_retire is
+            // Deactivate all slots. deactivate_slots uses exchange (not
+            // blind stores) so a node inserted by a concurrent try_retire is
             // captured and traversed here instead of being obliterated;
             // seqnos are preserved across tid recycling.
-            let captured = global.free_tid(tid);
+            let captured = global.deactivate_slots(tid);
             for first in captured {
                 if first != 0 {
                     // Take ownership of the Cell's free_list and clear it
@@ -1627,6 +1627,14 @@ impl Handle {
 
             // Drain any remaining free list
             self.drain_free_list();
+
+            // Only now may another thread take this ID over. The destructors
+            // run above may pin and load, and a load's publication goes to
+            // this ID's slot: released earlier, the ID could already belong
+            // to a new thread, whose published epoch that store would
+            // overwrite (possibly lowering it under what the new thread
+            // believes it publishes).
+            global.release_tid(tid);
 
             self.pin_count.set(saved_pin);
             self.in_reclaim.set(false);

@@ -573,7 +573,7 @@ impl ASMRState {
         }
     }
 
-    /// Release a thread ID for recycling.
+    /// Deactivate a thread's slots before its ID is released.
     ///
     /// Deactivation must be race-aware: a concurrent `try_retire` may insert
     /// a node into a slot at any time before the slot reads INVPTR. A blind
@@ -589,7 +589,8 @@ impl ASMRState {
     ///
     /// Returns up to SLOTS_PER_THREAD captured list heads that the caller
     /// must traverse (entries are null when there was nothing to capture).
-    pub(crate) fn free_tid(&self, tid: usize) -> [u64; SLOTS_PER_THREAD] {
+    /// The ID stays the caller's until [`release_tid`](Self::release_tid).
+    pub(crate) fn deactivate_slots(&self, tid: usize) -> [u64; SLOTS_PER_THREAD] {
         let slots = self.thread_slots(tid);
         let mut captured = [0u64; SLOTS_PER_THREAD];
         for (j, cap) in captured.iter_mut().enumerate() {
@@ -601,9 +602,20 @@ impl ASMRState {
                 *cap = first;
             }
         }
+        captured
+    }
+
+    /// Release a thread ID for recycling, once its thread no longer uses its
+    /// slots (see [`deactivate_slots`](Self::deactivate_slots)).
+    pub(crate) fn release_tid(&self, tid: usize) {
         let mut free = self.free_tids.lock();
         free.push(tid);
-        captured
+    }
+
+    /// Whether `tid` is released and waiting to be handed out again.
+    #[cfg(test)]
+    pub(crate) fn tid_is_released(&self, tid: usize) -> bool {
+        self.free_tids.lock().contains(&tid)
     }
 
     /// Park an orphaned batch (finalized refs-node) for later adoption.
