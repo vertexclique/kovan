@@ -14,7 +14,7 @@
 //! scenario would perturb the counts.
 
 use kovan::{Atomic, RetiredNode, Shared, flush, pin, retire};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -238,6 +238,86 @@ fn unflushed_parked_thread_holds_back_only_older_garbage() {
         }
         wake_tx.send(()).unwrap();
         parked.join().unwrap();
+        retire_head(&head);
+    });
+}
+
+/// Retired and counted like `Node`, and it records its own drop, so a test
+/// can check that one particular value is still alive before reading it.
+#[repr(C)]
+struct Canary {
+    retired: RetiredNode,
+    value: u64,
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for Canary {
+    fn drop(&mut self) {
+        self.value = 0;
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+const CANARY: u64 = 0x5eed_cafe_f00d_d00d;
+
+/// A section that loads a pointer first and keeps using it (as a map
+/// operation does with its table) while its own retires advance the epoch
+/// and its later protected loads, some under nested guards, raise its
+/// reservation: the pointer stays valid for the whole section, because the
+/// slot list is only traversed where no guard of the thread is live. Once
+/// the section ends, the next outermost pins traverse, and the value is
+/// freed as the thread keeps operating.
+#[test]
+#[cfg_attr(miri, ignore)] // thousands of operations: too slow under Miri
+fn section_keeps_what_it_loaded_first() {
+    let _l = test_lock();
+    on_fresh_thread(|live| {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let first = Box::into_raw(Box::new(Canary {
+            retired: RetiredNode::new(),
+            value: CANARY,
+            dropped: Arc::clone(&dropped),
+        }));
+        let shared = Atomic::new(first);
+        let head = Atomic::new(Node::boxed(live));
+
+        let guard = pin();
+        let loaded = shared.load(Ordering::Acquire, &guard);
+        assert_eq!(loaded.as_raw(), first);
+        // Unlink and retire the value this section still reads, then retire
+        // enough behind it to submit its batch and advance the epoch many
+        // times, with protected loads after each retire (the raise) and
+        // nested sections in between. Enough advances that a traversal
+        // inside the section would also have freed the traversed batches
+        // (the free-list cache is freed every thirteenth traversal).
+        let null = unsafe { Shared::from_raw(core::ptr::null_mut()) };
+        let unlinked = shared.swap(null, Ordering::AcqRel, &guard);
+        unsafe { retire(unlinked.as_raw()) };
+        for i in 0..32 * 128 {
+            if i % 2 == 0 {
+                replace_retire_load(&head, live);
+            } else {
+                let new = unsafe { Shared::from_raw(Node::boxed(live)) };
+                let old = head.swap(new, Ordering::AcqRel, &guard);
+                unsafe { retire(old.as_raw()) };
+                let _ = head.load(Ordering::Acquire, &guard);
+            }
+        }
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "a value loaded in a live section was freed"
+        );
+        assert_eq!(unsafe { (*loaded.as_raw()).value }, CANARY);
+        drop(guard);
+
+        // The section is over: ordinary operations free it.
+        for _ in 0..16 * 128 {
+            replace_retire_load(&head, live);
+        }
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "a value retired in an ended section was never freed"
+        );
         retire_head(&head);
     });
 }

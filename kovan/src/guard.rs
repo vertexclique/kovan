@@ -404,6 +404,24 @@ impl Handle {
     /// Divergence from C++ reference: uses `exchange_lo(0)` in a single step
     /// instead of `exchange(INVPTR)` + `store(nullptr)`. Avoids a race where
     /// a concurrent `try_retire` insertion between the two steps gets lost.
+    ///
+    /// # When a thread traverses its own slot list
+    ///
+    /// Protection is guard-wide: one reservation covers every pointer the
+    /// thread loaded since its outermost `pin()`. So the thread traverses
+    /// its own list only where no guard of it is live: at the outermost
+    /// `pin()` (the count was 0 and the new section has loaded nothing),
+    /// at the outermost drop of an escalated section (the count is already
+    /// 0), in `flush()` with no guard live, and at thread exit. Nested pins
+    /// never transition, and `protect_load` only raises the published epoch.
+    /// A traversal therefore never releases a pointer loaded earlier in a
+    /// live section; a batch is freed only once its count reaches zero,
+    /// that is once every slot that took one of its nodes (every
+    /// reservation that covered it when it was retired) has been traversed
+    /// at such a point by its owner. Destructors that run during a
+    /// traversal start their own critical sections after the traversed
+    /// batches were unlinked, under the reservation still published (see
+    /// `unpin_outermost` for why their pins are nested).
     #[cold]
     fn do_update(&self, curr_epoch: u64, index: usize, tid: usize) -> u64 {
         let global = self.global();
