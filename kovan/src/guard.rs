@@ -107,7 +107,7 @@ struct Handle {
     /// Cached free list and count
     free_list: Cell<*mut RetiredNode>,
     list_count: Cell<usize>,
-    /// Cached epoch — mirrors slots.epoch[0] to avoid atomic read of
+    /// Cached epoch: mirrors `slots.epoch[0]` to avoid atomic read of
     /// 128-bit WordPair on every load. Updated on the rare (slow) path only
     /// (when global epoch has advanced since last check).
     cached_epoch: Cell<u64>,
@@ -304,6 +304,8 @@ impl Handle {
         let slots = global.thread_slots(tid);
         let mut curr_epoch = first_epoch;
         let mut attempts = MAX_LOAD_ATTEMPTS;
+        // At most MAX_LOAD_ATTEMPTS passes: MAX_LOAD_ATTEMPTS - 1
+        // publications, then the escalation, which returns.
         loop {
             attempts -= 1;
             if attempts == 0 {
@@ -531,6 +533,8 @@ impl Handle {
         let tid = self.tid();
         let index = 0; // kovan uses only slot index 0
         let mut attempts = 16usize;
+        // At most 16 attempts, each one do_update: one exchange, one walk of
+        // the list it captured, one publication.
         loop {
             let prev_epoch = self.do_update(curr_epoch, index, tid);
             #[cfg(test)]
@@ -561,7 +565,7 @@ impl Handle {
     ///
     /// # Wait-free bound: O(T) where T = number of active threads
     ///
-    /// The main loop (lines ~294-344) exits when either:
+    /// The main loop exits when either:
     /// 1. Epoch stabilizes and self-completion CAS succeeds, or
     /// 2. A helper sets result ≠ INVPTR via help_thread.
     ///
@@ -606,6 +610,15 @@ impl Handle {
         #[allow(unused_assignments)]
         let mut first: *mut RetiredNode = core::ptr::null_mut();
 
+        // A pass is followed by another only when the global epoch moved
+        // during it and no helper completed the request. Every epoch
+        // advance runs help_read first, and a help_read that finds this
+        // request open completes it before its advance: an epoch change the
+        // request survives comes from a thread whose help_read passed this
+        // slot before the request was published, at most one per thread
+        // (its next advance helps first). Then either the epoch holds for a
+        // pass (self-completion) or a helped advance ends it: T + 2 passes
+        // at most.
         loop {
             #[cfg(test)]
             crate::stall::at(crate::stall::Step::SlowPass, tid);
@@ -736,10 +749,10 @@ impl Handle {
     /// the slot holds. Returns the list taken (0 when none), which the
     /// caller traverses.
     ///
-    /// Two steps. [HandOverClose] advances the list seqno from `seqno`
+    /// Two steps. Step `HandOverClose` advances the list seqno from `seqno`
     /// (even: the slot takes new batches) to `seqno + 1` (odd: a scan that
     /// reads it skips the slot) with a compare-exchange of the seqno word
-    /// alone, which no insert can fail. [HandOverTake] then empties the
+    /// alone, which no insert can fail. Step `HandOverTake` then empties the
     /// list with a compare-exchange of the whole slot, for as long as the
     /// seqno stays `seqno + 1`: a thread that finds it moved on takes
     /// nothing, the transition having republished the slot (what the slot
@@ -781,6 +794,8 @@ impl Handle {
         let max_threads = global.max_threads();
         let hr_num = global.hr_num();
 
+        // One pass over the T x HR_NUM request words, one help_thread per
+        // open request.
         for i in 0..max_threads {
             let slots = global.thread_slots(i);
             for j in 0..hr_num {
@@ -846,6 +861,11 @@ impl Handle {
             let mut last_result_lo = last_result_lo;
             let mut last_result_hi = last_result_hi;
 
+            // As the pending thread's own loop: another pass only after the
+            // epoch moved during this one and the request is still open, and
+            // an advance by a thread that read the request open helped it
+            // first, completing it. At most T + 2 passes, each one do_update
+            // of this thread's helper slot.
             loop {
                 prev_epoch = self.do_update(prev_epoch, hr_num + 1, mytid);
                 // In reserve_slot mode (pointer=0), ptr is always null
@@ -1166,7 +1186,8 @@ impl Handle {
     /// refs-node becomes a regular node — its bias word is reused as the
     /// batch_next link, exactly as for any non-refs node.
     fn merge_batch(&self, first: *mut RetiredNode, refs: *mut RetiredNode) {
-        // Count the chain (first -> ... -> refs).
+        // Count the chain (first -> ... -> refs): this thread's own,
+        // unpublished, so no other thread changes its length.
         let mut n = 1usize;
         let mut cur = first;
         while cur != refs {
@@ -1214,6 +1235,8 @@ impl Handle {
     /// parked on that ID since its last adoption. Adopters run repeatedly and
     /// threads exit once, so every parked batch is adopted.
     fn adopt_orphans(&self) {
+        // One merge per batch of the chain taken, which no other thread
+        // extends once taken.
         let mut refs = self.global().adopt_orphans();
         #[cfg(test)]
         if !refs.is_null() {
@@ -1237,7 +1260,7 @@ impl Handle {
     /// Returns `false` when the batch has fewer assignable nodes than there
     /// are eligible slots. In that case **nothing has been published** (the
     /// scan phase aborts before the insert phase) and the caller must keep
-    /// the chain — merge it back into the accumulating batch or park it as
+    /// the chain: merge it back into the accumulating batch or park it as
     /// an orphan. Silently dropping it would leak the entire batch.
     ///
     /// `skip_tid` names a thread whose slots the batch is not placed in:
@@ -1271,6 +1294,7 @@ impl Handle {
         // Pairs with the SeqCst store in protect_load() / do_update().
         fence(Ordering::SeqCst);
         let mut last = curr;
+        // One pass over the T x SLOTS_PER_THREAD slots, each visited once.
         for i in 0..max_threads {
             if skip_tid == Some(i) {
                 continue;
@@ -1336,6 +1360,10 @@ impl Handle {
         // === Insert phase: exchange into slots ===
         let mut adjs: usize = REFC_PROTECT.wrapping_neg(); // -REFC_PROTECT
 
+        // One pass over the nodes the scan assigned. Per node: at most one
+        // exchange, one rollback CAS and one link CAS, none retried; a
+        // failed link walks the list the node displaced, which the slot's
+        // owner captured together with the node: fixed in length.
         while curr != last {
             let (slot_tid, slot_idx) = unsafe { (*curr).get_slot_info() };
             let slot_first_ref = &global.thread_slots(slot_tid).first[slot_idx];
@@ -1456,9 +1484,9 @@ impl Handle {
     }
 
     /// Traverse a captured slot list onto this thread's free-list cache and
-    /// free nothing: no destructor runs. The one step every traversal takes
-    /// [Traverse]: `reclaim::traverse` over the captured list, whose length
-    /// was fixed by the exchange that captured it.
+    /// free nothing: no destructor runs. Step `Traverse`, the one every
+    /// traversal takes: `reclaim::traverse` over the captured list, whose
+    /// length was fixed by the exchange that captured it.
     ///
     /// # Safety
     ///
@@ -1482,6 +1510,10 @@ impl Handle {
     fn drain_free_list(&self) {
         let was_reclaiming = self.in_reclaim.get();
         self.in_reclaim.set(true);
+        // Another pass only for what the destructors the previous pass ran
+        // pushed onto the cache through kovan calls of their own (a help, or
+        // a transition where their pin is outermost): bounded by those
+        // destructors, never by other threads.
         loop {
             let free_list = self.free_list.get();
             if free_list.is_null() {
@@ -1669,6 +1701,8 @@ impl Handle {
             // traversal brings to zero is re-armed and parked, and a live
             // thread adopts it and retires it again.
             let captured = global.deactivate_slots(tid);
+            // One walk per captured list (SLOTS_PER_THREAD at most), then
+            // one park per batch that walk brought to zero.
             for first in captured {
                 if first != 0 {
                     let mut unowned: *mut RetiredNode = core::ptr::null_mut();

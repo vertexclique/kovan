@@ -156,7 +156,9 @@ mod native {
 /// Fallback implementation for platforms without native 128-bit atomics
 /// (riscv64, mips64, etc.) where portable_atomic uses a spinlock.
 /// Sub-word ops must go through the same AtomicU128 to stay within the
-/// spinlock's protection.
+/// spinlock's protection. Each op is a compare-exchange loop over that
+/// word, which another thread's write can fail: on these targets no
+/// operation is wait-free, or lock-free (see lib.rs).
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x")))]
 mod fallback {
     use core::sync::atomic::Ordering;
@@ -539,15 +541,16 @@ impl ASMRState {
     /// Allocate a thread ID: a released one when there is one, else the next
     /// one never handed out.
     ///
-    /// Wait-free, and no step waits for another thread. [TidClaim] is one
-    /// pass over the release words of the IDs handed out so far, with at most
-    /// one `fetch_and` per released bit the pass loaded: the bits it tries
-    /// come from its own load of the word, never from a reload, so a word
-    /// costs at most 64 claims whatever other threads release meanwhile, and
-    /// the pass at most `MAX_THREADS` in all. An ID another thread claims
-    /// first is passed over. [TidFresh] then takes `next_tid` with a
-    /// compare-exchange that fails only when another thread took that ID
-    /// first, which can happen at most `MAX_THREADS` times in the process.
+    /// Wait-free, and no step waits for another thread. Step `TidClaim` is
+    /// one pass over the release words of the IDs handed out so far, with at
+    /// most one `fetch_and` per released bit the pass loaded: the bits it
+    /// tries come from its own load of the word, never from a reload, so a
+    /// word costs at most 64 claims whatever other threads release
+    /// meanwhile, and the pass at most `MAX_THREADS` in all. An ID another
+    /// thread claims first is passed over. Step `TidFresh` then takes
+    /// `next_tid` with a compare-exchange that fails only when another thread
+    /// took that ID first, which can happen at most `MAX_THREADS` times in
+    /// the process.
     pub(crate) fn alloc_tid(&self) -> usize {
         let handed_out = self.next_tid.load(Ordering::Acquire);
         for (w, word) in self.released[..handed_out.div_ceil(64)].iter().enumerate() {
@@ -622,9 +625,9 @@ impl ASMRState {
     }
 
     /// Release a thread ID for recycling, once its thread no longer uses its
-    /// slots (see [`deactivate_slots`](Self::deactivate_slots)). One
-    /// `fetch_or` [TidRelease], whose release orders every write the owner
-    /// made to the ID's slots before the next owner's claim.
+    /// slots (see [`deactivate_slots`](Self::deactivate_slots)). Step
+    /// `TidRelease`: one `fetch_or`, whose release orders every write the
+    /// owner made to the ID's slots before the next owner's claim.
     pub(crate) fn release_tid(&self, tid: usize) {
         self.released[tid / 64].fetch_or(1 << (tid % 64), Ordering::Release);
     }
@@ -639,12 +642,12 @@ impl ASMRState {
     /// linked through `next`) on the orphan word of `tid`, which the caller
     /// owns until it releases the ID.
     ///
-    /// Two steps, no loop, no wait. [OrphanTake] swaps out what an earlier
-    /// owner of the ID left there, which is joined behind this chain: an
-    /// adopter only ever swaps the word to null, so nothing lands in it
-    /// between the two steps. [OrphanPublish] stores the joined chain, the
-    /// release that orders every write to its batches before an adopter's
-    /// acquire.
+    /// Two steps, no loop, no wait. Step `OrphanTake` swaps out what an
+    /// earlier owner of the ID left there, which is joined behind this chain:
+    /// an adopter only ever swaps the word to null, so nothing lands in it
+    /// between the two steps. Step `OrphanPublish` stores the joined chain,
+    /// the release that orders every write to its batches before an
+    /// adopter's acquire.
     ///
     /// # Safety
     ///
@@ -670,9 +673,9 @@ impl ASMRState {
     /// Take the orphaned batches parked on one thread ID, as a chain of
     /// refs-nodes linked through `next` (null when none is parked).
     ///
-    /// [OrphanAdopt]: one pass over the IDs handed out, skipped with one load
-    /// while no ID holds a chain; an ID whose word is empty costs one load,
-    /// and the first whose word holds a chain is swapped to null. The chain
+    /// Step `OrphanAdopt`: one pass over the IDs handed out, skipped with one
+    /// load while no ID holds a chain; an ID whose word is empty costs one
+    /// load, and the first whose word holds a chain is swapped to null. The chain
     /// taken is fixed by that swap: what exiting threads park afterwards
     /// waits for the next adoption.
     pub(crate) fn adopt_orphans(&self) -> *mut RetiredNode {

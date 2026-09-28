@@ -60,7 +60,10 @@ pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
 ///
 /// The list is captured atomically by the caller's exchange, so its length
 /// is fixed before traversal begins and the loop terminates in finitely
-/// many steps. The length is NOT bounded by the thread count: each
+/// many steps: an insert into the slot after the capture starts a new list,
+/// and an entry whose inserter has not linked the rest behind it yet ends
+/// the walk (its `next` is still null; that inserter walks the rest). The
+/// length is NOT bounded by the thread count: each
 /// `try_retire()` call system-wide may insert one node into this slot, and
 /// a slot is only traversed when its owner transitions it (next `pin()`
 /// after an epoch change, `flush()`, or exit). A thread returning from a
@@ -123,6 +126,8 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
 ///
 /// All refs-nodes in the list must have refs == 0.
 pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
+    // One pass over the batches of the list, and over each batch's nodes:
+    // the list is the caller's, taken out of any cell others reach.
     while !list.is_null() {
         let refs_node = list;
         // batch_link on refs-node is RNODE(batch_front)
