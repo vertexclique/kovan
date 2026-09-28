@@ -75,7 +75,8 @@ pub struct HopscotchIter<'a, K: 'static, V: 'static, S> {
     _map: PhantomData<&'a HopscotchMap<K, V, S>>,
 }
 
-/// Slots a walk's `fold` reads before it yields their entries: one bit each of a `u64`.
+/// Slots a walk's `fold` reads before it yields their entries, and a group whose entries `next`
+/// prefetches when it enters it: one bit each of a `u64`.
 const GROUP: usize = u64::BITS as usize;
 
 /// What a walk remembers of the slots it met: how it recognizes a key it already met.
@@ -159,6 +160,14 @@ impl<K, V, S> HopscotchIter<'_, K, V, S> {
         while self.bucket_idx < self.slots {
             let idx = self.bucket_idx;
             self.bucket_idx += 1;
+            if idx.is_multiple_of(GROUP) {
+                // The entries of the group of slots the walk enters reach the cache while it
+                // walks them. Only a hint: the walk reads each slot again when it gets there.
+                // Relaxed: no entry is read through these words.
+                for bucket in &table.buckets[idx..self.slots.min(idx + GROUP)] {
+                    table.prefetch_entry(bucket.load(Ordering::Relaxed, &self.guard).ptr());
+                }
+            }
             let entry = table
                 .get_bucket(idx)
                 .load(Ordering::Acquire, &self.guard)
