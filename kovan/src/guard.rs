@@ -1069,7 +1069,7 @@ impl Handle {
                     .store(rnode_mark(first), Ordering::SeqCst);
             }
 
-            if !self.try_retire(first, last) {
+            if !self.try_retire(first, last, None) {
                 // Fewer assignable nodes than eligible slots: nothing was
                 // published, so keep accumulating. The merged batch retries
                 // at the next RETIRE_FREQ multiple with more nodes, and
@@ -1208,6 +1208,9 @@ impl Handle {
     /// the chain — merge it back into the accumulating batch or park it on
     /// the orphan list. Silently dropping it would leak the entire batch.
     ///
+    /// `skip_tid` names a thread whose slots the batch is not placed in:
+    /// the caller's own, when it holds no guard (see `flush`).
+    ///
     /// # Wait-free bound: O(T + batch_size) where T = number of active threads
     ///
     /// Two phases, both bounded:
@@ -1218,7 +1221,12 @@ impl Handle {
     ///   into its assigned slot. The exchange is a single atomic instruction (on
     ///   native platforms). Contention handling (INVPTR rollback, list tainting)
     ///   is O(1) per node.
-    fn try_retire(&self, batch_first: *mut RetiredNode, refs: *mut RetiredNode) -> bool {
+    fn try_retire(
+        &self,
+        batch_first: *mut RetiredNode,
+        refs: *mut RetiredNode,
+        skip_tid: Option<usize>,
+    ) -> bool {
         let global = self.global();
         let max_threads = global.max_threads();
         let hr_num = global.hr_num();
@@ -1232,6 +1240,9 @@ impl Handle {
         fence(Ordering::SeqCst);
         let mut last = curr;
         for i in 0..max_threads {
+            if skip_tid == Some(i) {
+                continue;
+            }
             let slots = global.thread_slots(i);
             let mut j = 0;
             // Regular reservation slots (0..hr_num)
@@ -1441,17 +1452,26 @@ impl Handle {
         let tid = self.tid();
         let global = self.global();
 
-        // With no live Guard, deactivate and drain our own reservation slots
-        // before submitting the batch. Two effects: pending lists are
-        // reclaimed, and the batch below is not deferred to our own slot —
-        // otherwise a small batch (e.g. a lone refs-node from a single
-        // retire) could never be placed and would leak. Other threads' slots
-        // still gate concurrent safety; we restore ours below.
+        // With no live Guard, drain our own reservation slot before
+        // submitting the batch, and leave it out of the batch's placement.
+        // Two effects: pending lists are reclaimed, and the batch below is
+        // not deferred to our own slot, where a small batch (a lone
+        // refs-node from a single retire) could never be placed. Leaving it
+        // out is safe: this thread holds no guard, so no pointer into the
+        // batch, and a destructor that runs inside flush() starts its
+        // critical section after every node of the batch was unlinked, so
+        // it cannot load one.
+        //
+        // The slot stays active with its published epoch throughout, never
+        // deactivated: those destructors are critical sections of their
+        // own (a batch freed below, a cached one freed by the traversal),
+        // and their loads need the reservation as any load outside flush()
+        // does. With the slot inactive, a concurrent writer's retire would
+        // skip it and could free a value such a destructor had loaded.
         let hr_num = global.hr_num();
         if saved_pin == 0 {
             for i in 0..hr_num {
-                let first =
-                    global.thread_slots(tid).first[i].exchange_lo(INVPTR as u64, Ordering::AcqRel);
+                let first = global.thread_slots(tid).first[i].exchange_lo(0, Ordering::AcqRel);
                 if first != 0 && first != INVPTR as u64 {
                     let mut free_list = self.free_list.get();
                     let mut list_count = self.list_count.get();
@@ -1485,15 +1505,9 @@ impl Handle {
                     .batch_link
                     .store(rnode_mark(first), Ordering::SeqCst);
             }
-            if !self.try_retire(first, last) {
+            let own = (saved_pin == 0).then_some(tid);
+            if !self.try_retire(first, last, own) {
                 self.merge_batch(first, last);
-            }
-        }
-
-        // Reactivate our reservation slots (active-empty) for future pins.
-        if saved_pin == 0 {
-            for i in 0..hr_num {
-                global.thread_slots(tid).first[i].store_lo(0, Ordering::Release);
             }
         }
 
@@ -1561,7 +1575,7 @@ impl Handle {
                         .batch_link
                         .store(rnode_mark(first), Ordering::SeqCst);
                 }
-                if !self.try_retire(first, last) {
+                if !self.try_retire(first, last, None) {
                     global.push_orphan(last as usize);
                 }
             }
