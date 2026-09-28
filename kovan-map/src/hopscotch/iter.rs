@@ -12,10 +12,10 @@ use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
 use kovan::pin;
 
-// Construction: none of `iter`/`keys`/`values` hashes or clones a value (the walk that does
-// lives in `Iterator for HopscotchIter` below). `K: Eq` is captured here as the walk's key
-// comparison (how it recognizes a key it already met), so the `Iterator` impls keep the bounds
-// they have always had, `K: Clone` and `V: Clone`.
+// Construction: none of `iter`/`keys`/`values` hashes or clones a value (the walks that do
+// live in the `Iterator` impls below). `K: Eq` is captured here as the walk's key comparison
+// (how it recognizes a key it already met), so the `Iterator` impls ask only for the clones they
+// make: `K: Clone` and `V: Clone` for entries, `K: Clone` for keys, `V: Clone` for values.
 impl<K: Eq + 'static, V: 'static, S> HopscotchMap<K, V, S> {
     /// Returns an iterator over the map entries.
     ///
@@ -253,7 +253,7 @@ where
     }
 }
 
-/// Iterator over HopscotchMap keys.
+/// Iterator over HopscotchMap keys (clones `K`).
 pub struct HopscotchKeys<'a, K: 'static, V: 'static, S> {
     iter: HopscotchIter<'a, K, V, S>,
 }
@@ -261,12 +261,19 @@ pub struct HopscotchKeys<'a, K: 'static, V: 'static, S> {
 impl<'a, K, V, S> Iterator for HopscotchKeys<'a, K, V, S>
 where
     K: Clone,
-    V: Clone,
 {
     type Item = K;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|(k, _)| k)
+    fn next(&mut self) -> Option<K> {
+        self.iter.next_entry().map(|entry| entry.key.clone())
+    }
+
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, K) -> B,
+    {
+        self.iter
+            .fold_entries(init, |acc, entry| f(acc, entry.key.clone()))
     }
 }
 
@@ -277,14 +284,20 @@ pub struct HopscotchValues<'a, K: 'static, V: 'static, S> {
 
 impl<'a, K, V, S> Iterator for HopscotchValues<'a, K, V, S>
 where
-    K: Clone,
     V: Clone,
 {
     type Item = V;
 
-    #[inline]
     fn next(&mut self) -> Option<V> {
-        self.iter.next().map(|(_, v)| v)
+        self.iter.next_entry().map(|entry| entry.value.clone())
+    }
+
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, V) -> B,
+    {
+        self.iter
+            .fold_entries(init, |acc, entry| f(acc, entry.value.clone()))
     }
 }
 

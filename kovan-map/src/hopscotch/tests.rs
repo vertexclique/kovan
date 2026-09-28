@@ -769,6 +769,53 @@ fn a_fold_meets_a_key_reinserted_ahead_of_it_once_tagged() {
     a_fold_meets_a_key_reinserted_ahead_of_it_once::<Tagged>();
 }
 
+std::thread_local! {
+    /// The clones of [`Clones`] values made on this thread.
+    static CLONED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// A key or value that counts its clones on the thread that makes them.
+#[derive(PartialEq, Eq, Hash)]
+struct Clones(u64);
+
+impl Clone for Clones {
+    fn clone(&self) -> Self {
+        CLONED.with(|cloned| cloned.set(cloned.get() + 1));
+        Self(self.0)
+    }
+}
+
+/// The clones of [`Clones`] values `walk` makes.
+fn clones_in(walk: impl FnOnce()) -> usize {
+    let before = CLONED.with(core::cell::Cell::get);
+    walk();
+    CLONED.with(core::cell::Cell::get) - before
+}
+
+/// A walk of the keys clones no value and a walk of the values no key, through `next` and
+/// through `fold` alike; a walk of the entries clones both.
+#[test]
+fn keys_and_values_clone_only_what_they_yield() {
+    let by_key = HopscotchMap::<Clones, u64>::new();
+    let by_value = HopscotchMap::<u64, Clones>::new();
+    for k in 0..100 {
+        by_key.insert(Clones(k), k);
+        by_value.insert(k, Clones(k));
+    }
+    assert_eq!(clones_in(|| assert_eq!(by_value.keys().count(), 100)), 0);
+    assert_eq!(
+        clones_in(|| assert_eq!(by_value.keys().collect::<Vec<_>>().len(), 100)),
+        0
+    );
+    assert_eq!(clones_in(|| assert_eq!(by_key.values().count(), 100)), 0);
+    assert_eq!(
+        clones_in(|| assert_eq!(by_key.values().collect::<Vec<_>>().len(), 100)),
+        0
+    );
+    assert_eq!(clones_in(|| assert_eq!(by_key.keys().count(), 100)), 100);
+    assert_eq!(clones_in(|| assert_eq!(by_value.iter().count(), 100)), 100);
+}
+
 /// A displacement whose first candidate's home guard is held by another writer moves the next
 /// candidate instead of growing the table, and never waits for the held guard. Key 66's home is
 /// bucket 2, key 2's home.
