@@ -638,9 +638,11 @@ fn traversal_walks_only_the_list_it_captured() {
             let tid = own_tid();
             owner_tid.store(tid, Ordering::SeqCst);
             // Batches whose one slot is this thread's (the only one
-            // active): the list the transition below captures.
+            // active; oldest-born values, so its epoch covers them however
+            // the epoch moves meanwhile): the list the transition below
+            // captures.
             for _ in 0..CAPTURED * RETIRE_FREQ {
-                Counted::retire_one(&live);
+                Counted::retire_oldest(&live);
             }
             with_handle(|h| h.list_count.set(0));
             traversing.arm(Step::Traverse, tid);

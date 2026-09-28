@@ -689,4 +689,38 @@ fn exit_takes_its_slot_list_a_fixed_number_of_times() {
     .unwrap();
 }
 
+/// A thread that advances the epoch stamps its next allocations with the
+/// epoch it advanced to, pinning or not: its births stay recent, so the
+/// batches they end up in skip the slots of threads stalled at older
+/// epochs.
+#[test]
+fn an_epoch_advance_refreshes_the_birth_stamp() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let l = Arc::clone(&live);
+    thread::spawn(move || {
+        own_tid();
+        let seeded = RetiredNode::new().birth_epoch();
+        // Other threads' advances, then this thread's own at its
+        // EPOCH_FREQ-th retire, none of them followed by a pin here.
+        for _ in 0..4 {
+            crate::slot::advance_epoch();
+        }
+        with_handle(|h| h.alloc_counter.set(0));
+        for _ in 0..EPOCH_FREQ {
+            Counted::retire_one(&l);
+        }
+        let stamped = RetiredNode::new().birth_epoch();
+        assert!(
+            stamped > seeded + 4,
+            "births still stamped {stamped}, seeded {seeded}"
+        );
+        assert!(stamped <= crate::slot::epoch());
+        flush();
+    })
+    .join()
+    .unwrap();
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}
+
 mod progress;

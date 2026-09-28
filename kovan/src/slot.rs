@@ -472,10 +472,10 @@ pub(crate) fn epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
 }
 
-/// Advance the global epoch by one.
+/// Advance the global epoch by one; returns the epoch it advanced to.
 #[inline]
-pub(crate) fn advance_epoch() {
-    EPOCH.fetch_add(1, Ordering::AcqRel);
+pub(crate) fn advance_epoch() -> u64 {
+    EPOCH.fetch_add(1, Ordering::AcqRel) + 1
 }
 
 /// Null-initialized page table constant for use in array initialization.

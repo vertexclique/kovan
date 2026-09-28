@@ -134,7 +134,10 @@ struct Handle {
     /// the node, and which read/CAS workloads perform constantly): a pin
     /// either finds the global epoch equal to `drained_epoch`, which the
     /// last slot transition also stored here, or transitions and stores the
-    /// epoch it publishes. Seeded lazily on first use. A stale value is
+    /// epoch it publishes. Also refreshed at every epoch advance this thread
+    /// makes (`increment_era`), with the epoch it advanced to, so a thread
+    /// that retires without pinning still stamps recent births. Seeded
+    /// lazily on first use. A stale value is
     /// always *low*, the global epoch being monotone, which lowers a
     /// batch's `min_epoch`, making more slots eligible in `try_retire`
     /// (strictly more conservative deferral). It can never exceed the true
@@ -1028,17 +1031,23 @@ impl Handle {
         let alloc_count = self.alloc_counter.get() + 1;
         self.alloc_counter.set(alloc_count);
         if alloc_count.is_multiple_of(EPOCH_FREQ) {
-            let tid = self.tid();
-            // Set in_reclaim: help_read -> help_thread -> do_update ->
-            // traverse_into_cache -> free_batch_list can call destructors which
-            // drop Atoms triggering flush(). The flag prevents re-entrant
-            // flush from reading stale free_list Cell state.
-            let was_reclaiming = self.in_reclaim.get();
-            self.in_reclaim.set(true);
-            self.help_read(tid);
-            self.in_reclaim.set(was_reclaiming);
-            slot::advance_epoch();
+            self.increment_era(self.tid());
         }
+    }
+
+    /// Advance the global epoch [IncrementEra]: help the pending slow-path
+    /// requests first, as every advance does (the slow path's bound rests
+    /// on it), then advance, and stamp this thread's next allocations with
+    /// the epoch it advanced to, as fresh a birth as the epoch it just made.
+    fn increment_era(&self, tid: usize) {
+        // Set in_reclaim: help_read -> help_thread -> do_update ->
+        // traverse_into_cache -> free_batch_list can call destructors which
+        // drop Atoms triggering flush(). The flag prevents re-entrant
+        // flush from reading stale free_list Cell state.
+        let was_reclaiming = self.in_reclaim.replace(true);
+        self.help_read(tid);
+        self.in_reclaim.set(was_reclaiming);
+        self.cached_birth_epoch.set(slot::advance_epoch());
     }
 
     /// Retire a node into the thread-local batch (matches ASMR retire).
@@ -1546,8 +1555,7 @@ impl Handle {
 
         // Help pending slow-path threads before advancing the epoch (the
         // wait-free pin() bound requires every advance to be helped first).
-        self.help_read(tid);
-        slot::advance_epoch();
+        self.increment_era(tid);
 
         self.drain_free_list();
 
