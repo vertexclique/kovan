@@ -28,6 +28,10 @@ pub(crate) enum Step {
     /// A helper has set a pending thread's result and made its empty epoch
     /// transition, and not yet taken over its slot list.
     HelpHandOver,
+    /// A thread taking over a slot list at the end of a slow-path
+    /// transition has read the slot and not yet tried to empty it (one
+    /// pass of the take's loop).
+    HandOverTake,
 }
 
 type Hook = Box<dyn FnMut() -> bool + Send>;

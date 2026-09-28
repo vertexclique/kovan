@@ -96,6 +96,15 @@ mod native {
             self.lo.swap(new_lo, order)
         }
 
+        /// Compare-exchange of the `hi` half alone: a change of `lo` never
+        /// fails it. One instruction.
+        #[inline]
+        pub(crate) fn compare_exchange_hi(&self, old_hi: u64, new_hi: u64) -> bool {
+            self.hi
+                .compare_exchange(old_hi, new_hi, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        }
+
         // -----------------------------------------
         // Full DCAS via AtomicU128 reinterpret cast
         // -----------------------------------------
@@ -132,25 +141,6 @@ mod native {
             new_hi: u64,
         ) -> Result<(u64, u64), (u64, u64)> {
             match self.as_u128().compare_exchange(
-                Self::pack(old_lo, old_hi),
-                Self::pack(new_lo, new_hi),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(v) => Ok(Self::unpack(v)),
-                Err(v) => Err(Self::unpack(v)),
-            }
-        }
-
-        #[inline]
-        pub(crate) fn compare_exchange_weak(
-            &self,
-            old_lo: u64,
-            old_hi: u64,
-            new_lo: u64,
-            new_hi: u64,
-        ) -> Result<(u64, u64), (u64, u64)> {
-            match self.as_u128().compare_exchange_weak(
                 Self::pack(old_lo, old_hi),
                 Self::pack(new_lo, new_hi),
                 Ordering::AcqRel,
@@ -259,25 +249,6 @@ mod fallback {
         }
 
         #[inline]
-        pub(crate) fn compare_exchange_weak(
-            &self,
-            old_lo: u64,
-            old_hi: u64,
-            new_lo: u64,
-            new_hi: u64,
-        ) -> Result<(u64, u64), (u64, u64)> {
-            let old = (old_lo as u128) | ((old_hi as u128) << 64);
-            let new = (new_lo as u128) | ((new_hi as u128) << 64);
-            match self
-                .data
-                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(v) => Ok((v as u64, (v >> 64) as u64)),
-                Err(v) => Err((v as u64, (v >> 64) as u64)),
-            }
-        }
-
-        #[inline]
         pub(crate) fn exchange_lo(&self, new_lo: u64, order: Ordering) -> u64 {
             loop {
                 let old = self.data.load(Ordering::Acquire);
@@ -290,6 +261,25 @@ mod fallback {
                     .is_ok()
                 {
                     return old_lo;
+                }
+            }
+        }
+
+        /// Compare-exchange of the `hi` half, keeping whatever `lo` holds.
+        #[inline]
+        pub(crate) fn compare_exchange_hi(&self, old_hi: u64, new_hi: u64) -> bool {
+            loop {
+                let old = self.data.load(Ordering::Acquire);
+                if (old >> 64) as u64 != old_hi {
+                    return false;
+                }
+                let new = (old as u64 as u128) | ((new_hi as u128) << 64);
+                if self
+                    .data
+                    .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return true;
                 }
             }
         }

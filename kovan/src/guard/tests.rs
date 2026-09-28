@@ -924,3 +924,126 @@ fn slow_path_frees_nothing_before_it_republishes() {
     );
     assert_eq!(live.load(Ordering::SeqCst), 0);
 }
+
+/// Taking a pending thread's slot list over ends however much other
+/// threads retire meanwhile. The pending thread is stalled in its slow path
+/// with an old epoch published, so a helper's empty epoch transition does
+/// not close its slot; each time the helper has read the slot and is about
+/// to empty it, another thread retires a batch of oldest-born values,
+/// eligible for the pending slot while it takes new batches. The take must
+/// close the slot first and then need one pass.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn list_hand_over_ends_while_retires_keep_coming() {
+    /// Batches the retiring thread submits at most: one before the
+    /// hand-over, then one per pass.
+    const RETIRES: usize = 9;
+
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let global = crate::slot::global();
+
+    // A thread stalled in its slow path: an active slot, an epoch older
+    // than the global one published, its help request open.
+    crate::slot::advance_epoch();
+    let pending = global.alloc_tid();
+    let slots = global.thread_slots(pending);
+    slots.epoch[0].store_lo(crate::slot::epoch() - 1, Ordering::SeqCst);
+    slots.first[0].store_lo(0, Ordering::SeqCst);
+    slots.state[0].pointer.store(0, Ordering::SeqCst);
+    slots.state[0].parent.store(0, Ordering::SeqCst);
+    slots.state[0].epoch.store(0, Ordering::SeqCst);
+    let seqno = slots.epoch[0].load_hi();
+    slots.state[0]
+        .result
+        .store(super::INVPTR as u64, seqno, Ordering::SeqCst);
+    global.inc_slow();
+
+    // Retires one batch of oldest-born values each time it is asked to.
+    let (asked, answered) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let retirer = {
+        let (asked, answered, live) =
+            (Arc::clone(&asked), Arc::clone(&answered), Arc::clone(&live));
+        thread::spawn(move || {
+            own_tid();
+            for n in 1..=RETIRES {
+                assert!(eventually(|| asked.load(Ordering::SeqCst) >= n));
+                for _ in 0..RETIRE_FREQ {
+                    Counted::retire_oldest(&live);
+                }
+                answered.store(n, Ordering::SeqCst);
+            }
+        })
+    };
+
+    // A first batch, placed in the pending slot among others: the hand-over
+    // has a list to take.
+    asked.store(1, Ordering::SeqCst);
+    assert!(eventually(|| answered.load(Ordering::SeqCst) >= 1));
+    assert_ne!(
+        slots.first[0].load_lo(),
+        0,
+        "the pending slot took no batch"
+    );
+
+    let passes = Arc::new(AtomicUsize::new(0));
+    let helper = {
+        let (asked, answered, passes) = (
+            Arc::clone(&asked),
+            Arc::clone(&answered),
+            Arc::clone(&passes),
+        );
+        thread::spawn(move || {
+            let tid = own_tid();
+            stall::arm(Step::HandOverTake, tid, move || {
+                let n = passes.fetch_add(1, Ordering::SeqCst) + 2;
+                if n > RETIRES {
+                    return false;
+                }
+                // Another thread's retire, between this read of the slot
+                // and the attempt to empty it.
+                asked.store(n, Ordering::SeqCst);
+                assert!(eventually(|| answered.load(Ordering::SeqCst) >= n));
+                true
+            });
+            with_handle(|h| h.help_thread(pending, 0, tid));
+        })
+    };
+    join_within(helper, "the helper");
+    let passes = passes.load(Ordering::SeqCst);
+    assert_eq!(
+        passes, 1,
+        "the hand-over took {passes} passes while another thread kept retiring"
+    );
+
+    // Let the retirer finish, then leave the pending thread's slot as an
+    // exit would and free everything.
+    asked.store(RETIRES, Ordering::SeqCst);
+    join_within(retirer, "the retiring thread");
+    let l = Arc::clone(&live);
+    join_within(
+        thread::spawn(move || {
+            own_tid();
+            let global = crate::slot::global();
+            // The pending thread, resuming, republishes its slot with the
+            // seqnos past the transition (as its slow path's end does), so
+            // the next owner of the ID finds them even.
+            let slots = global.thread_slots(pending);
+            slots.epoch[0].store_hi(seqno + 2, Ordering::SeqCst);
+            slots.first[0].store_hi(seqno + 2, Ordering::SeqCst);
+            global.dec_slow();
+            for first in global.deactivate_slots(pending) {
+                if first != 0 {
+                    with_handle(|h| unsafe { h.traverse_into_cache(first as *mut RetiredNode) });
+                }
+            }
+            global.release_tid(pending);
+            let freed = eventually(|| {
+                flush();
+                l.load(Ordering::SeqCst) == 0
+            });
+            assert!(freed, "{} values never freed", l.load(Ordering::SeqCst));
+        }),
+        "the drain",
+    );
+}

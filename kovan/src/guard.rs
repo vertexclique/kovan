@@ -659,23 +659,12 @@ impl Handle {
         // An empty epoch transition
         let _ = slots.epoch[index].compare_exchange(prev_epoch, seqno, prev_epoch, seqno + 1);
 
-        // Clean up the list
-        {
-            let (mut old_lo, mut old_hi) = slots.first[index].load();
-            while old_hi == seqno {
-                match slots.first[index].compare_exchange_weak(old_lo, old_hi, 0, seqno + 1) {
-                    Ok(_) => {
-                        if old_lo != INVPTR as u64 {
-                            first = old_lo as *mut RetiredNode;
-                        }
-                        break;
-                    }
-                    Err((lo, hi)) => {
-                        old_lo = lo;
-                        old_hi = hi;
-                    }
-                }
-            }
+        // Clean up the list: take it over, unless a helper did. What is
+        // taken here goes onto the cache at once: `first` may already hold
+        // the list the loop above took.
+        let taken = self.take_over_list(&slots.first[index], seqno);
+        if taken != 0 {
+            unsafe { self.traverse_onto_cache(taken as *mut RetiredNode) };
         }
 
         let seqno = seqno + 1;
@@ -735,6 +724,41 @@ impl Handle {
         self.in_reclaim.set(was_reclaiming);
     }
 
+    /// Take over the list of a slot whose slow-path transition ends: the
+    /// pending thread and its helpers all call this with the list seqno
+    /// the transition started from, and whoever runs it first takes what
+    /// the slot holds. Returns the list taken (0 when none), which the
+    /// caller traverses.
+    ///
+    /// Two steps. [HandOverClose] advances the list seqno from `seqno`
+    /// (even: the slot takes new batches) to `seqno + 1` (odd: a scan that
+    /// reads it skips the slot) with a compare-exchange of the seqno word
+    /// alone, which no insert can fail. [HandOverTake] then empties the
+    /// list with a compare-exchange of the whole slot, for as long as the
+    /// seqno stays `seqno + 1`: a thread that finds it moved on takes
+    /// nothing, the transition having republished the slot (what the slot
+    /// holds then is the new section's). The take fails only when the list
+    /// changed since it was read: another taker emptied it (then this one
+    /// ends) or a try_retire that scanned the slot before it was closed
+    /// inserted into it, or rolled an insert back, at most one each per
+    /// try_retire, and a thread has at most one in flight per nesting level
+    /// of its destructors. So the loop is bounded by the retires in flight
+    /// when the slot closed, never by how many other threads retire later.
+    fn take_over_list(&self, first: &slot::WordPair, seqno: u64) -> u64 {
+        let _ = first.compare_exchange_hi(seqno, seqno + 1);
+        loop {
+            let (lo, hi) = first.load();
+            if hi != seqno + 1 || lo == 0 {
+                return 0;
+            }
+            #[cfg(test)]
+            crate::stall::at(crate::stall::Step::HandOverTake, self.tid());
+            if first.compare_exchange(lo, hi, 0, hi).is_ok() {
+                return if lo == INVPTR as u64 { 0 } else { lo };
+            }
+        }
+    }
+
     /// Help other threads in the slow path (matches help_read).
     ///
     /// # Wait-free bound: O((T ^ 2) * HR_NUM) where T = number of active threads
@@ -776,9 +800,9 @@ impl Handle {
     /// advance phase and the epoch stabilizes. The bound is independent of
     /// the helpee's progress — the helpee is passive.
     ///
-    /// The seqno cleanup loops (DCAS on first/epoch with `while old_hi == seqno`)
-    /// are bounded by O(T) contention: once any thread advances seqno,
-    /// all others see old_hi ≠ seqno and exit.
+    /// The hand-over loops are bounded too: the list's (`take_over_list`)
+    /// by the retires in flight when the slot closed to new batches, the
+    /// epoch's by the pending thread's republication (two passes at most).
     #[cold]
     fn help_thread(&self, helpee_tid: usize, index: usize, mytid: usize) {
         let global = self.global();
@@ -843,37 +867,31 @@ impl Handle {
                         #[cfg(test)]
                         crate::stall::at(crate::stall::Step::HelpHandOver, mytid);
 
-                        // Clean up list
-                        let (mut old_lo, mut old_hi) =
-                            global.thread_slots(helpee_tid).first[index].load();
-                        while old_hi == seqno {
-                            match global.thread_slots(helpee_tid).first[index]
-                                .compare_exchange_weak(old_lo, old_hi, 0, seqno + 1)
-                            {
-                                Ok(_) => {
-                                    if old_lo != INVPTR as u64 && old_lo != 0 {
-                                        unsafe {
-                                            self.traverse_into_cache(old_lo as *mut RetiredNode)
-                                        };
-                                    }
-                                    break;
-                                }
-                                Err((lo, hi)) => {
-                                    old_lo = lo;
-                                    old_hi = hi;
-                                }
-                            }
+                        // Clean up list: take it over, unless the pending
+                        // thread or another helper did.
+                        let taken = self
+                            .take_over_list(&global.thread_slots(helpee_tid).first[index], seqno);
+                        if taken != 0 {
+                            unsafe { self.traverse_into_cache(taken as *mut RetiredNode) };
                         }
 
                         let seqno = seqno + 1;
 
-                        // Set real epoch
+                        // Set real epoch [HandOverEpoch]. A strong
+                        // compare-exchange fails only when the word changed
+                        // while its seqno is odd: the pending thread
+                        // republishing (seqno + 1, then its epoch) or another
+                        // helper succeeding, both of which move the seqno on
+                        // and end the loop. At most two passes.
                         let (mut old_lo, mut old_hi) =
                             global.thread_slots(helpee_tid).epoch[index].load();
                         while old_hi == seqno {
-                            match global.thread_slots(helpee_tid).epoch[index]
-                                .compare_exchange_weak(old_lo, old_hi, curr_epoch, seqno + 1)
-                            {
+                            match global.thread_slots(helpee_tid).epoch[index].compare_exchange(
+                                old_lo,
+                                old_hi,
+                                curr_epoch,
+                                seqno + 1,
+                            ) {
                                 Ok(_) => break,
                                 Err((lo, hi)) => {
                                     old_lo = lo;
