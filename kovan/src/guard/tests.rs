@@ -143,7 +143,7 @@ fn escalated_unpin_keeps_the_batches_its_destructors_free() {
             }
         }
         // A transition traverses it: the batch goes to the free-list cache.
-        with_handle(|h| h.global().advance_epoch());
+        crate::slot::advance_epoch();
         drop(pin());
         // The next traversal frees the cache first.
         with_handle(|h| h.list_count.set(MAX_CACHE));

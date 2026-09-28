@@ -184,7 +184,7 @@ impl Handle {
             return cached;
         }
         // First use on this thread: seed from the global counter.
-        let e = self.global().get_epoch();
+        let e = slot::epoch();
         self.cached_birth_epoch.set(e);
         e
     }
@@ -275,7 +275,7 @@ impl Handle {
         let ptr = data.load(order);
 
         // Step 2: read the global epoch.
-        let curr_epoch = self.global().get_epoch();
+        let curr_epoch = slot::epoch();
 
         // Step 3: protected if the epoch is unchanged since our last
         // publication, or if we already hold the unconditional
@@ -323,7 +323,7 @@ impl Handle {
             self.cached_epoch.set(curr_epoch);
 
             let ptr = data.load(order);
-            let e = global.get_epoch();
+            let e = slot::epoch();
             if e == curr_epoch {
                 return ptr;
             }
@@ -384,9 +384,8 @@ impl Handle {
     #[cold]
     fn unpin_outermost(&self) {
         let tid = self.tid();
-        let global = self.global();
         self.pin_count.set(1);
-        self.do_update(global.get_epoch(), 0, tid);
+        self.do_update(slot::epoch(), 0, tid);
         self.pin_count.set(0);
     }
 
@@ -442,7 +441,7 @@ impl Handle {
                 self.list_count.set(list_count);
             }
 
-            curr_epoch = global.get_epoch();
+            curr_epoch = slot::epoch();
             slots.epoch[index].store_lo(curr_epoch, Ordering::SeqCst);
         } else {
             // Store current epoch
@@ -508,7 +507,7 @@ impl Handle {
         // Nested pin: the outermost guard's reservation protects us. The
         // outermost pin skips too when no transition is due.
         if count == 0 {
-            let curr_epoch = self.global().get_epoch();
+            let curr_epoch = slot::epoch();
             if curr_epoch != self.drained_epoch.get() {
                 self.transition(curr_epoch);
             }
@@ -533,7 +532,7 @@ impl Handle {
             if attempts == 0 {
                 break;
             }
-            curr_epoch = self.global().get_epoch();
+            curr_epoch = slot::epoch();
             if curr_epoch == prev_epoch {
                 return;
             }
@@ -591,7 +590,7 @@ impl Handle {
         let mut first: *mut RetiredNode = core::ptr::null_mut();
 
         loop {
-            let curr_epoch = global.get_epoch();
+            let curr_epoch = slot::epoch();
             if curr_epoch == prev_epoch {
                 // Try to self-complete: CAS result from (INVPTR, seqno) to (0, 0)
                 if slots.state[index]
@@ -636,7 +635,7 @@ impl Handle {
                     self.free_list.set(free_list);
                     self.list_count.set(list_count);
                 }
-                let _ = global.get_epoch(); // re-read after traverse
+                let _ = slot::epoch(); // re-read after traverse
             }
 
             first = core::ptr::null_mut();
@@ -826,14 +825,14 @@ impl Handle {
         let seqno = global.thread_slots(helpee_tid).epoch[index].load_hi();
 
         if last_result_hi == seqno {
-            let mut prev_epoch = global.get_epoch();
+            let mut prev_epoch = slot::epoch();
             let mut last_result_lo = last_result_lo;
             let mut last_result_hi = last_result_hi;
 
             loop {
                 prev_epoch = self.do_update(prev_epoch, hr_num + 1, mytid);
                 // In reserve_slot mode (pointer=0), ptr is always null
-                let curr_epoch = global.get_epoch();
+                let curr_epoch = slot::epoch();
 
                 if curr_epoch == prev_epoch {
                     // Try to set result
@@ -1055,7 +1054,7 @@ impl Handle {
             self.in_reclaim.set(true);
             self.help_read(tid);
             self.in_reclaim.set(was_reclaiming);
-            self.global().advance_epoch();
+            slot::advance_epoch();
         }
 
         if count.is_multiple_of(RETIRE_FREQ) {
@@ -1534,7 +1533,7 @@ impl Handle {
         // Help pending slow-path threads before advancing the epoch (the
         // wait-free pin() bound requires every advance to be helped first).
         self.help_read(tid);
-        global.advance_epoch();
+        slot::advance_epoch();
 
         self.drain_free_list();
 
@@ -1546,7 +1545,7 @@ impl Handle {
         // batch retired anywhere into this thread's slot until it pins
         // again, forever if it goes idle.
         if saved_pin == 0 && self.cached_epoch.get() == EPOCH_UNCONDITIONAL {
-            self.do_update(global.get_epoch(), 0, tid);
+            self.do_update(slot::epoch(), 0, tid);
         }
 
         self.pin_count.set(saved_pin);
@@ -1698,7 +1697,7 @@ pub(crate) fn current_birth_epoch() -> u64 {
         // global counter (always correct, just not cached).
         HANDLE
             .try_with(|handle| handle.current_birth_epoch())
-            .unwrap_or_else(|_| slot::global().get_epoch())
+            .unwrap_or_else(|_| slot::epoch())
     }
 }
 

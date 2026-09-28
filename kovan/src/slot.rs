@@ -4,6 +4,7 @@
 //! for the retirement list and epoch, plus helping state. The global state holds
 //! the epoch counter, slow-path counter, and thread ID allocator.
 
+use crate::cache_padded::CachePadded;
 use crate::retired::INVPTR;
 use crate::ttas::TTas;
 use alloc::boxed::Box;
@@ -415,8 +416,6 @@ pub(crate) struct ASMRState {
     /// Two-level page table of per-thread slot arrays. Pages are allocated on
     /// demand when new thread IDs are assigned.
     pages: [AtomicPtr<SlotPage>; MAX_PAGES],
-    /// Global epoch counter (starts at 1)
-    epoch: AtomicU64,
     /// Count of threads currently in the slow path
     slow_counter: AtomicU64,
     /// Thread ID allocator (next available ID)
@@ -429,6 +428,26 @@ pub(crate) struct ASMRState {
     /// usize because raw pointers are not Send. Adopted (merged into the
     /// adopter's accumulating batch) by enqueue_node/flush.
     orphans: TTas<alloc::vec::Vec<usize>>,
+}
+
+/// Global epoch counter (starts at 1).
+///
+/// A static of its own rather than a field of the lazily built
+/// [`ASMRState`]: every outermost `pin()` and every protected load reads it,
+/// and a static is one load away, with no state pointer to load and check
+/// first. Padded so the line it lives on holds nothing else.
+static EPOCH: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(1));
+
+/// Current global epoch.
+#[inline]
+pub(crate) fn epoch() -> u64 {
+    EPOCH.load(Ordering::Acquire)
+}
+
+/// Advance the global epoch by one.
+#[inline]
+pub(crate) fn advance_epoch() {
+    EPOCH.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Null-initialized page table constant for use in array initialization.
@@ -452,7 +471,6 @@ impl ASMRState {
         );
         Self {
             pages: [NULL_PAGE; MAX_PAGES],
-            epoch: AtomicU64::new(1),
             slow_counter: AtomicU64::new(0),
             next_tid: AtomicUsize::new(0),
             free_tids: TTas::new(alloc::vec::Vec::new()),
@@ -494,18 +512,6 @@ impl ASMRState {
             "kovan: page {page_idx} not allocated for tid {tid}"
         );
         unsafe { &(*page).0[slot_idx] }
-    }
-
-    /// Get the current global epoch
-    #[inline]
-    pub(crate) fn get_epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
-    }
-
-    /// Increment the global epoch
-    #[inline]
-    pub(crate) fn advance_epoch(&self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Get slow counter value
