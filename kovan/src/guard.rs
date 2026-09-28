@@ -72,28 +72,14 @@ impl Drop for Guard {
         // transitioned by a subsequent pin() until all guards are dropped.
         #[cfg(feature = "nightly")]
         {
-            let count = HANDLE.pin_count.get();
-            HANDLE.pin_count.set(count.saturating_sub(1));
-            if count == 1 && HANDLE.cached_epoch.get() == EPOCH_UNCONDITIONAL {
-                HANDLE.unpin_outermost();
-            }
+            HANDLE.unpin();
         }
         #[cfg(not(feature = "nightly"))]
         {
             // Use try_with to handle process teardown gracefully.
             // During static destructor execution, TLS may already be destroyed.
             // Panicking in a destructor during cleanup causes SIGABRT.
-            let _ = HANDLE.try_with(|handle| {
-                let count = handle.pin_count.get();
-                // Saturating: a dummy Guard (created when TLS was unavailable in
-                // pin()) was never pinned. Decrementing past 0 would be UB.
-                handle.pin_count.set(count.saturating_sub(1));
-                // Outermost drop of an escalated critical section: replace
-                // the unconditional reservation with a real epoch and drain.
-                if count == 1 && handle.cached_epoch.get() == EPOCH_UNCONDITIONAL {
-                    handle.unpin_outermost();
-                }
-            });
+            let _ = HANDLE.try_with(Handle::unpin);
         }
     }
 }
@@ -355,6 +341,28 @@ impl Handle {
         slots.epoch[0].store_lo(EPOCH_UNCONDITIONAL, Ordering::SeqCst);
         fence(Ordering::SeqCst);
         self.cached_epoch.set(EPOCH_UNCONDITIONAL);
+    }
+
+    /// Guard drop: leave a critical section.
+    ///
+    /// The outermost drop (count 1) is the common case and is tested first:
+    /// it stores 0 and, only if the section escalated, transitions. A nested
+    /// drop decrements, saturating: a dummy Guard (created when TLS was
+    /// unavailable in `pin()`) was never pinned, and decrementing past 0
+    /// would wrap.
+    #[inline]
+    fn unpin(&self) {
+        let count = self.pin_count.get();
+        if count == 1 {
+            self.pin_count.set(0);
+            // Outermost drop of an escalated critical section: replace the
+            // unconditional reservation with a real epoch and drain.
+            if self.cached_epoch.get() == EPOCH_UNCONDITIONAL {
+                self.unpin_outermost();
+            }
+        } else {
+            self.pin_count.set(count.saturating_sub(1));
+        }
     }
 
     /// Called when the outermost Guard drops (pin_count 1 -> 0).
