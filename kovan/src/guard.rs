@@ -953,8 +953,9 @@ impl Handle {
         // that synchronizes with the release half of the exchange that
         // inserted a node of it (or of an exchange whose release sequence
         // contains that one: later insertions are RMWs on the same word), or
-        // through the orphan list's lock. These stores are sequenced before
-        // that exchange or that unlock, so they happen before every such
+        // through an orphan chain, taken with an acquire swap of the word a
+        // release store parked it on. These stores are sequenced before
+        // that exchange or that store, so they happen before every such
         // read.
         let first = self.batch_first.get();
         if first.is_null() {
@@ -992,11 +993,10 @@ impl Handle {
             let was_reclaiming = self.in_reclaim.get();
             self.in_reclaim.set(true);
 
-            // NB: orphan adoption is intentionally NOT done here. retire() must
-            // stay wait-free, and the orphan list is behind a spin lock; taking
-            // it on the retire path would make completion depend on another
-            // thread. Orphans (created only at thread exit) are drained by
-            // flush()/cleanup() instead.
+            // Orphan adoption is left to flush(): its pass over the thread
+            // IDs is O(T) and the chain it takes is as long as what exited
+            // threads parked, work a retire does not take on. Orphans
+            // (created only at thread exit) are adopted by flush().
 
             // Capture and detach the batch BEFORE try_retire: destructors
             // running inside try_retire (via free_batch_list) may re-enter
@@ -1153,19 +1153,29 @@ impl Handle {
         self.batch_count.set(self.batch_count.get() + n);
     }
 
-    /// Adopt at most one orphaned batch left behind by an exited thread.
+    /// Adopt the orphaned batches exited threads parked on one thread ID,
+    /// merging them into this thread's accumulating batch.
     ///
-    /// Called on the cold retire path (every RETIRE_FREQ) and from flush().
-    /// One adoption per call bounds the work while guaranteeing orphans
-    /// drain: threads exit at most once, adopters run repeatedly.
+    /// Called from flush(), never from retire(): the pass over the IDs is
+    /// O(T), kept off the retire path. Bounded by that pass and by the chain
+    /// its one swap took, which no other thread extends: at most the batches
+    /// parked on that ID since its last adoption. Adopters run repeatedly and
+    /// threads exit once, so every parked batch is adopted.
     fn adopt_orphans(&self) {
-        let global = self.global();
-        if let Some(refs_addr) = global.pop_orphan() {
-            let refs = refs_addr as *mut RetiredNode;
+        let mut refs = self.global().adopt_orphans();
+        #[cfg(test)]
+        if !refs.is_null() {
+            crate::stall::at(crate::stall::Step::OrphanAdopt, self.tid());
+        }
+        while !refs.is_null() {
+            // Relaxed: the chain's writes happen before the acquire swap
+            // that took it (see `ASMRState::park_orphans`).
+            let next = unsafe { (*refs).next.load(Ordering::Relaxed) };
             // Orphans are finalized: batch_link = RNODE(batch_first).
             let first =
-                crate::retired::rnode_unmask(unsafe { (*refs).batch_link.load(Ordering::Acquire) });
+                crate::retired::rnode_unmask(unsafe { (*refs).batch_link.load(Ordering::Relaxed) });
             self.merge_batch(first, refs);
+            refs = next;
         }
     }
 
@@ -1175,8 +1185,8 @@ impl Handle {
     /// Returns `false` when the batch has fewer assignable nodes than there
     /// are eligible slots. In that case **nothing has been published** (the
     /// scan phase aborts before the insert phase) and the caller must keep
-    /// the chain — merge it back into the accumulating batch or park it on
-    /// the orphan list. Silently dropping it would leak the entire batch.
+    /// the chain — merge it back into the accumulating batch or park it as
+    /// an orphan. Silently dropping it would leak the entire batch.
     ///
     /// `skip_tid` names a thread whose slots the batch is not placed in:
     /// the caller's own, when it holds no guard (see `flush`).
@@ -1541,6 +1551,9 @@ impl Handle {
             // With no guard of this thread live, its own slot takes no node
             // of its batches and is drained here, as in flush().
             let own = (saved_pin == 0).then_some(tid);
+            // Batches this exit cannot place or free, parked on this ID
+            // before it is released.
+            let mut parked = Parked::new();
 
             // Everything that can run a destructor runs while this thread's
             // slot is still active and published: a destructor is a critical
@@ -1559,9 +1572,8 @@ impl Handle {
                 // Finalize the batch and submit it through try_retire so the
                 // normal epoch-based safety checks apply. If try_retire
                 // cannot place the batch (fewer nodes than eligible slots),
-                // park it on the global orphan list: another thread adopts
-                // and retires it through its own accumulating batch. Nothing
-                // leaks.
+                // park it: another thread adopts and retires it through its
+                // own accumulating batch. Nothing leaks.
                 let count = self.batch_count.get();
                 if count > 0 {
                     let first = self.batch_first.get();
@@ -1575,7 +1587,7 @@ impl Handle {
                             .store(rnode_mark(first), Ordering::SeqCst);
                     }
                     if !self.try_retire(first, last, own) {
-                        global.push_orphan(last as usize);
+                        parked.push(last);
                     }
                 }
                 if own.is_some() {
@@ -1599,8 +1611,8 @@ impl Handle {
             // instead of being obliterated; seqnos are preserved across tid
             // recycling. This thread holds no reservation any more and so
             // runs no destructor from here on: a batch whose count this
-            // traversal brings to zero is re-armed and parked on the orphan
-            // list, where a live thread adopts it and retires it again.
+            // traversal brings to zero is re-armed and parked, and a live
+            // thread adopts it and retires it again.
             let captured = global.deactivate_slots(tid);
             for first in captured {
                 if first != 0 {
@@ -1610,16 +1622,23 @@ impl Handle {
                         let refs = unowned;
                         // The refs-node is still finalized (batch_link =
                         // RNODE(batch_first)); its count goes back to the
-                        // bias an unsubmitted batch carries. The orphan
-                        // list's lock orders these writes before the
-                        // adopter's reads.
+                        // bias an unsubmitted batch carries. The release
+                        // that parks the chain orders these writes before
+                        // the adopter's reads.
                         unsafe {
                             unowned = (*refs).next.load(Ordering::Relaxed);
                             (*refs).refs_or_next.store(REFC_PROTECT, Ordering::Relaxed);
                         }
-                        global.push_orphan(refs as usize);
+                        parked.push(refs);
                     }
                 }
+            }
+
+            // Park what this exit could not place or free on this ID's
+            // orphan word, which is this thread's to write until the ID is
+            // released.
+            if !parked.head.is_null() {
+                unsafe { global.park_orphans(tid, parked.head, parked.tail) };
             }
 
             // Only now may another thread take this ID over, after every
@@ -1647,6 +1666,31 @@ impl Handle {
 impl Drop for Handle {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+/// The orphaned batches an exiting thread collects, a chain of finalized
+/// refs-nodes linked through `next`, parked on its ID in one step.
+struct Parked {
+    head: *mut RetiredNode,
+    tail: *mut RetiredNode,
+}
+
+impl Parked {
+    const fn new() -> Self {
+        Self {
+            head: core::ptr::null_mut(),
+            tail: core::ptr::null_mut(),
+        }
+    }
+
+    /// Add a finalized refs-node of a batch no other thread can reach.
+    fn push(&mut self, refs: *mut RetiredNode) {
+        unsafe { (*refs).next.store(self.head, Ordering::Relaxed) };
+        if self.tail.is_null() {
+            self.tail = refs;
+        }
+        self.head = refs;
     }
 }
 

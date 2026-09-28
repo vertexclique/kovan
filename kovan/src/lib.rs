@@ -102,7 +102,8 @@ mod guard;
 mod reclaim;
 mod retired;
 mod slot;
-mod ttas;
+#[cfg(test)]
+mod stall;
 
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};

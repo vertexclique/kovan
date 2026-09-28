@@ -55,8 +55,8 @@ impl Drop for Tracked {
 }
 
 /// Wait until the reclamation freed every node retired so far, so a drop count reads final:
-/// flush (each call also adopts one orphaned batch of an exited thread, in the order they were
-/// orphaned, those of earlier tests first) until every value made was dropped, for at most ten
+/// flush (each call also adopts the orphaned batches exited threads parked on one thread ID,
+/// those of earlier tests among them) until every value made was dropped, for at most ten
 /// seconds. A leak never balances and fails the caller's check; nodes merely in flight balance
 /// once their batches are reached. Only meaningful while no other test's threads hold kovan
 /// reservations (every test of the suite runs under `serial`).

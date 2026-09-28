@@ -37,7 +37,7 @@
 //!
 //! `TEST_LOCK` below is not a concurrency test fixture — it's the same
 //! cross-test serialization the original file used, kept for the same
-//! reason: kovan's reclamation state (epoch, slots, orphan list) is
+//! reason: kovan's reclamation state (epoch, slots, orphans) is
 //! process-global, and Rust's native test harness still runs the functions
 //! *in this file* as parallel OS threads by default, so one test's guard
 //! or retire activity can perturb another's exact drop counts even though

@@ -1,9 +1,10 @@
 //! Reservation transitions that need the thread handle's internals: an
 //! escalated critical section (forced here through `Handle::escalate`, the
-//! step a protected load takes once its convergence attempts run out) and
-//! the free-list cache.
+//! step a protected load takes once its convergence attempts run out), the
+//! free-list cache, and threads held at a protocol step (see `stall`) while
+//! other threads' operations must still complete.
 //!
-//! Each test runs on a fresh thread (its own slot, released at exit) and
+//! Each test runs on fresh threads (their own slots, released at exit) and
 //! the tests are serialized: the slots of every thread in the process
 //! decide which batches wait for which traversal.
 
@@ -11,10 +12,12 @@ use super::{HANDLE, Handle, flush, pin, retire};
 use crate::reclaim::MAX_CACHE;
 use crate::retired::RetiredNode;
 use crate::slot::{EPOCH_FREQ, EPOCH_UNCONDITIONAL, RETIRE_FREQ};
+use crate::stall::{self, Step};
 use std::boxed::Box;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::{Duration, Instant};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -38,6 +41,74 @@ fn published_epoch() -> u64 {
     with_handle(|h| h.global().thread_slots(h.tid()).epoch[0].load_lo())
 }
 
+/// This thread's ID, allocated by a first pin if it has none.
+fn own_tid() -> usize {
+    drop(pin());
+    with_handle(|h| h.tid())
+}
+
+/// How long a test waits for an operation that must complete while another
+/// thread is held, and how long a held thread waits to be let go.
+const DEADLINE: Duration = Duration::from_secs(60);
+
+/// Yield until `done` holds; false if `DEADLINE` passes first.
+fn eventually(done: impl Fn() -> bool) -> bool {
+    let end = Instant::now() + DEADLINE;
+    while !done() {
+        if Instant::now() > end {
+            return false;
+        }
+        thread::yield_now();
+    }
+    true
+}
+
+/// Joins `t`, failing the test if its main function has not returned
+/// within `DEADLINE` (the join then waits for its exit).
+fn join_within<T>(t: thread::JoinHandle<T>, what: &str) -> T {
+    assert!(eventually(|| t.is_finished()), "{what} did not complete");
+    t.join().unwrap()
+}
+
+/// A thread held at a protocol step until the test lets it go (or until
+/// `DEADLINE`, so that a failing test still ends).
+#[derive(Clone)]
+struct Hold {
+    arrived: Arc<AtomicBool>,
+    go: Arc<AtomicBool>,
+}
+
+impl Hold {
+    fn new() -> Self {
+        Self {
+            arrived: Arc::new(AtomicBool::new(false)),
+            go: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Hold the thread holding `tid` the next time it reaches `step`.
+    fn arm(&self, step: Step, tid: usize) {
+        let hold = self.clone();
+        stall::arm(step, tid, move || {
+            hold.arrived.store(true, Ordering::SeqCst);
+            eventually(|| hold.go.load(Ordering::SeqCst));
+            false
+        });
+    }
+
+    /// Wait until the held thread reached its step.
+    fn reached(&self, what: &str) {
+        assert!(
+            eventually(|| self.arrived.load(Ordering::SeqCst)),
+            "{what} never reached its step"
+        );
+    }
+
+    fn release(&self) {
+        self.go.store(true, Ordering::SeqCst);
+    }
+}
+
 /// A retirable value counted in `live` while it exists.
 #[repr(C)]
 struct Counted {
@@ -50,6 +121,21 @@ impl Counted {
         live.fetch_add(1, Ordering::SeqCst);
         let node = Box::into_raw(Box::new(Counted {
             retired: RetiredNode::new(),
+            live: Arc::clone(live),
+        }));
+        unsafe { retire(node) };
+    }
+
+    /// Retire one stamped with the first epoch as its birth: its batch
+    /// takes a node in every active slot (an older birth only defers it
+    /// more), so a lone one cannot be placed while another thread is
+    /// pinned.
+    fn retire_oldest(live: &Arc<AtomicUsize>) {
+        live.fetch_add(1, Ordering::SeqCst);
+        let retired = RetiredNode::new();
+        retired.set_birth_epoch(1);
+        let node = Box::into_raw(Box::new(Counted {
+            retired,
             live: Arc::clone(live),
         }));
         unsafe { retire(node) };
@@ -428,5 +514,118 @@ fn exit_runs_its_destructors_with_its_slot_active() {
         inactive.load(Ordering::SeqCst),
         0,
         "destructors ran after the exiting thread deactivated its slot"
+    );
+}
+
+/// Parking orphans, adopting them and handing thread IDs over wait for no
+/// other thread: with one thread held between the two steps of parking
+/// (its ID's orphan word swapped to null, the joined chain not yet stored)
+/// and another held after adopting a chain and before merging it, threads
+/// keep starting (a first pin claims an ID), retiring, flushing (adopting)
+/// and exiting (parking, releasing their ID). The held thread's ID goes to
+/// no one before it is released, and once both are let go every retired
+/// value is freed exactly once.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn orphans_and_ids_change_hands_while_threads_stall() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+
+    // Pinned throughout: its slot is eligible for every batch holding an
+    // oldest-born value, so an exiting thread's one-node batch of one
+    // cannot be placed and is parked.
+    let (pinned_up, pinned_done) = (Hold::new(), Hold::new());
+    let pinned = {
+        let (up, done) = (pinned_up.clone(), pinned_done.clone());
+        thread::spawn(move || {
+            let guard = pin();
+            up.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| done.go.load(Ordering::SeqCst)));
+            drop(guard);
+            flush();
+        })
+    };
+    pinned_up.reached("the pinned thread");
+
+    // Held at exit, between the two steps of parking its batch.
+    let parking = Hold::new();
+    let held_tid = Arc::new(AtomicUsize::new(usize::MAX));
+    let exiting = {
+        let (live, parking, held_tid) = (Arc::clone(&live), parking.clone(), Arc::clone(&held_tid));
+        thread::spawn(move || {
+            let tid = own_tid();
+            held_tid.store(tid, Ordering::SeqCst);
+            Counted::retire_oldest(&live);
+            parking.arm(Step::OrphanPark, tid);
+        })
+    };
+    parking.reached("the exiting thread");
+    let held_tid = held_tid.load(Ordering::SeqCst);
+
+    // Threads that start (a first pin claims an ID), retire and exit while
+    // it is held, parking their batch, or flush before they exit, adopting
+    // a parked chain.
+    let churn = |n: usize, flushing: bool| {
+        for _ in 0..n {
+            let live = Arc::clone(&live);
+            let tid = join_within(
+                thread::spawn(move || {
+                    let tid = own_tid();
+                    Counted::retire_oldest(&live);
+                    if flushing {
+                        flush();
+                    }
+                    tid
+                }),
+                "a thread starting, retiring, flushing and exiting",
+            );
+            assert_ne!(tid, held_tid, "an exiting thread's ID was taken over");
+        }
+    };
+    churn(8, false);
+
+    // Held after taking a chain the churn parked, before merging it.
+    let adopting = Hold::new();
+    let adopter = {
+        let adopting = adopting.clone();
+        thread::spawn(move || {
+            let tid = own_tid();
+            adopting.arm(Step::OrphanAdopt, tid);
+            flush();
+        })
+    };
+    adopting.reached("the adopting thread");
+    churn(8, false);
+    churn(8, true);
+
+    // Still held: the exit has not released its ID (its thread's main
+    // function has returned, the exit runs after it), the adopter has not
+    // returned from flush().
+    assert!(!crate::slot::global().tid_is_released(held_tid));
+    assert!(!adopter.is_finished());
+    parking.release();
+    join_within(exiting, "the held exit");
+    adopting.release();
+    join_within(adopter, "the held adopter");
+    pinned_done.release();
+    join_within(pinned, "the pinned thread");
+
+    // Every parked batch is adopted and freed.
+    let l = Arc::clone(&live);
+    join_within(
+        thread::spawn(move || {
+            // flush() works only on a thread that holds an ID.
+            own_tid();
+            let freed = eventually(|| {
+                flush();
+                l.load(Ordering::SeqCst) == 0
+            });
+            assert!(
+                freed,
+                "{} retired values never freed",
+                l.load(Ordering::SeqCst)
+            );
+        }),
+        "the drain",
     );
 }

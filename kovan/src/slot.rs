@@ -5,8 +5,7 @@
 //! the epoch counter, slow-path counter, and thread ID allocator.
 
 use crate::cache_padded::CachePadded;
-use crate::retired::INVPTR;
-use crate::ttas::TTas;
+use crate::retired::{INVPTR, RetiredNode};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
@@ -390,12 +389,18 @@ impl HelpState {
     }
 }
 
-/// Per-thread slot group: first (list+seqno), epoch (epoch+seqno), state (helping)
+/// Per-thread slot group: first (list+seqno), epoch (epoch+seqno), state
+/// (helping), and the batches exited owners of the ID left for adoption.
 #[repr(align(128))]
 pub(crate) struct ThreadSlots {
     pub(crate) first: [WordPair; SLOTS_PER_THREAD],
     pub(crate) epoch: [WordPair; SLOTS_PER_THREAD],
     pub(crate) state: [HelpState; SLOTS_PER_THREAD],
+    /// Orphaned batches parked by threads that owned this ID and exited: a
+    /// chain of finalized refs-nodes (batch_link = RNODE(batch_first))
+    /// linked through `next`, or null. Only the ID's owner stores a chain
+    /// here; any thread takes one by swapping the word to null.
+    orphans: AtomicPtr<RetiredNode>,
 }
 
 impl ThreadSlots {
@@ -407,6 +412,7 @@ impl ThreadSlots {
             first: core::array::from_fn(|_| WordPair::new(INVPTR as u64, 0)),
             epoch: core::array::from_fn(|_| WordPair::new(0, 0)),
             state: core::array::from_fn(|_| HelpState::new()),
+            orphans: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 }
@@ -420,14 +426,16 @@ pub(crate) struct ASMRState {
     slow_counter: AtomicU64,
     /// Thread ID allocator (next available ID)
     next_tid: AtomicUsize,
-    /// Bitmap of free thread IDs for recycling
-    free_tids: TTas<alloc::vec::Vec<usize>>,
-    /// Orphaned batches abandoned by exiting threads. Each entry is a
-    /// finalized refs-node (batch_link = RNODE(batch_first)) whose batch
-    /// could not be submitted via try_retire at thread exit. Stored as
-    /// usize because raw pointers are not Send. Adopted (merged into the
-    /// adopter's accumulating batch) by enqueue_node/flush.
-    orphans: TTas<alloc::vec::Vec<usize>>,
+    /// Released thread IDs, one bit per ID: set by
+    /// [`release_tid`](Self::release_tid), cleared by the
+    /// [`alloc_tid`](Self::alloc_tid) that takes the ID over. An ID never
+    /// handed out has its bit clear, so only its first owner takes it.
+    released: [AtomicU64; MAX_THREADS / 64],
+    /// Number of thread IDs whose orphan word holds a chain (see
+    /// [`ThreadSlots`]): lets an adopter skip the pass over the IDs with one
+    /// load while no exited thread left anything. Exact whenever no thread
+    /// is between the two steps of a park or an adoption.
+    orphaned: AtomicUsize,
 }
 
 /// Global epoch counter (starts at 1).
@@ -473,8 +481,8 @@ impl ASMRState {
             pages: [NULL_PAGE; MAX_PAGES],
             slow_counter: AtomicU64::new(0),
             next_tid: AtomicUsize::new(0),
-            free_tids: TTas::new(alloc::vec::Vec::new()),
-            orphans: TTas::new(alloc::vec::Vec::new()),
+            released: [const { AtomicU64::new(0) }; MAX_THREADS / 64],
+            orphaned: AtomicUsize::new(0),
         }
     }
 
@@ -538,13 +546,31 @@ impl ASMRState {
         self.next_tid.load(Ordering::Acquire)
     }
 
-    /// Allocate a thread ID
+    /// Allocate a thread ID: a released one when there is one, else the next
+    /// one never handed out.
+    ///
+    /// Wait-free, and no step waits for another thread. [TidClaim] is one
+    /// pass over the release words of the IDs handed out so far, with at most
+    /// one `fetch_and` per released bit the pass loaded: the bits it tries
+    /// come from its own load of the word, never from a reload, so a word
+    /// costs at most 64 claims whatever other threads release meanwhile, and
+    /// the pass at most `MAX_THREADS` in all. An ID another thread claims
+    /// first is passed over. [TidFresh] then takes `next_tid` with a
+    /// compare-exchange that fails only when another thread took that ID
+    /// first, which can happen at most `MAX_THREADS` times in the process.
     pub(crate) fn alloc_tid(&self) -> usize {
-        // Try recycled IDs first (page already exists for recycled tids)
-        {
-            let mut free = self.free_tids.lock();
-            if let Some(tid) = free.pop() {
-                return tid;
+        let handed_out = self.next_tid.load(Ordering::Acquire);
+        for (w, word) in self.released[..handed_out.div_ceil(64)].iter().enumerate() {
+            let mut seen = word.load(Ordering::Relaxed);
+            while seen != 0 {
+                let bit = seen & seen.wrapping_neg();
+                seen ^= bit;
+                // Acquire: pairs with the release in `release_tid`, so the
+                // exited owner's last writes to the ID's slots happen before
+                // this thread's first.
+                if word.fetch_and(!bit, Ordering::Acquire) & bit != 0 {
+                    return w * 64 + bit.trailing_zeros() as usize;
+                }
             }
         }
         // CAS loop: only increment on success so the counter stays valid
@@ -561,14 +587,14 @@ impl ASMRState {
             // This guarantees concurrent scanners (via max_threads()) never see a
             // tid whose page doesn't exist yet.
             self.ensure_page(page_idx);
-            match self.next_tid.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return current,
-                Err(_) => continue,
+            // Strong: a failure means another thread took `current`, never a
+            // spurious one, which keeps the retries bounded.
+            if self
+                .next_tid
+                .compare_exchange(current, current + 1, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                return current;
             }
         }
     }
@@ -606,28 +632,76 @@ impl ASMRState {
     }
 
     /// Release a thread ID for recycling, once its thread no longer uses its
-    /// slots (see [`deactivate_slots`](Self::deactivate_slots)).
+    /// slots (see [`deactivate_slots`](Self::deactivate_slots)). One
+    /// `fetch_or` [TidRelease], whose release orders every write the owner
+    /// made to the ID's slots before the next owner's claim.
     pub(crate) fn release_tid(&self, tid: usize) {
-        let mut free = self.free_tids.lock();
-        free.push(tid);
+        self.released[tid / 64].fetch_or(1 << (tid % 64), Ordering::Release);
     }
 
     /// Whether `tid` is released and waiting to be handed out again.
     #[cfg(test)]
     pub(crate) fn tid_is_released(&self, tid: usize) -> bool {
-        self.free_tids.lock().contains(&tid)
+        self.released[tid / 64].load(Ordering::SeqCst) & (1 << (tid % 64)) != 0
     }
 
-    /// Park an orphaned batch (finalized refs-node) for later adoption.
-    pub(crate) fn push_orphan(&self, refs_node: usize) {
-        let mut orphans = self.orphans.lock();
-        orphans.push(refs_node);
+    /// Park the orphaned batches `head ..= tail` (finalized refs-nodes
+    /// linked through `next`) on the orphan word of `tid`, which the caller
+    /// owns until it releases the ID.
+    ///
+    /// Two steps, no loop, no wait. [OrphanTake] swaps out what an earlier
+    /// owner of the ID left there, which is joined behind this chain: an
+    /// adopter only ever swaps the word to null, so nothing lands in it
+    /// between the two steps. [OrphanPublish] stores the joined chain, the
+    /// release that orders every write to its batches before an adopter's
+    /// acquire.
+    ///
+    /// # Safety
+    ///
+    /// `head` and `tail` are the ends of a chain of finalized refs-nodes
+    /// that no other thread can reach, and the caller owns `tid`.
+    pub(crate) unsafe fn park_orphans(
+        &self,
+        tid: usize,
+        head: *mut RetiredNode,
+        tail: *mut RetiredNode,
+    ) {
+        let word = &self.thread_slots(tid).orphans;
+        let earlier = word.swap(core::ptr::null_mut(), Ordering::Acquire);
+        #[cfg(test)]
+        crate::stall::at(crate::stall::Step::OrphanPark, tid);
+        unsafe { (*tail).next.store(earlier, Ordering::Relaxed) };
+        word.store(head, Ordering::Release);
+        if earlier.is_null() {
+            self.orphaned.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// Take one orphaned batch for adoption, if any.
-    pub(crate) fn pop_orphan(&self) -> Option<usize> {
-        let mut orphans = self.orphans.lock();
-        orphans.pop()
+    /// Take the orphaned batches parked on one thread ID, as a chain of
+    /// refs-nodes linked through `next` (null when none is parked).
+    ///
+    /// [OrphanAdopt]: one pass over the IDs handed out, skipped with one load
+    /// while no ID holds a chain; an ID whose word is empty costs one load,
+    /// and the first whose word holds a chain is swapped to null. The chain
+    /// taken is fixed by that swap: what exiting threads park afterwards
+    /// waits for the next adoption.
+    pub(crate) fn adopt_orphans(&self) -> *mut RetiredNode {
+        if self.orphaned.load(Ordering::Relaxed) == 0 {
+            return core::ptr::null_mut();
+        }
+        for tid in 0..self.max_threads() {
+            let word = &self.thread_slots(tid).orphans;
+            if word.load(Ordering::Relaxed).is_null() {
+                continue;
+            }
+            // Acquire: pairs with the release store of `park_orphans`.
+            let chain = word.swap(core::ptr::null_mut(), Ordering::Acquire);
+            if !chain.is_null() {
+                self.orphaned.fetch_sub(1, Ordering::Relaxed);
+                return chain;
+            }
+        }
+        core::ptr::null_mut()
     }
 
     /// HR_NUM getter

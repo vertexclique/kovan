@@ -76,7 +76,7 @@ impl Drop for Counted {
 
 fn check(label: &str) {
     // Reclamation is eventually-consistent (deferred, slot-based; flush()
-    // adopts one orphan per call). Drain to a fixed point: flush until the
+    // adopts the orphans parked on one thread ID per call). Drain to a fixed point: flush until the
     // drop count stops moving, then assert. A real leak converges *below*
     // `created` (and fails); merely in-flight nodes converge up to it.
     let mut last = DROPS.load(Ordering::SeqCst);
