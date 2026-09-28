@@ -896,6 +896,104 @@ fn help_ends_when_its_request_changes() {
     );
 }
 
+/// A helper's loop ends with the cycle of the request it helps, even when
+/// its check of that request reads the request's two words across two
+/// cycles. The helper reads a thread's first request, `(INVPTR, 0)`. During
+/// each of its passes the epoch moves, the thread self-completes its current
+/// request and opens its next one, and between the two halves of the
+/// helper's check the thread self-completes that one too: the check reads a
+/// later request's INVPTR and the 0 its self-completion leaves, the pair
+/// the helper started with. The loop still passes at most T + 2 times.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn help_ends_with_its_cycle_across_a_torn_request_read() {
+    let _l = lock();
+    // The pending thread: an ID whose slot never took a slow path, so its
+    // first request has seqno 0. IDs whose slots did are held meanwhile.
+    let mut others = std::vec::Vec::new();
+    let mut pending = loop {
+        let p = FakePending::open(crate::slot::epoch());
+        if p.seqno == 0 {
+            break p;
+        }
+        others.push(p);
+    };
+    let pending_tid = pending.tid;
+    // The era's seqno the pending thread's cycles leave, the helper's passes
+    // and their bound, T + 2 with T the IDs handed out.
+    let era = Arc::new(AtomicUsize::new(0));
+    let passes = Arc::new(AtomicUsize::new(0));
+    let bound = Arc::new(AtomicUsize::new(0));
+    let (e, p) = (Arc::clone(&era), Arc::clone(&passes));
+    let (e2, p2, b) = (Arc::clone(&era), Arc::clone(&passes), Arc::clone(&bound));
+    join_within(
+        thread::spawn(move || {
+            let tid = own_tid();
+            b.store(crate::slot::global().max_threads() + 2, Ordering::SeqCst);
+            // One cycle of the pending thread per pass, for more passes than
+            // the bound allows.
+            let cycles = b.load(Ordering::SeqCst) + 2;
+            let slots = crate::slot::global().thread_slots(pending_tid);
+            let result = &slots.state[0].result;
+            let inv = crate::retired::INVPTR as u64;
+            // The pending thread ends the cycle it is in: a self-completion.
+            let self_complete = move |era: &AtomicUsize| {
+                let seqno = era.load(Ordering::SeqCst) as u64;
+                assert!(result.compare_exchange(inv, seqno, 0, 0).is_ok());
+                slots.epoch[0].store_hi(seqno + 2, Ordering::SeqCst);
+                slots.first[0].store_hi(seqno + 2, Ordering::SeqCst);
+                era.store(seqno as usize + 2, Ordering::SeqCst);
+            };
+            stall::arm(Step::HelpPass, tid, move || {
+                let pass = p.fetch_add(1, Ordering::SeqCst);
+                if pass < cycles {
+                    // The first request ends; after that, none is open.
+                    if pass == 0 {
+                        self_complete(&e);
+                    }
+                    // The pending thread opens its next request, and the
+                    // epoch moves during this pass.
+                    result.store(inv, e.load(Ordering::SeqCst) as u64, Ordering::SeqCst);
+                    crate::slot::advance_epoch();
+                }
+                true
+            });
+            stall::arm(Step::HelpRecheck, tid, move || {
+                // The request just opened ends between the check's two
+                // loads: the low word read was its INVPTR, the high word
+                // read is its self-completion's 0.
+                if p2.load(Ordering::SeqCst) <= cycles {
+                    self_complete(&e2);
+                }
+                true
+            });
+            with_handle(|h| h.help_thread(pending_tid, 0, tid));
+            stall::disarm(Step::HelpPass, tid);
+            stall::disarm(Step::HelpRecheck, tid);
+        }),
+        "the helper",
+    );
+    let (passes, bound) = (passes.load(Ordering::SeqCst), bound.load(Ordering::SeqCst));
+    assert!(
+        passes <= bound,
+        "the helper made {passes} passes, more than T + 2 = {bound}: it followed the pending \
+         thread through later cycles"
+    );
+    let slots = crate::slot::global().thread_slots(pending_tid);
+    assert_eq!(slots.state[0].result.load().0, 0, "a request was left open");
+    pending.seqno = era.load(Ordering::SeqCst) as u64;
+    join_within(
+        thread::spawn(move || {
+            own_tid();
+            pending.finish();
+            for other in others {
+                other.finish();
+            }
+        }),
+        "the pending threads' exits",
+    );
+}
+
 /// An insert that finds its slot deactivated when it exchanges its node in
 /// (the owner exited after the scan found the slot eligible) takes the node
 /// back out with one compare-exchange of the list word, and the slot is

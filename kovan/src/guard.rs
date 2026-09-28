@@ -809,7 +809,8 @@ impl Handle {
     /// The main loop exits when either:
     /// 1. Epoch stabilizes (curr_epoch == prev_epoch) and result CAS succeeds, or
     /// 2. The request it helps changed: another helper set the result, or
-    ///    the pending thread went on to a later request.
+    ///    the pending thread went on to a later request (its era's seqno
+    ///    moved on, which a torn read of the request cannot hide).
     ///
     /// For the epoch to advance during this loop, some thread must call
     /// `advance_epoch()`, which is preceded by `help_read()`. After at most
@@ -906,7 +907,22 @@ impl Handle {
                     break;
                 }
 
-                if helpee.state[index].result.load() != (result_lo, result_hi) {
+                // Another pass only while the request read first is still open:
+                // its two words unchanged, and the era's seqno still the one the
+                // request was made with. The words are read one at a time, the
+                // low one first, as `WordPair::load` reads them, so a read can
+                // pair a later request's INVPTR with a high word equal to
+                // `seqno` again: the 0 a self-completion leaves (a thread's
+                // first request has seqno 0) or the epoch a helper's answer
+                // carries. The era's seqno is one word, and it never returns to
+                // `seqno` once the cycle ends (a cycle ends with it at
+                // seqno + 2), so the loop never follows the pending thread into
+                // a later cycle, whose epoch advances would count anew.
+                let lo = helpee.state[index].result.load_lo();
+                #[cfg(test)]
+                crate::stall::at(crate::stall::Step::HelpRecheck, mytid);
+                let hi = helpee.state[index].result.load_hi();
+                if (lo, hi) != (result_lo, result_hi) || helpee.epoch[index].load_hi() != seqno {
                     break;
                 }
             }

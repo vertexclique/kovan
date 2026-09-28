@@ -36,6 +36,9 @@ pub(crate) enum Step {
     /// A helper has made one pass of its loop (updated its helper slot) and
     /// not yet read the epoch again.
     HelpPass,
+    /// A helper checking that the request it helps is still open has read
+    /// the request's low word and not yet its high word.
+    HelpRecheck,
     /// A protected load's convergence pass has loaded the pointer and not
     /// yet read the epoch again.
     LoadAttempt,
