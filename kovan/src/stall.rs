@@ -44,6 +44,9 @@ pub(crate) enum Step {
     TransitionAttempt,
     /// A pin's slow path is about to make one pass of its loop.
     SlowPass,
+    /// A retire's insert has checked its slot active and eligible and not
+    /// yet exchanged its node in.
+    InsertReady,
     /// A retire's insert has exchanged its node into a slot and not yet
     /// linked the list it displaced behind it.
     InsertExchanged,

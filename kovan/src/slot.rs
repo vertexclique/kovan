@@ -105,6 +105,15 @@ mod native {
                 .is_ok()
         }
 
+        /// Compare-exchange of the `lo` half alone: a change of `hi` never
+        /// fails it. One instruction.
+        #[inline]
+        pub(crate) fn compare_exchange_lo(&self, old_lo: u64, new_lo: u64) -> bool {
+            self.lo
+                .compare_exchange(old_lo, new_lo, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        }
+
         // -----------------------------------------
         // Full DCAS via AtomicU128 reinterpret cast
         // -----------------------------------------
@@ -276,6 +285,25 @@ mod fallback {
                     return false;
                 }
                 let new = (old as u64 as u128) | ((new_hi as u128) << 64);
+                if self
+                    .data
+                    .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+        }
+
+        /// Compare-exchange of the `lo` half, keeping whatever `hi` holds.
+        #[inline]
+        pub(crate) fn compare_exchange_lo(&self, old_lo: u64, new_lo: u64) -> bool {
+            loop {
+                let old = self.data.load(Ordering::Acquire);
+                if old as u64 != old_lo {
+                    return false;
+                }
+                let new = (old >> 64 << 64) | new_lo as u128;
                 if self
                     .data
                     .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)

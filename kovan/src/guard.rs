@@ -1335,6 +1335,8 @@ impl Handle {
             }
 
             // Exchange our node in as the new list head
+            #[cfg(test)]
+            crate::stall::at(crate::stall::Step::InsertReady, self.tid());
             let prev = slot_first_ref.exchange_lo(curr as u64, Ordering::AcqRel);
             #[cfg(test)]
             crate::stall::at(crate::stall::Step::InsertExchanged, self.tid());
@@ -1346,13 +1348,9 @@ impl Handle {
                     // the reference try_retire rollback. Restoring 0 here
                     // would resurrect a dead slot as active-empty and break
                     // the `INVPTR == inactive` invariant.
-                    let exp = curr as u64;
-                    let (lo, hi) = slot_first_ref.load();
-                    if lo == exp
-                        && slot_first_ref
-                            .compare_exchange(exp, hi, INVPTR as u64, hi)
-                            .is_ok()
-                    {
+                    // [InsertRollback] A compare-exchange of the list word
+                    // alone: the node still heads the list or it does not.
+                    if slot_first_ref.compare_exchange_lo(curr as u64, INVPTR as u64) {
                         // Undo succeeded — node removed from slot.
                         curr = unsafe { (*curr).batch_next() };
                         continue;

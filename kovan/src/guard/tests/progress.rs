@@ -893,3 +893,56 @@ fn help_ends_when_its_request_changes() {
         "the pending thread's exit",
     );
 }
+
+/// An insert that finds its slot deactivated when it exchanges its node in
+/// (the owner exited after the scan found the slot eligible) takes the node
+/// back out with one compare-exchange of the list word, and the slot is
+/// inactive again: it holds no node of the batch, which is freed.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn insert_into_an_exited_slot_rolls_back() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+
+    // The slot owner, with the lower ID: the insert targets its slot first.
+    let (owner_up, owner_exit) = (Hold::new(), Hold::new());
+    let owner_tid = Arc::new(AtomicUsize::new(0));
+    let owner = {
+        let (up, exit, owner_tid) = (owner_up.clone(), owner_exit.clone(), Arc::clone(&owner_tid));
+        thread::spawn(move || {
+            owner_tid.store(own_tid(), Ordering::SeqCst);
+            up.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| exit.go.load(Ordering::SeqCst)));
+        })
+    };
+    owner_up.reached("the slot owner");
+    let owner_tid = owner_tid.load(Ordering::SeqCst);
+
+    let ready = Hold::new();
+    let inserter = {
+        let (ready, live) = (ready.clone(), Arc::clone(&live));
+        thread::spawn(move || {
+            let tid = own_tid();
+            ready.arm(Step::InsertReady, tid);
+            for _ in 0..RETIRE_FREQ {
+                Counted::retire_oldest(&live);
+            }
+        })
+    };
+    ready.reached("the inserting thread");
+
+    // The owner exits while the insert is held after its checks.
+    owner_exit.release();
+    join_within(owner, "the slot owner's exit");
+    let slot = &crate::slot::global().thread_slots(owner_tid).first[0];
+    assert_eq!(slot.load_lo(), crate::retired::INVPTR as u64);
+
+    ready.release();
+    join_within(inserter, "the insert");
+    assert_eq!(
+        slot.load_lo(),
+        crate::retired::INVPTR as u64,
+        "the exited slot kept the node an insert put into it"
+    );
+    drain(&live);
+}
