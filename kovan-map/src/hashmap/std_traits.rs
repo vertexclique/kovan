@@ -80,8 +80,8 @@ where
 /// pairs, then inserted the same way as the owned-pair impl above.
 impl<'a, K, V, S> Extend<(&'a K, &'a V)> for HashMap<K, V, S>
 where
-    K: Hash + Eq + Copy + 'static,
-    V: Copy + 'static,
+    K: Hash + Eq + Copy + Send + 'static,
+    V: Copy + Send + 'static,
     S: BuildHasher,
 {
     fn extend<I: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: I) {
@@ -96,8 +96,8 @@ where
 /// exclusively-borrowed `std::collections::HashMap` can.
 impl<K, V, S> PartialEq for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + PartialEq + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + PartialEq + Send + 'static,
     S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -112,8 +112,8 @@ where
 /// quiescence, as `std::collections::HashMap`'s `Eq` is.
 impl<K, V, S> Eq for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + Eq + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Eq + Send + 'static,
     S: BuildHasher,
 {
 }

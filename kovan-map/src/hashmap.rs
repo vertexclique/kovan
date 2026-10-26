@@ -238,8 +238,8 @@ impl<K: 'static, V: 'static> HashMap<K, V, FixedState> {
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     /// Returns the value of `key`. Never blocks: reads the current table
@@ -528,8 +528,8 @@ impl<K: 'static, V: 'static, S> Drop for HashMap<K, V, S> {
         // SAFETY: exclusive access; frees remaining chains + the allocation.
         unsafe { table.free() };
 
-        // Flush nodes/tables previously retired by concurrent operations
-        kovan::flush();
+        // Submit what this thread retired (its batch), if anything.
+        kovan::flush_pending();
     }
 }
 

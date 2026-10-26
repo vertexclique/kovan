@@ -1,43 +1,32 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/kovan/master/art/kovan-square.svg"
 )]
-//! A high-performance lock-free concurrent hash map built on top of the Kovan memory reclamation system.
+//! Two concurrent hash maps built on kovan's memory reclamation.
 //!
-//! This crate provides two lock-free hash map implementations:
+//! - [`HashMap`]: separate chaining. [`HashMap::new`] starts with 524,288 buckets (about 4 MiB,
+//!   so a large map rarely resizes and a lookup is often one pointer); [`HashMap::with_capacity`]
+//!   starts with as many as asked. It grows when its load passes 3/4 and shrinks below 1/4, never
+//!   under its initial capacity.
+//! - [`HopscotchMap`]: open addressing in hopscotch neighborhoods. It starts at 64 slots and
+//!   grows and shrinks with its contents.
 //!
-//! - [`HashMap`]: A chaining-based hash map with fixed capacity and minimal collisions
-//! - [`HopscotchMap`]: A growing/shrinking hopscotch hash map with dynamic resizing
+//! Reads never wait: a lookup reads the current table under a kovan guard while writers and a
+//! resize run. Writers (inserts, removals, the conditional writes, `clear`) take no lock and race
+//! each other by compare-and-swap; a writer that meets a resize in flight waits for it to finish,
+//! and a hopscotch writer waits for the thread that holds its key's neighborhood. Hashing is
+//! FoldHash (`foldhash::fast::FixedState`) unless a hasher is given.
 //!
-//! Both implementations are thread-safe and allow concurrent reads, writes,
-//! and deletions without any locks or blocking. They achieve this through:
+//! # Keys and values
 //!
-//! - **Lock-free algorithms**: All operations use compare-and-swap (CAS) based techniques
-//! - **Kovan memory reclamation**: Safe memory management in concurrent environments without garbage collection
-//! - **FoldHash**: Fast, high-quality hashing for minimal collision rates
-//! - **Large bucket arrays**: Pre-allocated oversized tables (524,288 buckets) that fit in L3 cache
+//! Keys are `Hash + Eq + Clone` and values `Clone` (a read hands out a clone), both `Send +
+//! 'static`: a replaced or removed entry is freed by kovan once no reader can reach it, on
+//! whichever thread frees it, so its destructor may run on another thread.
 //!
-//! # Features
-//!
-//! - `std` (default): Enables standard library support for additional functionality
-//! - `no_std` compatible when the `std` feature is disabled
-//!
-//! # Performance Characteristics
-//!
-//! The hash map is optimized for high-throughput concurrent workloads:
-//!
-//! - **Memory footprint**: ~4MB for the bucket array (fits in modern L3 caches)
-//! - **Load factor**: ~0.19 at 100k items with 524k buckets
-//! - **Collision rate**: Near-zero collisions in typical workloads
-//! - **Lookup performance**: Often a single pointer dereference due to minimal collisions
-//! - **Cache-optimized**: Node layout ordered for efficient CPU cache line usage
-//!
-//! # Architecture
-//!
-//! The implementation uses:
-//! - **Bucket array**: Fixed-size array of atomic pointers (null-initialized)
-//! - **Collision resolution**: Singly-linked lists for hash collisions
-//! - **Node layout**: `hash -> key -> value -> next` for optimal cache performance
-//! - **Updates**: Copy-on-write style replacements for existing keys
+//! ```compile_fail
+//! // `Rc` is not `Send`: a map of them does not compile.
+//! let map = kovan_map::HashMap::with_capacity(8);
+//! map.insert(1, std::rc::Rc::new(1));
+//! ```
 //!
 //! # Example
 //!
@@ -76,21 +65,6 @@
 //! assert_eq!(map.remove(&0), None);
 //! ```
 //!
-//! # Limitations
-//!
-//! - **Copy values**: Currently requires `V: Copy` for simplicity and performance
-//! - **Clone keys**: Keys must implement `Clone` for update operations
-//! - **Static lifetimes**: Both `K` and `V` must be `'static` for safe memory reclamation
-//! - **Fixed capacity**: Uses a pre-allocated bucket array (cannot grow dynamically)
-//!
-//! # Use Cases
-//!
-//! This hash map is ideal for:
-//! - High-throughput concurrent caching
-//! - Lock-free data structures in systems programming
-//! - Real-time applications where blocking is unacceptable
-//! - Scenarios with many readers and occasional writers
-//!
 //! # Safety
 //!
 //! The implementation uses `unsafe` code internally for performance but provides a safe API.
@@ -99,6 +73,9 @@
 
 #![warn(missing_docs)]
 #![no_std]
+
+#[cfg(feature = "std")]
+extern crate std;
 
 mod hashmap;
 mod hopscotch;

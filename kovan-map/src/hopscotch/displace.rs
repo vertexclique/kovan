@@ -17,8 +17,8 @@ use super::pause;
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     /// One insert attempt under the home guard `home`: update the key's entry, or link a new one

@@ -16,8 +16,8 @@ use super::pause;
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     /// Take every home bucket's writer guard of `table`, waiting out each
@@ -128,12 +128,22 @@ where
         // once the hashes that crowd it differ). Before, the table stayed as it
         // was and the insert that needed the room asked for the same resize
         // again, forever. A shrink that does not fit is given up.
+        // A `K::clone` or `V::clone` that panics in a copy unwinds through this, which undoes
+        // the resize (see `Undo`): the old table stays current and its writers get their guards
+        // back, where the guards and the latch held for good would have stopped every writer.
+        let mut undo = Undo {
+            old: old_table,
+            new: core::ptr::null_mut(),
+            latch: &self.resizing,
+        };
         let published = loop {
             let new_table = alloc_node(Table::new(new_capacity));
+            undo.new = new_table;
             let new_table_ref = unsafe { &*new_table };
             if self.copy_into(old_table, new_table_ref, &guard) {
                 break Some(new_table);
             }
+            undo.new = core::ptr::null_mut();
             // The unpublished new table's destructor frees its cloned entries.
             unsafe { drop_node(new_table) };
             if new_capacity < old_table.capacity {
@@ -141,6 +151,7 @@ where
             }
             new_capacity *= 2;
         };
+        core::mem::forget(undo);
 
         match published {
             // The new table starts with no failed shrink (`Table::new` sets its `shrink_at`).
@@ -188,5 +199,31 @@ where
             }
         }
         true
+    }
+}
+
+/// Undoes a resize whose copy unwinds (a clone of a key or value panicked in it): the new table
+/// (no other thread ever saw it) dropped with the copies made so far, the old table's writer
+/// guards given back, and the latch let go, so the map goes on with its old table.
+struct Undo<'a, K: 'static, V: 'static> {
+    old: &'a Table<K, V>,
+    new: *mut Table<K, V>,
+    latch: &'a crate::sync::AtomicBool,
+}
+
+impl<K: 'static, V: 'static> Drop for Undo<'_, K, V> {
+    fn drop(&mut self) {
+        if !self.new.is_null() {
+            // SAFETY: never published, so this thread alone reaches it and its copies.
+            unsafe { drop_node(self.new) };
+        }
+        for idx in 0..self.old.capacity {
+            // Release: pairs with the next holder's acquire, as `release_writers` does.
+            self.old
+                .get_bucket(idx)
+                .control
+                .fetch_and(!GUARD, Ordering::Release);
+        }
+        self.latch.store(false, Ordering::Release);
     }
 }

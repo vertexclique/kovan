@@ -26,8 +26,8 @@ use kovan::{Atomic, Guard, pin};
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     /// Removes the key's entry if `pred` holds for its value, returning the value removed.

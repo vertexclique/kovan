@@ -18,6 +18,10 @@ pub(crate) use shuttle::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Atomi
 /// which PCT treats as a change point: without it a spinning thread can keep the higher priority
 /// forever and starve the thread it waits for, running out shuttle's step budget on a schedule
 /// that is unfair, not wrong.
+///
+/// Every 64th pause of a thread yields it (with `std`): a waiter whose writer or resizer was
+/// preempted gives its core back instead of spinning out its time slice, while a short wait
+/// rarely reaches a yield.
 #[inline(always)]
 pub(crate) fn spin_hint() {
     #[cfg(feature = "shuttle")]
@@ -27,5 +31,22 @@ pub(crate) fn spin_hint() {
     #[cfg(not(feature = "shuttle"))]
     {
         core::hint::spin_loop();
+        #[cfg(feature = "std")]
+        if PAUSES
+            .try_with(|pauses| {
+                let n = pauses.get().wrapping_add(1);
+                pauses.set(n);
+                n % 64 == 0
+            })
+            .unwrap_or(false)
+        {
+            std::thread::yield_now();
+        }
     }
+}
+
+#[cfg(all(feature = "std", not(feature = "shuttle")))]
+std::thread_local! {
+    /// This thread's pauses, for `spin_hint`'s yield.
+    static PAUSES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
 }

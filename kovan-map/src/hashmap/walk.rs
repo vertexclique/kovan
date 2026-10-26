@@ -49,8 +49,8 @@ impl<K: 'static, V: 'static, S> HashMap<K, V, S> {
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     /// The writers' walk of the chain of `hash` in the current table: snips every deleted node

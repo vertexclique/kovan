@@ -25,8 +25,8 @@ extern crate alloc;
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + 'static,
-    V: Clone + 'static,
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + 'static,
     S: BuildHasher,
 {
     /// Spin until the resize or clear in flight has published its table (a writer that met a
@@ -56,7 +56,17 @@ where
         let old = self.table_ref(&guard);
         if old.capacity() != new_capacity {
             let new = TableRef::alloc(new_capacity);
+            // A `K::clone` or `V::clone` that panics in the migration unwinds through this,
+            // which undoes it (see `Undo`): the old table stays current and every writer goes
+            // on, where the latch held for good would have stopped them all.
+            let undo = Undo {
+                old,
+                new,
+                guard: &guard,
+                latch: &self.resizing,
+            };
             let copied = Self::migrate(old, Some(new), &guard);
+            core::mem::forget(undo);
             // Relaxed: the table's publication below releases it.
             new.count().store(copied as isize, Ordering::Relaxed);
             self.publish(old, new);
@@ -159,5 +169,56 @@ where
         // its frozen chains hold) once no guard that loaded it remains. TableProxy is
         // #[repr(C)] with its RetiredNode at offset 0.
         unsafe { retire_node(old.take_proxy()) };
+    }
+}
+
+/// Undoes a migration that unwinds (a clone of a key or value panicked in it): the links it
+/// froze in the old table thawed, the new table (no other thread ever saw it) freed with the
+/// copies made so far, and the latch let go, so the map goes on with its old table.
+struct Undo<'a, K: 'static, V: 'static> {
+    old: TableRef<K, V>,
+    new: TableRef<K, V>,
+    guard: &'a Guard,
+    latch: &'a crate::sync::AtomicBool,
+}
+
+impl<K: 'static, V: 'static> Drop for Undo<'_, K, V> {
+    fn drop(&mut self) {
+        thaw_links(self.old, self.guard);
+        // SAFETY: never published, so this thread alone reaches it and its copies.
+        unsafe { self.new.free() };
+        self.latch.store(false, Ordering::Release);
+    }
+}
+
+/// Clears the frozen flag of every link a migration froze in `table`: what a migration that
+/// cannot finish leaves behind. A migration freezes each chain from its head in order, so
+/// the frozen links of a chain are a prefix of it; while the latch is held no other thread
+/// changes a frozen link (a writer that meets one waits for the latch).
+fn thaw_links<K: 'static, V: 'static>(table: TableRef<K, V>, guard: &Guard) {
+    for b in 0..table.capacity() {
+        let mut link = table.bucket(b);
+        loop {
+            let w = link.load(Ordering::Acquire, guard).as_raw();
+            if !is_frozen(w) {
+                break;
+            }
+            let thawed = w.map_addr(|a| a & !FROZEN);
+            // AcqRel: a writer that loads the thawed word sees the chain as it was.
+            let _ = link.compare_exchange(
+                word(w),
+                word(thawed),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+                guard,
+            );
+            let cur = ptr(w);
+            if cur.is_null() {
+                break;
+            }
+            // SAFETY: a frozen link that names it named it while this thread froze it, so it
+            // is reachable and never retired while the guard is held.
+            link = unsafe { &(*cur).next };
+        }
     }
 }
