@@ -83,6 +83,7 @@ if [ "$family" = shard ]; then
   bad=0
   for fam in $(printf '%s\n' "$mine" | awk 'NF {print $2}' | sort -u); do
     mapfile -t names < <(printf '%s\n' "$mine" | awk -v f="$fam" '$2 == f {print $3}')
+    echo "=== family $fam"
     bash "$0" "$fam" "${names[@]}" || bad=1
   done
   exit $bad
@@ -116,7 +117,8 @@ if [ "$family" = local ]; then
       m=0; total=0
       while read -r name; do
         total=$((total + 1))
-        row=$(grep -h "^$name " "$out"/*.log | head -1)
+        # A name can recur in another family: take the row printed under this family's marker.
+        row=$(awk -v fam="$fam" -v n="$name" '/^=== family /{cur=$3; next} cur == fam && $1 == n {print; exit}' "$out"/*.log)
         if [ -n "$row" ]; then echo "$row"; case "$row" in *" yes") m=$((m + 1));; esac
         else printf "%-34s %12s %10s %6s  %-26s %-26s %s\n" "$name" 0 0 - "not-run" "$(awk -v n="$name" '$1==n{print $3}' "$f")" NO; fi
       done < <(awk '!/^#/ && NF {print $1}' "$f")
