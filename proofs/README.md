@@ -76,8 +76,8 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 
 - `tla/reclaim/`: kovan's memory reclamation (pin, the protected load, retire, the traversal,
   flush, a thread's exit and the hand-over of its id, the flush and the exit of a thread that
-  never pinned, the recycling of retired nodes), 103 configurations: 44 that must pass and 59
-  mutations and witnesses that must fail.
+  never pinned, a value retired after a thread's exit, the recycling of retired nodes), 106
+  configurations: 46 that must pass and 60 mutations and witnesses that must fail.
 - `tla/chained/`: `kovan_map::HashMap`, the chained map (the link words, the writes, the walks,
   the conditional writes, the freezing migration and clear), 47 configurations: 26 that must
   pass and 21 that must fail.

@@ -2090,22 +2090,49 @@ unsafe fn dealloc_reclaimable<T: Reclaimable>(ptr: *mut RetiredNode) {
 pub(crate) unsafe fn retire_with(node_ptr: *mut RetiredNode, destructor: DestructorFn) {
     #[cfg(feature = "nightly")]
     {
-        // SAFETY: Caller upholds the safety contract.
-        unsafe { HANDLE.retire_with(node_ptr, destructor) }
+        // The handle outlives the sentinel whose destructor runs the exit,
+        // and takes the retires of the destructors that exit runs. Once the
+        // exit is over, a retire (from a thread-local destructor that runs
+        // after it) would fill a batch no exit submits any more.
+        if exit_pending() || HANDLE.in_reclaim.get() {
+            // SAFETY: Caller upholds the safety contract.
+            unsafe { HANDLE.retire_with(node_ptr, destructor) }
+        } else {
+            // SAFETY: Caller upholds the safety contract.
+            unsafe { retire_after_exit(node_ptr, destructor) }
+        }
     }
     #[cfg(not(feature = "nightly"))]
     {
         // SAFETY: Caller upholds the safety contract.
-        // During process teardown TLS may be destroyed. Retire through the
-        // exiting handle (a destructor the exit runs), else leak the pointer:
-        // process memory is reclaimed by the OS on exit.
+        // Through the handle; through the exiting handle while the exit runs
+        // (a destructor it runs); after the exit (a thread-local destructor
+        // that runs after the handle's), through a handle of its own.
         if HANDLE
             .try_with(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
             .is_err()
+            && on_exiting_handle(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
+                .is_none()
         {
-            on_exiting_handle(|handle| unsafe { handle.retire_with(node_ptr, destructor) });
+            unsafe { retire_after_exit(node_ptr, destructor) };
         }
     }
+}
+
+/// A retire after this thread's exit ran: a handle of its own takes the
+/// node, and its exit, as it is dropped, submits it or parks it for a live
+/// thread to adopt, as any thread's exit does with the batch it leaves. The
+/// handle claims a thread ID for that exit and releases it, so nothing of
+/// the thread is held afterwards.
+///
+/// # Safety
+///
+/// As [`retire_with`].
+#[cold]
+unsafe fn retire_after_exit(node_ptr: *mut RetiredNode, destructor: DestructorFn) {
+    let late = Handle::new();
+    // SAFETY: forwarded from the caller.
+    unsafe { late.retire_with(node_ptr, destructor) };
 }
 
 /// Flush all retired nodes on the calling thread.

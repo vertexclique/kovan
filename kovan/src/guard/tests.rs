@@ -52,6 +52,19 @@ fn with_current_handle<R>(f: impl FnOnce(&Handle) -> R) -> R {
     }
 }
 
+/// Whether this thread's exit has run and is over: neither the handle nor
+/// the exiting handle takes a retire, which goes through a handle of its own.
+fn exit_over() -> bool {
+    #[cfg(feature = "nightly")]
+    {
+        !super::exit_pending() && !HANDLE.in_reclaim.get()
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.try_with(|_| ()).is_err() && super::on_exiting_handle(|_| ()).is_none()
+    }
+}
+
 /// The epoch this thread's reservation slot publishes.
 fn published_epoch() -> u64 {
     with_handle(|h| h.global().thread_slots(h.tid()).epoch[0].load_lo())
@@ -901,3 +914,58 @@ fn flush_without_a_tid_or_orphans_claims_none() {
 }
 
 mod progress;
+
+/// A thread-local destructor that runs after the thread's exit retires a
+/// value: one whose value the thread set before its first pin, so that its
+/// destructor runs after the handle's, when neither the handle nor the
+/// exiting handle takes a retire. The value goes through a handle of its
+/// own, whose exit submits it or parks it, and flushes here free it.
+///
+/// Before the fix the value was dropped unfreed, and this test failed.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn a_retire_after_the_exit_is_freed() {
+    struct Late {
+        live: Arc<AtomicUsize>,
+        after_exit: Arc<AtomicBool>,
+    }
+    impl Drop for Late {
+        fn drop(&mut self) {
+            self.after_exit.store(exit_over(), Ordering::SeqCst);
+            Counted::retire_one(&self.live);
+        }
+    }
+    std::thread_local! {
+        static LATE: core::cell::RefCell<Option<Late>> = const { core::cell::RefCell::new(None) };
+    }
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let after_exit = Arc::new(AtomicBool::new(false));
+    let (l, a) = (Arc::clone(&live), Arc::clone(&after_exit));
+    thread::spawn(move || {
+        LATE.with(|late| {
+            *late.borrow_mut() = Some(Late {
+                live: l,
+                after_exit: a,
+            })
+        });
+        drop(pin());
+    })
+    .join()
+    .unwrap();
+    assert!(
+        after_exit.load(Ordering::SeqCst),
+        "the destructor ran before the thread's exit was over: the case is not reached"
+    );
+    for _ in 0..=crate::slot::global().max_threads() {
+        if live.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        flush();
+    }
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "a value retired after its thread's exit was never freed"
+    );
+}

@@ -119,6 +119,19 @@ P_flush_orphan == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
 P_flush_orphan_live == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
                                              [] t = 2 -> <<P, Ld(1), U, Ex>>
                                              [] t = 3 -> <<Join(1), Fl>>]
+\* A retire after a thread's exit (a thread-local destructor that runs after the handle's), as the
+\* code makes it: through a handle of its own, whose drop runs the exit any thread runs (the
+\* thread's ops after its first exit are that handle's: no tid, an empty batch). Thread 1 pins,
+\* replaces cell 1's value, unpins and exits, then retires one value and exits again. Thread 2
+\* pins, loads cell 1, unpins and exits.
+P_late_retire == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, Rt, Ex>>
+                                          ELSE <<P, Ld(1), U, Ex>>]
+\* The same retire as the code made it before: into a handle no exit runs any more.
+P_late_retire_dropped == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, Rt>>
+                                                  ELSE <<P, Ld(1), U, Ex>>]
+\* Thread 1 as in P_late_retire; thread 2 waits until thread 1 has ended, then flushes and lives on.
+P_late_retire_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, Rt, Ex>>
+                                               ELSE <<Join(1), Fl>>]
 \* Values retired by threads that never pin (README.md tells the story). With a batch of two
 \* (RetireFreq 2), one retire does not submit: the value waits in the thread's own batch, and the
 \* thread has no tid (a pin claims one, as do a flush or an exit that needs one and the epoch
