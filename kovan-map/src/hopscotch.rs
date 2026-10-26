@@ -85,6 +85,25 @@ pub struct HopscotchMap<K: 'static, V: 'static, S = FixedState> {
     hasher: S,
 }
 
+// Unwind safety as the chained map has it, by its keys, values and hasher: a panic in a closure
+// or a `Clone` leaves the map's words consistent (the resize undoes itself, every guard is
+// released on unwind), so a map seen after one is a working map.
+impl<K, V, S> core::panic::UnwindSafe for HopscotchMap<K, V, S>
+where
+    K: core::panic::UnwindSafe,
+    V: core::panic::UnwindSafe,
+    S: core::panic::UnwindSafe,
+{
+}
+
+impl<K, V, S> core::panic::RefUnwindSafe for HopscotchMap<K, V, S>
+where
+    K: core::panic::RefUnwindSafe,
+    V: core::panic::RefUnwindSafe,
+    S: core::panic::RefUnwindSafe,
+{
+}
+
 /// How a write of `insert_impl` ended.
 enum Outcome<R, V> {
     /// The key was absent: this call linked its entry; what the caller asked of its value.
