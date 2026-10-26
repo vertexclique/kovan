@@ -58,7 +58,6 @@ RC_mut_help_no_seqno_check         MC_Reclaim         violated:LoopBounds
 RC_mut_stale_birth                 MC_Reclaim         violated:BirthFresh
 RC_mut_flush_keeps_reservation     MC_Reclaim         violated:FlushReleases
 RC_mut_flush_needs_tid             MC_Reclaim         violated:OrphansAdopted
-RC_mut_flush_skips_batch           MC_Reclaim         violated:RetiredFreed
 RC_mut_exit_skips_batch            MC_Reclaim         violated:NoLoss
 RC_mut_load_traverses              MC_Reclaim         violated:NoUseAfterFree
 RC_mut_no_era_check                MC_Reclaim         violated:NoUseAfterFree
@@ -73,7 +72,6 @@ RC_wit_merge                       MC_Reclaim         violated:NoMergeW
 RC_wit_park                        MC_Reclaim         violated:NoParkW
 RC_wit_adopt                       MC_Reclaim         violated:NoAdoptW
 RC_wit_flush_claim                 MC_Reclaim         violated:NoFlushClaimW
-RC_wit_flush_batch_claim           MC_Reclaim         violated:NoFlushClaimW
 RC_wit_exit_claim                  MC_Reclaim         violated:NoExitClaimW
 RC_wit_recycle                     MC_Reclaim         violated:NoRecycleW
 RC_wit_dtor_held_retired           MC_Reclaim         violated:NoDtorHeldRetiredW
@@ -109,3 +107,11 @@ RC_mut_drain_published_term        MC_Reclaim         violated:Termination
 RC_mut_late_retire_dropped         MC_Reclaim         violated:NoLoss
 RC_mut_late_pin_unreserved         MC_Reclaim         violated:NoUseAfterFree
 RC_mut_late_pin_kept               MC_Reclaim         violated:RetiredFreed
+RC_exit_adopt                      MC_Reclaim         pass
+RC_mut_exit_no_adopt               MC_Reclaim         violated:OrphansBounded
+RC_first_advance                   MC_Reclaim         pass
+RC_mut_late_first_advance          MC_Reclaim         violated:LastReleased
+RC_exit_advance                    MC_Reclaim         pass
+RC_mut_no_placed_advance_exit      MC_Reclaim         violated:DrainLive
+RC_retire_advance                  MC_Reclaim         pass
+RC_mut_no_placed_advance_retire    MC_Reclaim         violated:DrainLive

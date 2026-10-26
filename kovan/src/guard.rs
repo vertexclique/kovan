@@ -116,7 +116,7 @@ struct Handle {
     batch_first: Cell<*mut RetiredNode>,
     batch_last: Cell<*mut RetiredNode>,
     batch_count: Cell<usize>,
-    /// Alloc counter for epoch advancement
+    /// Retires counted for epoch advancement (see `enqueue_node`)
     alloc_counter: Cell<usize>,
     /// Cached free list and count
     free_list: Cell<*mut RetiredNode>,
@@ -547,6 +547,10 @@ impl Handle {
     /// `drained_epoch`), so the slot is active and publishes
     /// `drained_epoch == cached_epoch`, and that publication was followed by
     /// its `fence(SeqCst)`.
+    ///
+    /// A batch placed in its slot is traversed at the next outermost pin all
+    /// the same: every retire, flush or exit that places a batch advances
+    /// the epoch (see `enqueue_node`), so the skip costs nothing for it.
     ///
     /// # Wait-free bound: O(T) where T = number of active threads
     ///
@@ -1025,8 +1029,9 @@ impl Handle {
     ///
     /// Each call does O(1) work (link node into batch, update counters).
     /// Every RETIRE_FREQ (64) calls: finalize batch + try_retire (O(T)).
-    /// Every EPOCH_FREQ (128) calls: help_read (O(T ^ 2) worst case,
-    /// O(1) when no stalled threads) + advance_epoch (single fetch_add).
+    /// The first call, every EPOCH_FREQ (128)th after, and every call that
+    /// placed a batch: help_read (O(T ^ 2) worst case, O(1) when no stalled
+    /// threads) + advance_epoch (fetch_add).
     ///
     /// # Safety
     ///
@@ -1084,6 +1089,7 @@ impl Handle {
         let count = self.batch_count.get() + 1;
         self.batch_count.set(count);
 
+        let mut placed = false;
         if count.is_multiple_of(RETIRE_FREQ) {
             // Set in_reclaim: try_retire -> free_batch_list can call
             // destructors which drop Atoms triggering flush().
@@ -1096,14 +1102,16 @@ impl Handle {
             // (created only at thread exit) are adopted by flush().
 
             // Detach the batch BEFORE try_retire (see `take_batch`).
-            if let Some((first, last)) = self.take_batch()
-                && !self.try_retire(first, last, None)
-            {
-                // Fewer assignable nodes than eligible slots: nothing was
-                // published, so keep accumulating. The merged batch retries
-                // at the next RETIRE_FREQ multiple with more nodes, and
-                // succeeds once batch_size exceeds the eligible slot count.
-                self.merge_batch(first, last);
+            if let Some((first, last)) = self.take_batch() {
+                placed = self.try_retire(first, last, None);
+                if !placed {
+                    // Fewer assignable nodes than eligible slots: nothing was
+                    // published, so keep accumulating. The merged batch
+                    // retries at the next RETIRE_FREQ multiple with more
+                    // nodes, and succeeds once batch_size exceeds the
+                    // eligible slot count.
+                    self.merge_batch(first, last);
+                }
             }
             self.in_reclaim.set(was_reclaiming);
         }
@@ -1115,9 +1123,19 @@ impl Handle {
         // and the batch cells right before it detaches them; run after the
         // help, it would size the batch from a stale `count` and could
         // finalize an emptied one.
-        let alloc_count = self.alloc_counter.get() + 1;
-        self.alloc_counter.set(alloc_count);
-        if alloc_count.is_multiple_of(EPOCH_FREQ) {
+        //
+        // The count is checked before it is raised, as Crystalline's
+        // `alloc_cnt++ % FREQ == 0`: a thread's first retire advances, then
+        // every `EPOCH_FREQ`th, so threads that each retire fewer than
+        // `EPOCH_FREQ` values and exit still move the epoch. A retire that
+        // placed a batch advances too: the readers whose slots took it see
+        // the epoch move at their next pin and traverse it, though they
+        // never retire or flush (Crystalline's `clear()` traverses at the
+        // end of every operation; here the retire pays one advance per batch
+        // and the pin pays nothing).
+        let alloc_count = self.alloc_counter.get();
+        self.alloc_counter.set(alloc_count + 1);
+        if placed || alloc_count.is_multiple_of(EPOCH_FREQ) {
             self.increment_era(self.tid());
         }
     }
@@ -1550,6 +1568,13 @@ impl Handle {
         self.in_reclaim.set(was_reclaiming);
     }
 
+    /// Runs `flush` when this thread's batch holds a retired node.
+    fn flush_pending(&self) {
+        if self.batch_count.get() > 0 {
+            self.flush();
+        }
+    }
+
     /// Flush: force all retired nodes on this thread to be reclaimed.
     ///
     /// Three phases:
@@ -1568,20 +1593,13 @@ impl Handle {
     /// own batch holds values it retired without pinning.
     fn flush(&self) {
         // A thread that has never claimed an ID has no slot to drain, but it
-    /// Runs `flush` when this thread's batch holds a retired node.
-    fn flush_pending(&self) {
-        if self.batch_count.get() > 0 {
-            self.flush();
-        }
-    }
-
-        // must still submit what it retired (unpinned retires fill its batch
-        // without an ID) and adopt: a thread that only ever flushes would
-        // otherwise leave its batch, and what exited threads parked, for
-        // good. It claims an ID only when its batch holds a value or one load
-        // tells that some ID holds a chain, since the ID stays taken until
-        // the thread exits, and only while that exit is still to run, as the
-        // exit is what releases it.
+        // must still adopt: a thread that only ever flushes would otherwise
+        // leave what exited threads parked for good. It claims an ID only when
+        // one load tells that some ID holds a chain, or when its batch holds a
+        // value (not reached before the exit any more: a thread's first retire
+        // claims an ID for its epoch advance; kept as a guard), since the ID
+        // stays taken until the thread exits, and only while that exit is
+        // still to run, as the exit is what releases it.
         if self.tid.get().is_none()
             && ((self.batch_first.get().is_null() && !crate::slot::orphans_parked())
                 || !exit_pending())
@@ -1686,9 +1704,9 @@ impl Handle {
     /// Cleanup thread-local state. Called on thread exit.
     /// Extracted from Drop so it can also be called by the nightly sentinel.
     fn cleanup(&self) {
-        // A thread that retired without ever pinning holds a batch and no
-        // ID: it claims one, as a first pin would, and exits as any thread
-        // does (submits, parks what cannot be placed, releases the ID last).
+        // A thread with a batch and no ID (a retire after its exit, where the
+        // handle outlives the exit and its retire count is not at an advance)
+        // claims one, as a first pin would, and exits as any thread does.
         // Without an ID its batch would be dropped with the handle, unfreed.
         if self.tid.get().is_none() && !self.batch_first.get().is_null() {
             self.claim_tid();
@@ -1722,17 +1740,32 @@ impl Handle {
             // frees what the thread holds, the second what the destructors
             // of the first retired (a batch they fill is submitted by their
             // own retire, into this slot among others).
-            for _ in 0..EXIT_ROUNDS {
+            for round in 0..EXIT_ROUNDS {
+                // [ExitAdopt] The first round takes one chain of batches
+                // other exits parked into this thread's batch, as `flush`
+                // does: a program whose threads come and go and that never
+                // calls `flush` would otherwise keep a parked batch per exit
+                // for good. Merged, a chain grows until try_retire can place
+                // it, so at most one stays parked.
+                if round == 0 {
+                    self.adopt_orphans();
+                }
                 // [ExitSubmit] The partial batch (fewer than RETIRE_FREQ
                 // nodes, never published) goes out through try_retire so the
                 // normal epoch-based safety checks apply: other threads may
                 // still hold guard-protected references to its values (a
                 // resized table that readers loaded before the CAS, say), so
                 // they cannot just be dropped. A batch try_retire cannot
-                // place (fewer nodes than eligible slots) is parked: a live
-                // thread adopts it and retires it through its own batch.
-                // Nothing leaks.
-                self.submit_at_exit(own, &mut parked);
+                // place (fewer nodes than eligible slots) is parked: the next
+                // exit, or a live thread's flush, adopts it and retires it
+                // through its own batch. Nothing leaks.
+                if self.submit_at_exit(own, &mut parked) {
+                    // [ExitAdvance] A batch this exit placed advances the
+                    // epoch, as a retire's does: the readers whose slots
+                    // took it traverse it at their next pin. At most one
+                    // advance per round.
+                    self.increment_era(tid);
+                }
                 // [ExitTake] With no guard of this thread live, its slot
                 // list is taken with one exchange per reservation: what
                 // other threads insert afterwards, however much they retire,
@@ -1822,12 +1855,15 @@ impl Handle {
 
     /// Submit the accumulating batch through try_retire at exit, leaving
     /// `own`'s slots out; park it when it cannot be placed.
-    fn submit_at_exit(&self, own: Option<usize>, parked: &mut Parked) {
-        if let Some((first, last)) = self.take_batch()
-            && !self.try_retire(first, last, own)
-        {
-            parked.push(last);
+    fn submit_at_exit(&self, own: Option<usize>, parked: &mut Parked) -> bool {
+        let Some((first, last)) = self.take_batch() else {
+            return false;
+        };
+        if self.try_retire(first, last, own) {
+            return true;
         }
+        parked.push(last);
+        false
     }
 }
 

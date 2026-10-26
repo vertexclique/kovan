@@ -4,7 +4,10 @@
 //! hand-over, mid exit, mid flush. Where a loop's pass count is the bound,
 //! a hook at that loop's step counts it.
 
-use super::{Counted, Hold, eventually, join_within, lock, own_tid, published_epoch, with_handle};
+use super::{
+    Counted, Hold, eventually, join_within, lock, own_tid, published_epoch, spend_first_retire,
+    with_handle,
+};
 use crate::guard::{flush, pin, retire};
 use crate::reclaim::MAX_CACHE;
 use crate::retired::RetiredNode;
@@ -70,7 +73,7 @@ fn head_is_unlinked(tid: usize) -> bool {
 
 /// On a fresh thread with an ID: flush until every counted value is
 /// freed, failing the test if they are not by `DEADLINE`.
-fn drain(live: &Arc<AtomicUsize>) {
+pub(super) fn drain(live: &Arc<AtomicUsize>) {
     let l = Arc::clone(live);
     join_within(
         thread::spawn(move || {
@@ -90,7 +93,8 @@ fn drain(live: &Arc<AtomicUsize>) {
 /// (its ID's orphan word swapped to null, the joined chain not yet stored)
 /// and another held after adopting a chain and before merging it, threads
 /// keep starting (a first pin claims an ID), retiring, flushing (adopting)
-/// and exiting (parking, releasing their ID). The held thread's ID goes to
+/// and exiting (adopting a chain an earlier exit parked, parking what they
+/// cannot place, releasing their ID). The held thread's ID goes to
 /// no one before it is released, and once both are let go every retired
 /// value is freed exactly once.
 #[test]
@@ -151,6 +155,20 @@ fn orphans_and_ids_change_hands_while_threads_stall() {
         }
     };
     churn(8, false);
+    // An exit adopts the chain the exit before it parked and, with one
+    // eligible slot, places the two batches: whether a chain is parked after
+    // the churn depends on how many exits there were. One more exit parks one
+    // when none is.
+    for _ in 0..2 {
+        if crate::slot::orphans_parked() {
+            break;
+        }
+        churn(1, false);
+    }
+    assert!(
+        crate::slot::orphans_parked(),
+        "no exit parked a chain for the adopter"
+    );
 
     // Held after taking a chain the churn parked, before merging it.
     let adopting = Hold::new();
@@ -323,28 +341,37 @@ fn list_hand_over_ends_while_retires_keep_coming() {
     let live = Arc::new(AtomicUsize::new(0));
     let global = crate::slot::global();
 
+    // Places one batch of oldest-born values each time it is asked to, with
+    // no advance after it, once its first retire is spent: an advance helps
+    // the pending thread below, and one before the helper's would hand its
+    // list over first.
+    let (asked, answered) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let started = Hold::new();
+    let retirer = {
+        let (asked, answered, live, started) = (
+            Arc::clone(&asked),
+            Arc::clone(&answered),
+            Arc::clone(&live),
+            started.clone(),
+        );
+        thread::spawn(move || {
+            own_tid();
+            spend_first_retire(&live);
+            started.arrived.store(true, Ordering::SeqCst);
+            for n in 1..=RETIRES {
+                assert!(eventually(|| asked.load(Ordering::SeqCst) >= n));
+                Counted::place_oldest(&live);
+                answered.store(n, Ordering::SeqCst);
+            }
+        })
+    };
+    started.reached("the retiring thread");
+
     // A thread stalled in its slow path, publishing an epoch older than the
     // global one.
     crate::slot::advance_epoch();
     let pending = FakePending::open(crate::slot::epoch() - 1);
     let (pending_tid, slots) = (pending.tid, global.thread_slots(pending.tid));
-
-    // Retires one batch of oldest-born values each time it is asked to.
-    let (asked, answered) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-    let retirer = {
-        let (asked, answered, live) =
-            (Arc::clone(&asked), Arc::clone(&answered), Arc::clone(&live));
-        thread::spawn(move || {
-            own_tid();
-            for n in 1..=RETIRES {
-                assert!(eventually(|| asked.load(Ordering::SeqCst) >= n));
-                for _ in 0..RETIRE_FREQ {
-                    Counted::retire_oldest(&live);
-                }
-                answered.store(n, Ordering::SeqCst);
-            }
-        })
-    };
 
     // A first batch, placed in the pending slot among others: the hand-over
     // has a list to take.

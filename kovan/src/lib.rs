@@ -27,15 +27,16 @@
 //!   the global epoch where its thread's last transition left it, is a
 //!   counter update. Otherwise a transition: at most 16 attempts, each one
 //!   walk of the thread's own slot list (see below) and one publication,
-//!   then a slow path whose loop passes once more only for an epoch advance
-//!   made by a thread that had not yet seen its help request: every advance
-//!   helps the pending requests first, and a helper completes the request.
+//!   then a slow path whose loop passes once more only for an epoch
+//!   advance made by a thread that had not yet seen its help request: every
+//!   advance helps the pending requests first, and a helper completes the
+//!   request.
 //!   A thread's first pin also claims a thread ID: one pass over the
 //!   released IDs, no lock.
 //! - **`retire()`, `retire_reclaimable()`: wait-free.** O(1) per call; every 64th submits the
-//!   batch (one pass over the slots, one insert per eligible slot), every
-//!   128th helps the pending slow-path requests (O(T) each) and advances
-//!   the epoch.
+//!   batch (one pass over the slots, one insert per eligible slot); the
+//!   first, every 128th after and every one that placed a batch help the
+//!   pending slow-path requests (O(T) each) and advance the epoch.
 //! - **`Guard` drop: wait-free** (a counter store; plus one slot
 //!   transition when the section escalated to an unconditional
 //!   reservation).

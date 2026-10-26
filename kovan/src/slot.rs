@@ -366,7 +366,7 @@ struct SlotPage([ThreadSlots; SLOTS_PER_PAGE]);
 /// Batch retirement frequency (try_retire every `freq` retires)
 pub(crate) const RETIRE_FREQ: usize = 64;
 
-/// Epoch advancement frequency (in terms of retire calls per thread)
+/// Epoch advancement frequency: a thread advances at its first retire, then every `EPOCH_FREQ`th
 pub(crate) const EPOCH_FREQ: usize = 128;
 
 /// Unconditional reservation marker for a slot's epoch word.

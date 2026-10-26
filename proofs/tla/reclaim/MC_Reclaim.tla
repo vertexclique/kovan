@@ -119,6 +119,33 @@ P_flush_orphan == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
 P_flush_orphan_live == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
                                              [] t = 2 -> <<P, Ld(1), U, Ex>>
                                              [] t = 3 -> <<Join(1), Fl>>]
+\* Thread 1 exits with a batch it cannot place while thread 2's slot is eligible: parked. Thread 2
+\* never flushes and never exits. Thread 3 runs after thread 1 has ended, replaces the value and
+\* exits: its exit adopts the parked batch, and the two nodes, more than the one eligible slot,
+\* are placed (exit_no_adopt: nothing ever adopts it).
+P_exit_adopt == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
+                                      [] t = 2 -> <<P, Ld(1), U>>
+                                      [] t = 3 -> <<Join(1), P, Wr(1), U, Ex>>]
+\* A reader in one critical section for good (pinned at epoch 1, then nested pins); a thread that
+\* retires one fresh node and lives on without exiting, so it places no batch; then a thread that
+\* retires one more and exits. The second thread's first retire advanced the epoch, so the last
+\* node is born after the reader's reservation, skips its slot and is freed (late_first_advance:
+\* no retire moves the epoch before the last thread's exit places its node in the reader's slot,
+\* and that exit's advance comes too late: the reader holds the node for good).
+P_first_advance == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Idle>>
+                                          [] t = 2 -> <<After(1, 1), P, Rt, U>>
+                                          [] t = 3 -> <<Join(2), P, Rt, U, Ex>>]
+\* A reader that pins and unpins for good, never retiring or flushing, and a thread that retires
+\* two fresh nodes and exits: its exit places the batch in the reader's slot, then advances the
+\* epoch, and the reader's next pin traverses the batch (no_placed_advance: after the first
+\* retire's advance nothing moves the epoch, and the batch waits in the reader's slot for good).
+P_exit_advance == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Idle>>
+                                             ELSE <<After(1, 2), P, Rt, Rt, U, Ex>>]
+\* The same, the batch placed by a retire: with two slots eligible, the third retire's batch of
+\* three is the first that can be placed, and that retire advances the epoch (no_placed_advance:
+\* only the first retire advances, and the batch waits in the reader's slot for good).
+P_retire_advance == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Idle>>
+                                               ELSE <<After(1, 2), P, Rt, Rt, Rt, U, Ex>>]
 \* A retire after a thread's exit (a thread-local destructor that runs after the handle's), as the
 \* code makes it: through a handle of its own, whose drop runs the exit any thread runs (the
 \* thread's ops after its first exit are that handle's: no tid, an empty batch). Thread 1 pins,
@@ -163,12 +190,13 @@ P_late_pin_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, P, Ld(1), 
 P_unpinned == [t \in {1, 2, 3} |-> CASE t = 1 -> <<Rt, Fl, Ex>>
                                     [] t = 2 -> <<Rt, Ex>>
                                     [] t = 3 -> <<P, U, Ex>>]
-\* The same, one claim at a time and small enough to count every step (README.md). With a batch of
-\* two, one retire does not submit, so thread 1 holds one value and no tid; thread 2 pins, unpins
-\* and exits, so from its pin to its exit a one-value batch cannot be placed.
-\* The exit claims: thread 1 retires one value, then exits.
-P_wf_unpinned_exit == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Ex>> ELSE <<P, U, Ex>>]
-\* The flush claims: thread 1 retires one value, flushes, then exits (with the tid its flush took).
+\* The same, small enough to count every step (README.md). A thread's first retire claims a tid
+\* for its epoch advance, so a thread holds a batch and no tid only after its exit: thread 1
+\* retires one value, exits, retires one more after its exit (the handle outlives the exit and
+\* its count is not at an advance: no claim) and exits again, and that exit claims a tid. Thread 2
+\* pins, unpins and exits, so from its pin to its exit a one-value batch cannot be placed.
+P_wf_unpinned_exit == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Ex, Rt, Ex>> ELSE <<P, U, Ex>>]
+\* Thread 1 retires one value without pinning (claiming a tid), flushes, then exits.
 P_wf_unpinned_flush == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<P, U, Ex>>]
 \* One thread that retires one value, flushes, then keeps pinning and unpinning forever without
 \* exiting: only its flush can submit the value while it lives.
@@ -313,6 +341,20 @@ DrainLive == <>[](\A n \in Nodes : nst[n] = "retired" => Released(n))
 \* that flush must take the chain; if it does not, the chain stays parked forever and the
 \* property breaks.
 OrphansAdopted == <>[](\A i \in Tids : orw[i] = NULL)
+\* The node the last thread retires (the highest id) is eventually released, though a reader
+\* stays in one critical section for good: born after the reader's reservation, its batch skips
+\* the reader's slot.
+LastReleased == <>[](nst[MaxNodes] = "retired" => Released(MaxNodes))
+\* The batches parked on tid i's orphan word: its chain, linked through next.
+RECURSIVE ChainLen(_, _)
+ChainLen(x, k) == IF x \notin Nodes \/ k > MaxNodes THEN 0 ELSE 1 + ChainLen(nnx[x], k + 1)
+RECURSIVE ParkedFrom(_)
+ParkedFrom(i) == IF i >= MaxTid THEN 0 ELSE ChainLen(orw[i], 0) + ParkedFrom(i + 1)
+\* Parked batches do not pile up, one per exit, while threads come and go and none flushes: once
+\* the exits are over, at most one batch stays parked (the last exit's, when it could not place
+\* what it adopted and retired), where without adoption every exit that cannot place its batch
+\* leaves one more.
+OrphansBounded == <>[](ParkedFrom(0) <= 1)
 \* Every retired value is eventually freed. In words: from some moment on ("<>[]", eventually and
 \* then for good), no node is in the state "retired" (each one retired has been freed). The
 \* scenario that checks it has one thread retire a value without pinning, flush, and then live on

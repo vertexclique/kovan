@@ -76,6 +76,17 @@ fn own_tid() -> usize {
     with_handle(|h| h.tid())
 }
 
+/// Spend this thread's first retire, which advances the epoch (helping the
+/// pending slow paths first, as every advance does), on a counted value it
+/// submits, then pin once, so its slot publishes the epoch it made: a test
+/// that schedules each epoch move and each help counts the retires after
+/// this one.
+fn spend_first_retire(live: &Arc<AtomicUsize>) {
+    Counted::retire_one(live);
+    flush();
+    drop(pin());
+}
+
 /// How long a test waits for an operation that must complete while another
 /// thread is held, and how long a held thread waits to be let go.
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -153,6 +164,21 @@ impl Counted {
             live: Arc::clone(live),
         }));
         unsafe { retire(node) };
+    }
+
+    /// Retire `RETIRE_FREQ - 1` values stamped with the first epoch into
+    /// this thread's empty batch, then place the batch with `try_retire`
+    /// straight away: another thread's batch in every active slot, with no
+    /// epoch advance after it (a retire that places a batch advances), so
+    /// the advances stay the test's own schedule.
+    fn place_oldest(live: &Arc<AtomicUsize>) {
+        for _ in 0..RETIRE_FREQ - 1 {
+            Counted::retire_oldest(live);
+        }
+        with_handle(|h| {
+            let (first, last) = h.take_batch().expect("the batch just retired");
+            assert!(h.try_retire(first, last, None), "the batch was not placed");
+        });
     }
 
     /// Retire one stamped with the first epoch as its birth: its batch
@@ -630,8 +656,10 @@ fn exit_takes_its_slot_list_a_fixed_number_of_times() {
         live: Arc<AtomicUsize>,
     }
     impl Feeds {
-        /// A batch of a feeder and a counted value, submitted through
-        /// try_retire into this thread's slot (the only active one).
+        /// A batch of a feeder and a counted value, both born at the first
+        /// epoch (values loaded long ago), submitted through try_retire into
+        /// this thread's slot (the only active one), however far the epoch
+        /// moved since the slot's last transition.
         fn place(
             left: usize,
             exiting: &Arc<AtomicBool>,
@@ -640,15 +668,17 @@ fn exit_takes_its_slot_list_a_fixed_number_of_times() {
         ) {
             with_current_handle(|h| {
                 live.fetch_add(1, Ordering::SeqCst);
+                let retired = RetiredNode::new();
+                retired.set_birth_epoch(1);
                 let node = Box::into_raw(Box::new(Feeds {
-                    retired: RetiredNode::new(),
+                    retired,
                     left,
                     exiting: Arc::clone(exiting),
                     fed: Arc::clone(fed),
                     live: Arc::clone(live),
                 }));
                 unsafe { retire(node) };
-                Counted::retire_one(live);
+                Counted::retire_oldest(live);
                 let (first, last) = h.take_batch().expect("the batch just retired");
                 assert!(h.try_retire(first, last, None), "the batch was not placed");
             });
@@ -662,7 +692,7 @@ fn exit_takes_its_slot_list_a_fixed_number_of_times() {
             }
             self.fed.fetch_add(1, Ordering::SeqCst);
             Feeds::place(self.left - 1, &self.exiting, &self.fed, &self.live);
-            Counted::retire_one(&self.live);
+            Counted::retire_oldest(&self.live);
         }
     }
 
@@ -780,22 +810,23 @@ fn flushed_idle_thread_holds_nothing_back() {
 /// and exits. A's batch holds just that value, and C's slot is eligible for
 /// it (the value is born at the first epoch), so the batch cannot be placed
 /// (a batch needs more values than there are eligible slots): A's exit
-/// parks it on A's thread ID, for a later `flush()` to adopt. Four such
-/// threads A exit one after the other, and a hook at the park counts that
-/// each of them parked. Then C exits; an exit adopts nothing. Thread B has
-/// never pinned, so it has no thread ID, and it only calls `flush()`: at
-/// most once per thread ID handed out, a call adopting one ID's chain.
+/// parks it on A's thread ID, and a hook at the park counts that it did.
+/// Thread B has never pinned, so it has no thread ID, and it only calls
+/// `flush()`. (Only one exit parks here: since 0.2.1 an exit adopts what an
+/// earlier exit parked, so a second A would take this one's batch, see
+/// `an_exit_adopts_what_an_earlier_exit_parked`; and B flushes while C is
+/// still pinned, before C's exit could adopt the batch.)
 ///
-/// Before the fix, B's `flush()` returned at once because B had no ID: all
-/// four values stayed parked and this test failed. With the fix, B's first
+/// Before the fix, B's `flush()` returned at once because B had no ID: the
+/// value stayed parked and this test failed. With the fix, B's first
 /// `flush()` sees that some ID holds parked batches, claims an ID the way a
-/// first pin does and adopts; no slot is eligible any more, so the values
-/// are freed. The test checks that every parked value is freed, that B's
-/// flush claimed an ID, and that B's exit released it.
+/// first pin does and adopts the batch, which it keeps while C's slot is
+/// eligible; once C has gone, B's flushes free it. The test checks that
+/// B's flush took the parked batch and claimed an ID, that every parked
+/// value is freed, and that B's exit released the ID.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn flush_without_a_tid_adopts_orphans() {
-    const EXITING: usize = 4;
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
     let parks = Arc::new(AtomicUsize::new(0));
@@ -811,52 +842,133 @@ fn flush_without_a_tid_adopts_orphans() {
         })
     };
     pinned_up.reached("the pinned thread");
+    // Nothing an earlier test left parked: the exit below would adopt it.
+    flush_until_none_parked();
 
-    for _ in 0..EXITING {
-        let (l, p) = (Arc::clone(&live), Arc::clone(&parks));
-        let tid = thread::spawn(move || {
-            let tid = own_tid();
-            stall::arm(Step::OrphanPark, tid, move || {
-                p.fetch_add(1, Ordering::SeqCst);
-                false
-            });
-            Counted::retire_oldest(&l);
-            tid
-        })
-        .join()
-        .unwrap();
-        stall::disarm(Step::OrphanPark, tid);
-    }
-    assert_eq!(
-        parks.load(Ordering::SeqCst),
-        EXITING,
-        "an exiting thread placed or freed its value instead of parking it"
-    );
-    pinned_done.release();
-    pinned.join().unwrap();
-    assert_eq!(live.load(Ordering::SeqCst), EXITING);
-
-    let l = Arc::clone(&live);
-    let claimed = thread::spawn(move || {
-        assert_eq!(with_handle(|h| h.tid.get()), None, "the flusher has a tid");
-        for _ in 0..=crate::slot::global().max_threads() {
-            if l.load(Ordering::SeqCst) == 0 {
-                break;
-            }
-            flush();
-        }
-        let left = l.load(Ordering::SeqCst);
-        assert_eq!(
-            left, 0,
-            "{left} values parked by exited threads outlived the flushes of a thread that never pinned"
-        );
-        with_handle(|h| h.tid.get()).expect("the flusher adopted without a tid")
+    let (l, p) = (Arc::clone(&live), Arc::clone(&parks));
+    let tid = thread::spawn(move || {
+        let tid = own_tid();
+        stall::arm(Step::OrphanPark, tid, move || {
+            p.fetch_add(1, Ordering::SeqCst);
+            false
+        });
+        Counted::retire_oldest(&l);
+        tid
     })
     .join()
     .unwrap();
+    stall::disarm(Step::OrphanPark, tid);
+    assert_eq!(
+        parks.load(Ordering::SeqCst),
+        1,
+        "the exiting thread placed or freed its value instead of parking it"
+    );
+    assert_eq!(live.load(Ordering::SeqCst), 1);
+
+    let (adopted, go) = (Hold::new(), Hold::new());
+    let l = Arc::clone(&live);
+    let flusher = {
+        let (adopted, go) = (adopted.clone(), go.clone());
+        thread::spawn(move || {
+            assert_eq!(with_handle(|h| h.tid.get()), None, "the flusher has a tid");
+            flush();
+            let tid = with_handle(|h| h.tid.get()).expect("the flusher adopted without a tid");
+            adopted.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| go.go.load(Ordering::SeqCst)));
+            for _ in 0..=crate::slot::global().max_threads() {
+                if l.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                flush();
+            }
+            let left = l.load(Ordering::SeqCst);
+            assert_eq!(
+                left, 0,
+                "{left} values parked by an exited thread outlived the flushes of a thread that never pinned"
+            );
+            tid
+        })
+    };
+    adopted.reached("the flusher's first flush");
+    assert!(
+        !crate::slot::orphans_parked(),
+        "the flush of a thread that never pinned left the parked batch parked"
+    );
+    pinned_done.release();
+    pinned.join().unwrap();
+    go.release();
+    let claimed = flusher.join().unwrap();
     assert!(
         crate::slot::global().tid_is_released(claimed),
         "the flusher's exit kept the tid its flush claimed"
+    );
+}
+
+/// Flushes until no batch is parked anywhere (what earlier tests left).
+fn flush_until_none_parked() {
+    for _ in 0..=crate::slot::global().max_threads() {
+        if !crate::slot::orphans_parked() {
+            return;
+        }
+        flush();
+    }
+    assert!(
+        !crate::slot::orphans_parked(),
+        "parked batches outlived every flush"
+    );
+}
+
+/// An exit adopts the batch an earlier exit parked, so with no flush
+/// anywhere parked batches do not pile up: thread C pins and stays pinned,
+/// thread A1 retires one value and exits (its batch of one cannot be placed
+/// while C's slot is eligible: parked), thread A2 retires one value and
+/// exits, adopting A1's batch: the two values, more than the one eligible
+/// slot, are placed, and nothing stays parked. Once C goes, both are freed,
+/// with no flush. Before 0.2.1 an exit never adopted: both batches stayed
+/// parked until some thread flushed.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn an_exit_adopts_what_an_earlier_exit_parked() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let (pinned_up, pinned_done) = (Hold::new(), Hold::new());
+    let pinned = {
+        let (up, done) = (pinned_up.clone(), pinned_done.clone());
+        thread::spawn(move || {
+            let guard = pin();
+            up.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| done.go.load(Ordering::SeqCst)));
+            drop(guard);
+        })
+    };
+    pinned_up.reached("the pinned thread");
+    flush_until_none_parked();
+    let exit = |l: &Arc<AtomicUsize>| {
+        let l = Arc::clone(l);
+        thread::spawn(move || {
+            own_tid();
+            Counted::retire_oldest(&l);
+        })
+        .join()
+        .unwrap();
+    };
+    exit(&live);
+    assert!(
+        crate::slot::orphans_parked(),
+        "the first exit placed its batch of one"
+    );
+    exit(&live);
+    assert!(
+        !crate::slot::orphans_parked(),
+        "the second exit left the first one's batch parked"
+    );
+    assert_eq!(live.load(Ordering::SeqCst), 2);
+    pinned_done.release();
+    pinned.join().unwrap();
+    assert!(
+        eventually(|| live.load(Ordering::SeqCst) == 0),
+        "{} values outlived the exits, with no flush",
+        live.load(Ordering::SeqCst)
     );
 }
 
@@ -913,6 +1025,7 @@ fn flush_without_a_tid_or_orphans_claims_none() {
     );
 }
 
+mod era;
 mod late;
 mod progress;
 
