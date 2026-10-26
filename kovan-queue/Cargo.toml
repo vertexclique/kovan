@@ -10,6 +10,9 @@ description = "High-performance queue primitives and disruptor implementation fo
 keywords = ["concurrency", "queue", "disruptor", "lock-free"]
 categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
+# Shares kovan's thread-exit harness by path (kovan/tests/support), which a
+# published package of this crate does not hold.
+exclude = ["tests/thread_exit.rs"]
 
 [features]
 # Takes the memory of `SegQueue`'s segments from kovan's magazine cache

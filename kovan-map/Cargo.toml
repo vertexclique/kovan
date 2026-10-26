@@ -10,6 +10,9 @@ description = "Lock-free concurrent hash maps using kovan memory reclamation"
 keywords = ["concurrency", "hashmap", "lock-free", "wait-free"]
 categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
+# Shares kovan's thread-exit harness by path (kovan/tests/support), which a
+# published package of this crate does not hold.
+exclude = ["tests/thread_exit.rs"]
 
 [lib]
 name = "kovan_map"

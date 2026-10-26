@@ -10,6 +10,9 @@ description = "Multi-producer multi-consumer channels using Kovan for memory rec
 keywords = ["concurrency", "channel", "mpmc", "lock-free", "atomic"]
 categories = ["concurrency", "data-structures"]
 readme.workspace = true
+# Shares kovan's thread-exit harness by path (kovan/tests/support), which a
+# published package of this crate does not hold.
+exclude = ["tests/thread_exit.rs"]
 
 [lib]
 name = "kovan_channel"
