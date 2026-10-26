@@ -8,6 +8,11 @@ test that pins the new behaviour. "Changed behaviour" names the changes that kee
 
 Every crate goes to 0.2.1.
 
+### Changed
+
+- The minimum supported Rust version is 1.99 (it was 1.90). CI tests it on Linux, macOS and
+  Windows with stable, beta and nightly.
+
 ### Fixed
 
 - kovan: a value retired in a thread-local destructor that runs after the thread's exit is freed;
@@ -18,6 +23,9 @@ Every crate goes to 0.2.1.
   its last guard drops. Tests: `guard::tests::late`, every crate's `tests/thread_exit.rs`.
 - kovan-channel: a channel `never()` makes is freed when its last receiver drops; every call
   leaked one. Test: `flavors::unbounded::never_tests::a_never_channel_is_held_only_by_its_receivers`.
+- kovan-queue: a disruptor consumer hands every event published before its `Producer` drops to
+  its handler before it stops; one that was behind could stop with published events left. Tests:
+  `kovan-queue/tests/disruptor_shutdown.rs`.
 
 ### Tests
 
