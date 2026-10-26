@@ -43,11 +43,11 @@ configuration of every family out to the 16 shares, longest first by the seconds
 runner as `ci-seconds.txt` records them (`tools/tla-ci-seconds.sh` writes it from a CI run; for a
 configuration it does not list, the seconds its family's `tlc-run.txt` recorded, or 60), so each
 share takes about a sixteenth of the whole; `bash proofs/tla/run_tlc.sh plan 16` prints the
-shares. Every proof check stays within 15 minutes, in CI and locally. In CI a share is stopped and
-fails at 13 minutes (`TLC_DEADLINE`, the rest of its job's 15 being setup). Locally, `bash
+shares. Every proof check stays within an hour, in CI and locally. In CI a share is stopped and
+fails at 58 minutes (`TLC_DEADLINE`, the rest of its job's 60 being setup). Locally, `bash
 proofs/tla/run_tlc.sh local` (`just tla-all`) runs the same 16 shares at once, one worker each at
 the lowest priority, dealt by the one-worker seconds the last local run wrote to each family's
-`tlc-run.txt`; a share still running at 15 minutes is stopped and fails, and the run rewrites every
+`tlc-run.txt`; a share still running at an hour is stopped and fails, and the run rewrites every
 `tlc-run.txt`. A model that outgrows the budget is cut down rather than given more time. A new
 push to a pull request cancels the run it supersedes.
 

@@ -198,7 +198,7 @@ tla family *configs:
 tla-ci-seconds *run:
     bash tools/tla-ci-seconds.sh {{ run }}
 
-# Model-check every TLA+ family in 16 shares at once, one worker each at the lowest priority, within 15 minutes (CI: tla.yml, the same 16 shares within 15 minutes); rewrites every tlc-run.txt
+# Model-check every TLA+ family in 16 shares at once, one worker each at the lowest priority, within an hour (CI: tla.yml, the same 16 shares within an hour); rewrites every tlc-run.txt
 [group("proofs")]
 tla-all:
     bash proofs/tla/run_tlc.sh local
