@@ -595,7 +595,7 @@ impl ASMRState {
         for (w, word) in self.released[..handed_out.div_ceil(64)].iter().enumerate() {
             let mut seen = word.load(Ordering::Relaxed);
             while seen != 0 {
-                let bit = seen & seen.wrapping_neg();
+                let bit = seen.isolate_lowest_one();
                 seen ^= bit;
                 // Acquire: pairs with the release in `release_tid`, so the
                 // exited owner's last writes to the ID's slots happen before
