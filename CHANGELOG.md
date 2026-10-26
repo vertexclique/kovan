@@ -16,6 +16,8 @@ Every crate goes to 0.2.1.
   loads; it returned a guard that reserved nothing, and on the nightly build it aborted the
   process. The section claims a thread ID for itself and leaves the protocol as an exit does when
   its last guard drops. Tests: `guard::tests::late`, every crate's `tests/thread_exit.rs`.
+- kovan-channel: a channel `never()` makes is freed when its last receiver drops; every call
+  leaked one. Test: `flavors::unbounded::never_tests::a_never_channel_is_held_only_by_its_receivers`.
 
 ### Tests
 
@@ -24,6 +26,8 @@ Every crate goes to 0.2.1.
   harness, `kovan/tests/support/thread_exit.rs`.
 - kovan-mvcc: what `register` does when a key is registered again, for both registries:
   `kovan-mvcc/tests/registry_contract.rs`.
+- Every test frees what it allocates, and the suite runs under AddressSanitizer with its leak
+  check in CI.
 
 ### Documentation
 
