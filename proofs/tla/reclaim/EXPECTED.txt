@@ -16,7 +16,7 @@ RC_exit_chain                      MC_Reclaim         pass
 RC_exit_chain_rf2                  MC_Reclaim         pass
 RC_orphan                          MC_Reclaim         pass
 RC_flush_orphan                    MC_Reclaim         pass
-RC_unpinned_retire                 MC_Reclaim         pass
+RC_unpinned_claims                 MC_Reclaim         pass
 RC_help_dtor                       MC_Reclaim         pass
 RC_reenter                         MC_Reclaim         pass
 RC_reenter_rt                      MC_Reclaim         pass
@@ -84,9 +84,11 @@ RC_wit_undo                        MC_Reclaim         violated:NoUndoW
 RC_wit_broken_link                 MC_Reclaim         violated:NoBrokenLinkW
 RC_wit_reentrant_transition        MC_Reclaim         violated:NoReentrantTransitionW
 RC_recycle                         MC_Reclaim         pass
-RC_recycle_dtor                    MC_Reclaim         pass
+RC_recycle_dtor_write              MC_Reclaim         pass
+RC_recycle_dtor_read               MC_Reclaim         pass
 RC_recycle_stale                   MC_Reclaim         pass
-RC_recycle_dtor_stale              MC_Reclaim         pass
+RC_recycle_dtor_stale_write        MC_Reclaim         pass
+RC_recycle_dtor_stale_read         MC_Reclaim         pass
 RC_recycle_stale_link_next         MC_Reclaim         pass
 RC_recycle_stale_lag               MC_Reclaim         pass
 RC_wf_recycle                      MC_Reclaim         pass
@@ -96,7 +98,8 @@ RC_mut_read_after_dealloc          MC_Reclaim         violated:NoUseAfterFree
 RC_mut_stale_link_birth            MC_Reclaim         violated:NoUseAfterFree
 RC_mut_pool_lock_held              MC_Reclaim         deadlock
 RC_wit_reuse                       MC_Reclaim         violated:NoHeldReusedW
-RC_wit_dtor_reuse                  MC_Reclaim         violated:NoDtorReuseW
+RC_wit_dtor_reuse_write            MC_Reclaim         violated:NoDtorReuseW
+RC_wit_dtor_reuse_read             MC_Reclaim         violated:NoDtorReuseW
 RC_wit_stale_reuse                 MC_Reclaim         violated:NoStaleReuseW
 RC_wit_stale_later                 MC_Reclaim         violated:NoStaleLaterW
 RC_wit_wf_reuse                    MC_Reclaim         violated:NoHeldReusedW

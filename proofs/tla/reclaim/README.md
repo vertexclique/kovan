@@ -141,7 +141,7 @@ try_retires past their scan when the era closed, one per thread and nesting leve
 destructors (`DetachBound` = 2 + threads x (1 + drops with a program)); `alloc_tid` claims at most
 one bit per released id and retries its compare-exchange at most once per id another thread
 took; an exit runs `EXIT_ROUNDS` rounds. The pass counters count where `CountSteps` is set (the
-`RC_wf_*`, `RC_hand_over` and `RC_help_follows` configurations and the configurations that break
+`RC_wf_*` and `RC_help_follows` configurations and the configurations that break
 a bound); elsewhere `LoopBounds` checks only the exit's rounds. `help_thread`'s bound rests on the
 era's seqno check this branch added (see Findings).
 
@@ -283,19 +283,22 @@ All use two threads unless said otherwise, and every node recycles.
   every safety property. It would catch kovan calling `dealloc` while a reader could still reach
   the node (the reader would then see another object at the same address), or kovan touching a
   node after its `dealloc`.
-- `RC_recycle_dtor` (pass). Node 1 and a fresh node can be freed in one batch, the fresh one
-  first, and node 1's own drop, run inside that walk, reads cell 2 and replaces it, possibly with
-  the node the same walk freed a step before; thread 2 replaces and reads cell 2 meanwhile. It
-  would catch the walk reading or writing a node after handing it to the pool (the next drop may
-  already have reused it), or a reuse inside a drop corrupting the batch being freed.
+- `RC_recycle_dtor_write`, `RC_recycle_dtor_read` (pass). Node 1 and a fresh node can be freed
+  in one batch, the fresh one first, and node 1's own drop, run inside that walk, reads cell 2 and
+  replaces it, possibly with the node the same walk freed a step before; meanwhile thread 2
+  replaces cell 2 (`_write`) or holds its value under a guard (`_read`). They would catch the walk
+  reading or writing a node after handing it to the pool (the next drop may already have reused
+  it), a reuse inside a drop corrupting the batch being freed, or a reader's pointer changing
+  object under its guard. Thread 2 replacing and then reading cell 2 in one run (the scenario
+  before the split) ran past an hour on four workers.
 - `RC_recycle_stale` (pass). `RC_recycle` with the recycler skipping `RetiredNode::new()`
   (stale_reuse): a node goes out again with the header and birth epoch kovan left on it. It checks
   the claim of `reclaim.rs` that memory safety does not depend on the write, and would catch
   kovan reading a stale header word before rewriting it, or a kept birth epoch that lets a batch
   skip the slot of a reader holding the node.
-- `RC_recycle_dtor_stale` (pass). The same claim on `RC_recycle_dtor`: the node a drop takes back
-  from the walk that freed it keeps the header it had in that batch, its words still describing
-  the batch being freed.
+- `RC_recycle_dtor_stale_write`, `RC_recycle_dtor_stale_read` (pass). The same claim on the two
+  halves of the drop scenario: the node a drop takes back from the walk that freed it keeps the
+  header it had in that batch, its words still describing the batch being freed.
 - `RC_recycle_stale_link_next` (pass). The same claim with an intrusive pool: no
   `RetiredNode::new()`, and `dealloc` writes the pool's own link into the node's first header word
   (`next`), which the reuse keeps. It would catch kovan reading `next` before rewriting it.
@@ -332,7 +335,8 @@ All use two threads unless said otherwise, and every node recycles.
   breaks any of them, and it names the one that mutation is for. (Checked against these
   properties alone, earlier mutations do break some of them, but only after a use after free
   that breaks `NoUseAfterFree` first.)
-- `RC_wit_reuse`, `RC_wit_dtor_reuse`, `RC_wit_stale_reuse`, `RC_wit_stale_later` (each must
+- `RC_wit_reuse`, `RC_wit_dtor_reuse_write`, `RC_wit_dtor_reuse_read`, `RC_wit_stale_reuse`,
+  `RC_wit_stale_later` (each must
   break its witness). They show the passing configurations reach the cases they are for: a
   reader holding a node in its second or a later incarnation; a drop inside a walk taking a node
   from the pool; a node going out with a birth epoch older than `RetiredNode::new()` would stamp;
@@ -343,7 +347,7 @@ All use two threads unless said otherwise, and every node recycles.
   steps counted. It checks `LoopBounds` and `WaitFree` with the bound counting node objects, and
   would catch a recycling path that makes an operation loop or wait beyond those bounds.
 - `RC_wf_recycle_dtor` (pass). Step counts with reuse inside a walk: a cut-down
-  `RC_recycle_dtor`, node 1's drop taking back, inside the walk that frees its batch, the node the
+  `RC_recycle_dtor_write`, node 1's drop taking back, inside the walk that frees its batch, the node the
   same walk freed a step before. It checks `LoopBounds` and `WaitFree`, the walk's operation and
   each operation the drop runs counted on their own.
 - `RC_wit_wf_reuse`, `RC_wit_wf_dtor_reuse` (each must break its witness). In the two
@@ -352,16 +356,19 @@ All use two threads unless said otherwise, and every node recycles.
 
 ### What TLC found
 
-With `Recycle` the code as built passes (`RC_recycle`, `RC_recycle_dtor`): in these scenarios a
+With `Recycle` the code as built passes (`RC_recycle`, `RC_recycle_dtor_write`,
+`RC_recycle_dtor_read`): in these scenarios a
 pointer a guard holds keeps its incarnation until the guard drops, and kovan reads or writes no
 node once its destructor ran, also when a drop the walk runs takes back from the pool the node
-the same walk freed a step before (`RC_wit_dtor_reuse` shows that case is reached). With step
+the same walk freed a step before (`RC_wit_dtor_reuse_write` and `_read` show that case is
+reached). With step
 counts on (`RC_wf_recycle`, 1,638,997 distinct states; `RC_wf_recycle_dtor`, 1,639,234), every
 operation stays within its step bound and every loop within its bound, the bound counting node
 objects. About the contract in the Recycling nodes section of `reclaim.rs`:
 
 - **Skipping `RetiredNode::new()` is safe only while the header is the one kovan left.**
-  `RC_recycle_stale`, `RC_recycle_dtor_stale`, `RC_recycle_stale_lag` and
+  `RC_recycle_stale`, `RC_recycle_dtor_stale_write`, `RC_recycle_dtor_stale_read`,
+  `RC_recycle_stale_lag` and
   `RC_recycle_stale_link_next` pass; `RC_mut_stale_link_birth` breaks `NoUseAfterFree` (121,028
   states). The first version of these docs said memory safety does not depend on the write. That
   holds while the header is the one kovan left: retirement rewrites `batch_link` and `refs_or_next` (and the
@@ -604,7 +611,7 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_exit_chain` | An exit whose drops retire in a chain: two rounds, the rest parked. | threads 1, tids 1, nodes 5, EF 4 | pass |
 | `RC_orphan` | An exit that cannot place its batch parks it on its tid; a flush adopts it. | nodes 3 | pass |
 | `RC_flush_orphan` | A thread that never pinned flushes twice at any moment while another exits with a batch it cannot place (parked on its tid); a flush after the park claims a tid and adopts it. | threads 3, tids 3, nodes 2, steps counted yes | pass |
-| `RC_unpinned_retire` | Threads that never pin retire one value each (the retire claims a tid for its epoch advance); one flushes and exits, the other just exits, while a third holds a reservation. | threads 3, tids 3, nodes 3, RF 2 | pass |
+| `RC_unpinned_claims` | Two threads that never pin retire one value each; one flushes and exits, the other just exits, each submission claiming a tid. With a third thread holding a reservation meanwhile (the scenario before the split) it ran past an hour; that thread with each claimer is `RC_wf_unpinned_flush` and `RC_wf_unpinned_exit`. | threads 2, tids 2, nodes 3, RF 2 | pass |
 | `RC_late_retire` | A thread exits, then retires a value (a thread-local destructor that runs after the handle's) through a handle of its own and exits again, that handle's exit; another pins, loads and exits at any moment. | nodes 3, RF 2, EF 4, steps counted yes | pass |
 | `RC_late_pin` | A thread exits, then pins, loads and unpins (a thread-local destructor that runs after the handle's) in a section of a handle of its own, and exits again, that section's end; another replaces the value and flushes at any moment. | nodes 3, RF 2, EF 4, steps counted yes | pass |
 | `RC_help_dtor` | A retire on a batch and epoch boundary helps a slow path; the help's drain runs a drop that retires. | nodes 6, EF 1, cache 0, pin attempts 1 | pass |
@@ -612,7 +619,7 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_reenter_rt` | The same, the cache freed by a retire's help of the slow path. | nodes 9, EF 1, cache 0 | pass |
 | `RC_reentrant` | A retire outside any guard frees its batch at once; the drop it runs pins, transitions, loads and drops its guard. | threads 1, tids 1, nodes 3 | pass |
 | `RC_slow_dtor` | A slow path detaching its list while a helper hands it over; a cached drop reads a cell, replaces it and retires what it read. | cells 2, nodes 8, RF 2, cache 0, pin attempts 1 | pass |
-| `RC_hand_over` | A slow-path hand-over racing a retire into the pending thread's slot. | threads 3, tids 3, nodes 4, pin attempts 1, steps counted yes | pass |
+| `RC_hand_over` | A slow-path hand-over racing a retire into the pending thread's slot. Steps not counted: counted, it ran past an hour on four workers. | threads 3, tids 3, nodes 4, pin attempts 1 | pass |
 | `RC_help_follows` | A pinner whose every transition takes the slow path, advancing the epoch between its pins, helped from its second request on by another thread's flush. | nodes 6, RF 6, EF 1, pin attempts 1, epochs 8, steps counted yes | pass |
 | `RC_live` | Weak fairness for every thread: every program ends. | nodes 3 | pass |
 | `RC_live_drain` | One thread that keeps pinning after its retires advanced the epoch and a load raised its reservation: every retired node is eventually released. | threads 1, tids 1, nodes 3 | pass |
@@ -683,9 +690,11 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_wit_broken_link` | a traversal takes a node before its inserter links it, and the inserter traverses what it displaced. | nodes 5, cache 0 | `NoBrokenLinkW` broken |
 | `RC_wit_reentrant_transition` | a drop pins outermost and transitions inside a retire. | threads 1, tids 1, nodes 3 | `NoReentrantTransitionW` broken |
 | `RC_recycle` | A reader holding what it loaded while a writer replaces and retires it and flushes between its writes, so later writes take freed nodes back from the pool while the reader loads again. | nodes 4, recycle | pass |
-| `RC_recycle_dtor` | Node 1 retired with a fresh node in one batch, the fresh node freed first; node 1's drop, in the same walk, reads cell 2 and replaces it with the node just freed, taken back from the pool, while thread 2 replaces and reads cell 2. | cells 2, nodes 6, recycle | pass |
+| `RC_recycle_dtor_write` | Node 1 retired with a fresh node in one batch, the fresh node freed first; node 1's drop, in the same walk, reads cell 2 and replaces it with the node just freed, taken back from the pool, while thread 2 replaces cell 2. | cells 2, nodes 6, recycle | pass |
+| `RC_recycle_dtor_read` | The same, while thread 2 holds cell 2's value under a guard. | cells 2, nodes 6, recycle | pass |
 | `RC_recycle_stale` | `RC_recycle` with stale_reuse: the recycler skips `RetiredNode::new`, so a node goes out again with the header and birth epoch kovan left on it. Every invariant but `BirthFresh`, which checks the epochs `RetiredNode::new` stamps (a stale reuse stamps none). | nodes 4, recycle | pass |
-| `RC_recycle_dtor_stale` | `RC_recycle_dtor` with stale_reuse: the node a drop takes back from the walk that freed it keeps the header it had in that batch. Every invariant but `BirthFresh`. | cells 2, nodes 6, recycle | pass |
+| `RC_recycle_dtor_stale_write` | `RC_recycle_dtor_write` with stale_reuse: the node a drop takes back from the walk that freed it keeps the header it had in that batch. Every invariant but `BirthFresh`. | cells 2, nodes 6, recycle | pass |
+| `RC_recycle_dtor_stale_read` | `RC_recycle_dtor_read` with stale_reuse. Every invariant but `BirthFresh`. | cells 2, nodes 6, recycle | pass |
 | `RC_recycle_stale_link_next` | `RC_recycle` with stale_reuse_link_next: no `RetiredNode::new`, and the pool links its nodes through the header's first word (`next`), which the reuse keeps. Every invariant but `BirthFresh`. | nodes 4, recycle | pass |
 | `RC_recycle_stale_lag` | stale_reuse on a lagging thread: thread 1 pins at the first epoch and waits while thread 2's flushes advance the epoch and free a node it stamped later into the pool; thread 1 takes that node back with a write and flushes while thread 2 loads the cell. Every invariant but `BirthFresh`. | nodes 5, recycle | pass |
 | `RC_mut_reuse_retired` | reuse_retired: the recycler takes a node still in a retirement batch, its destructor not yet run. | nodes 4, recycle | `NoUseAfterFree` broken |
@@ -697,7 +706,8 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_mut_help_hands_pointer` | help_hands_pointer, the programs of `RC_find_help_torn_request`: the helper's result carries a pointer. | as `RC_find_help_torn_request` | `WellFormed` broken |
 | `RC_mut_drain_published_term` | drain_published as in `RC_mut_drain_published_live`, every thread scheduled fairly, checked against `Termination` with the safety properties beside it. | as `RC_mut_drain_published_live` | `Termination` broken |
 | `RC_wit_reuse` | a section holds a node in a later incarnation than its first. | nodes 4, recycle | `NoHeldReusedW` broken |
-| `RC_wit_dtor_reuse` | a drop, run inside a reclamation walk, takes a node from the pool. | cells 2, nodes 6, recycle | `NoDtorReuseW` broken |
+| `RC_wit_dtor_reuse_write` | a drop, run inside a reclamation walk, takes a node from the pool (`RC_recycle_dtor_write`'s programs). | cells 2, nodes 6, recycle | `NoDtorReuseW` broken |
+| `RC_wit_dtor_reuse_read` | the same on `RC_recycle_dtor_read`'s programs. | cells 2, nodes 6, recycle | `NoDtorReuseW` broken |
 | `RC_wit_stale_reuse` | a recycled node is about to go out with a birth epoch older than the one `RetiredNode::new` would stamp. | nodes 4, recycle | `NoStaleReuseW` broken |
 | `RC_wit_stale_later` | a recycled node is about to go out with a birth epoch later than the one `RetiredNode::new` would stamp on the recycling thread. | nodes 5, recycle | `NoStaleLaterW` broken |
 | `RC_wf_recycle` | Step counts with recycling: a reader in two guards while a writer replaces cell 1 three times and flushes between, taking back freed nodes. | nodes 4, recycle, steps counted yes | pass |
@@ -966,14 +976,14 @@ without exiting.
 
 The configurations, and what each one catches:
 
-- `RC_unpinned_retire` (must pass). With a batch of two (`RetireFreq` 2), one retire does not
+- `RC_unpinned_claims` (must pass). With a batch of two (`RetireFreq` 2), one retire does not
   submit. Thread 1 retires one value without pinning, flushes and exits; thread 2 retires one and
-  exits; thread 3 pins, unpins and exits, so until it exits a one-value batch cannot be placed and
-  is kept or parked. TLC tries every interleaving and checks the safety invariants on each,
-  `NoLoss` among them, with the flush of thread 1 and the exit of thread 2 each claiming a tid.
-  Steps are not counted here: with the step counts on, this scenario reached 19,998,315 distinct
-  states, still growing, when a 600-second limit stopped TLC. The two configurations below count
-  them, one claim at a time.
+  exits. TLC tries every interleaving and checks the safety invariants on each, `NoLoss` among
+  them, with the flush of thread 1 and the exit of thread 2 each claiming a tid, so the two race
+  for tids. The scenario this replaced added a third thread that pins, unpins and exits, so that
+  until it exits a one-value batch cannot be placed and is kept or parked; with the epoch advances
+  at a first retire and after a placed batch it ran past an hour on four workers. That thread is
+  checked beside each claimer by the two configurations below, which count every step.
 - `RC_wf_unpinned_exit` (must pass, steps counted). Thread 1 retires one value, exits, retires one
   more after its exit and exits again; thread 2 pins, unpins and exits. Thread 1's second exit
   finds no tid and a value in its batch, claims a tid and runs the normal exit (and parks the
@@ -1001,9 +1011,9 @@ as a guard. The exit's claim is still reached, by a retire after the thread's ex
 handle outlives the exit (the nightly build's) and its count is not at an advance: the scenario
 of `RC_wf_unpinned_exit` above.
 
-What these checks do not cover: TLC checks these scenarios (one or two threads beside the three of
-`RC_unpinned_retire`, one value retired per thread that never pins) exhaustively, not every
-program. The nightly sentinel registration is not modelled (the model's exit always runs).
+What these checks do not cover: TLC checks these scenarios (one or two threads, one value retired per
+thread that never pins) exhaustively, not every program; the three threads at once are not
+checked (over an hour). The nightly sentinel registration is not modelled (the model's exit always runs).
 
 ## A value retired after the thread's exit
 
@@ -1134,10 +1144,11 @@ match (`RC_late_retire` 52,070 distinct states, 25 s; `RC_live_late_retire` 174;
 broken in 6,631 states). The four configurations of a pin after the thread's exit came later
 still and were checked on their own, with four workers: all four match (`RC_late_pin` 543,171
 distinct states, 21 s; `RC_live_late_pin` 198; `RC_mut_late_pin_unreserved` broken in 15,771
-states, `RC_mut_late_pin_kept` in 142). The largest passing ones are
+states, `RC_mut_late_pin_kept` in 142). The largest passing ones were
 `RC_recycle_dtor` (10,055,217 distinct states, 177 s), `RC_recycle_dtor_stale` (9,977,235
 distinct states, 217 s), `RC_wf_mix` (8,363,530 distinct states, 143 s), `RC_unpinned_retire`
-(8,173,791 distinct states, 152 s), `RC_hand_over` (5,601,019 distinct states, 112 s),
+(8,173,791 distinct states, 152 s), `RC_hand_over` (5,601,019 distinct states, 112 s, steps
+counted),
 `RC_find_help_torn_request` (3,371,877 distinct states, 59 s), `RC_two_loads` (2,790,043 distinct
 states, 49 s) and `RC_flush_orphan` (2,197,419 distinct states, 47 s); the longest runs that break
 a property, on one worker, are `RC_mut_help_no_seqno_check` (2,351,551 distinct states, 268 s) and
@@ -1148,3 +1159,28 @@ stop within seconds: `RC_mut_cache_ahead` (4,703 distinct states), `RC_mut_early
 property on the part of the state space found so far, at intervals during the search, so where it
 stops on a broken one, and the state count it reports, can differ between runs
 (`RC_mut_ttas_locks`, for one).
+
+## The split of 2026-10-26
+
+The epoch advances at a thread's first retire and after every placed batch (kovan 0.2.1) grew the
+state spaces of four scenarios past an hour on four workers: `RC_unpinned_retire`,
+`RC_recycle_dtor`, `RC_recycle_dtor_stale` (25 to 37 million distinct states after 29 minutes,
+still growing) and `RC_hand_over` with steps counted (31.6 million at 34 minutes, a CI runner's
+disk full). Lowering `MaxEpoch` to 6 did not slow the growth; the spec already folds every
+thread-local step PlusCal allows. They were split, the operator's choice, each part checked on
+four workers on 2026-10-26:
+
+| configuration | distinct states | seconds | result |
+|---|---|---|---|
+| `RC_unpinned_claims` | 39,431 | 5 | pass |
+| `RC_recycle_dtor_write` | 10,512,738 | 312 | pass |
+| `RC_recycle_dtor_read` | 826,012 | 36 | pass |
+| `RC_recycle_dtor_stale_write` | 9,813,693 | 279 | pass |
+| `RC_recycle_dtor_stale_read` | 828,872 | 34 | pass |
+| `RC_wit_dtor_reuse_write` | 28,834 | 5 | `NoDtorReuseW` broken |
+| `RC_wit_dtor_reuse_read` | 14,472 | 4 | `NoDtorReuseW` broken |
+| `RC_hand_over` (steps not counted) | 5,464,083 | 244 | pass |
+
+Given up: the three never-pinning threads at once (each pair is checked), thread 2 replacing and
+then reading cell 2 in one run of the drop scenario (each half is checked), and `WaitFree` on the
+hand-over scenario (the `RC_wf_*` configurations bound each operation's steps).

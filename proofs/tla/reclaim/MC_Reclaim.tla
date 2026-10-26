@@ -195,17 +195,20 @@ P_late_pin_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, P, Ld(1), 
 \* Thread 2 retires one value, then just exits: the exit must claim a tid and submit.
 \* Thread 3 pins, unpins and exits: from its pin to its exit its slot reserves an epoch, and a
 \* one-value batch cannot be placed then, so a submission may also have to keep or park it.
-P_unpinned == [t \in {1, 2, 3} |-> CASE t = 1 -> <<Rt, Fl, Ex>>
-                                    [] t = 2 -> <<Rt, Ex>>
-                                    [] t = 3 -> <<P, U, Ex>>]
-\* The same, small enough to count every step (README.md). A thread's first retire claims a tid
-\* for its epoch advance, so a thread holds a batch and no tid only after its exit: thread 1
-\* retires one value, exits, retires one more after its exit (the handle outlives the exit and
-\* its count is not at an advance: no claim) and exits again, and that exit claims a tid. Thread 2
-\* pins, unpins and exits, so from its pin to its exit a one-value batch cannot be placed.
+\* The three at once ran past an hour on four workers, so they are checked in pairs, every step
+\* counted where the pair is small enough: thread 1 with thread 3 (P_wf_unpinned_flush), thread 2
+\* with thread 3 (P_wf_unpinned_exit, below), threads 1 and 2 (P_unpinned_claims).
+\* Thread 2 with thread 3, small enough to count every step (README.md). A thread's first retire
+\* claims a tid for its epoch advance, so a thread holds a batch and no tid only after its exit:
+\* thread 1 retires one value, exits, retires one more after its exit (the handle outlives the
+\* exit and its count is not at an advance: no claim) and exits again, and that exit claims a
+\* tid. Thread 2 pins, unpins and exits, so from its pin to its exit a one-value batch cannot be
+\* placed.
 P_wf_unpinned_exit == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Ex, Rt, Ex>> ELSE <<P, U, Ex>>]
 \* Thread 1 retires one value without pinning (claiming a tid), flushes, then exits.
 P_wf_unpinned_flush == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<P, U, Ex>>]
+\* Threads 1 and 2 without thread 3: each submission claims a tid, so the two race for tids.
+P_unpinned_claims == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<Rt, Ex>>]
 \* One thread that retires one value, flushes, then keeps pinning and unpinning forever without
 \* exiting: only its flush can submit the value while it lives.
 P_unpinned_flush_live == [t \in {1} |-> <<Rt, Fl, Idle>>]
@@ -275,8 +278,15 @@ P_recycle == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Ld(1), U, P, Ld(1), U, 
 \* before. Meanwhile thread 2 replaces cell 2 and reads it. The check is that kovan's walk
 \* never reads or writes a node after handing it to the pool, even when the next node's drop
 \* reuses it at once, and that no reader's pointer changes object under its guard.
-P_recycle_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Fl, Ex>>
-                                             ELSE <<P, Wr(2), U, Fl, P, Ld(2), U, Ex>>]
+\* The two at once (thread 2 replacing cell 2, then reading it) ran past an hour on four workers,
+\* so the scenario is checked in two halves, each with every safety invariant. The writer's side:
+\* thread 2 replaces cell 2 while node 1's drop, inside thread 1's walk, reads cell 2 and replaces
+\* it (possibly with a node that walk freed).
+P_recycle_dtor_write == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Fl, Ex>>
+                                                   ELSE <<P, Wr(2), U, Fl, Ex>>]
+\* The reader's side: thread 2 holds cell 2's value under a guard while node 1's drop replaces it.
+P_recycle_dtor_read == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Fl, Ex>>
+                                                  ELSE <<P, Ld(2), U, Ex>>]
 \* Node 1's drop (its value's Drop, run by dealloc before the node goes to the pool): a guard,
 \* a read of cell 2, a write of cell 2 that may take a node from the pool, the guard dropped.
 DtorRW2Recycle == DtorOf(1, <<P, Ld(2), Wr(2), U>>)
@@ -304,12 +314,12 @@ P_pool_lock == [t \in {1} |-> <<P, Wr(1), U, Fl, Wr(1)>>]
 \* every node object (each reuse of an id is one more object).
 P_wf_recycle == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, P, Ld(1), U>>
                                            ELSE <<P, Wr(1), U, Fl, P, Wr(1), U, Fl, P, Wr(1), U>>]
-\* Step counting with reuse inside a walk, cut down from P_recycle_dtor: thread 1 retires node 1
-\* (by replacing it) and a fresh node, then flushes; node 1's drop (DtorRW2Recycle), run inside
-\* the walk that frees its batch, reads and replaces cell 2, and can take back the node the walk
-\* freed a step before (RC_wit_wf_dtor_reuse shows that happens); thread 2 replaces cell 2 and
-\* flushes. The check: the walk's operation, and each operation the drop runs, counted on its own,
-\* stay within their bounds.
+\* Step counting with reuse inside a walk, cut down from P_recycle_dtor_write: thread 1 retires
+\* node 1 (by replacing it) and a fresh node, then flushes; node 1's drop (DtorRW2Recycle), run
+\* inside the walk that frees its batch, reads and replaces cell 2, and can take back the node the
+\* walk freed a step before (RC_wit_wf_dtor_reuse shows that happens); thread 2 replaces cell 2
+\* and flushes. The check: the walk's operation, and each operation the drop runs, counted on its
+\* own, stay within their bounds.
 P_wf_recycle_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Fl>>
                                                 ELSE <<P, Wr(2), U, Fl>>]
 
