@@ -89,7 +89,8 @@ if [ "$family" = shard ]; then
   exit $bad
 fi
 if [ "$family" = local ]; then
-  n=16; out="$(mktemp -d)"; pids=()
+  # TLC_LOGS keeps each share's log in that directory (the run's per-configuration seconds).
+  n=16; out="${TLC_LOGS:-$(mktemp -d)}"; mkdir -p "$out"; pids=()
   t0=$(date +%s)
   echo "every family in $n shares at once, one worker each, within ${TLC_DEADLINE:-900} s"
   for k in $(seq 0 $((n - 1))); do
@@ -129,7 +130,7 @@ if [ "$family" = local ]; then
   matched=$(cat "$here"/*/tlc-run.txt | grep -c ' yes$'); all=$(cat "$here"/*/EXPECTED.txt | awk '!/^#/ && NF' | wc -l)
   echo "local run: $matched of $all configurations match EXPECTED.txt, in $((t1 - t0)) s of wall time"
   [ "$matched" = "$all" ] || bad=1
-  rm -rf "$out"
+  [ -n "${TLC_LOGS:-}" ] || rm -rf "$out"
   exit $bad
 fi
 if [ "$family" = all ]; then

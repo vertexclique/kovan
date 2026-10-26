@@ -99,6 +99,10 @@ P_exit_tid == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), Rt, Rt, U, After(2,
                                     [] t = 3 -> <<AwaitRel, After(2, 5), P, After(2, 7), Ld(2), U>>]
 \* One thread: a chain of drops that retire (node 1's retires node 3, node 3's node 4).
 P_exit_chain == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
+\* The same with one more pin before the exit: the retire's advances moved the epoch past the
+\* thread's last transition, and the pin publishes the epoch they made, so the nodes the drops
+\* retire (born at it) take an entry in the thread's slot and wait for the exit's next round.
+P_exit_chain1 == [t \in {1} |-> <<P, Wr(1), U, P, U, Ex>>]
 \* Thread 1 exits with a batch it cannot place (thread 2's slot is eligible): parked on its
 \* tid, adopted by thread 2's flush.
 P_orphan == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
@@ -114,6 +118,10 @@ P_orphan == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
 P_flush_orphan == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
                                         [] t = 2 -> <<P, Ld(1), U, Ex>>
                                         [] t = 3 -> <<Fl, Fl, Ex>>]
+\* The same with one flush, at any moment: before the park in some schedules, after it in others.
+P_flush_orphan_one == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
+                                            [] t = 2 -> <<P, Ld(1), U, Ex>>
+                                            [] t = 3 -> <<Fl, Ex>>]
 \* The same threads 1 and 2; thread 3 waits until thread 1 has ended (so after any park), then
 \* flushes once and stops, without exiting (an exit could park the adopted batch again).
 P_flush_orphan_live == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
