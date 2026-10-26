@@ -188,7 +188,7 @@ bench-ab *args:
 
 # ---------------------------------------------------------------- proofs
 
-# Model-check one TLA+ family (reclaim, chained, hopscotch, segqueue, magazine, slab, atom, stm, mvcc, channel), all its configurations or the ones named
+# Model-check one TLA+ family (reclaim, chained, hopscotch, segqueue, magazine, slab, atom, stm, mvcc, channel, waitslots), all its configurations or the ones named
 [group("proofs")]
 tla family *configs:
     bash proofs/tla/run_tlc.sh {{ family }} {{ configs }}
@@ -198,9 +198,14 @@ tla family *configs:
 tla-ci-seconds *run:
     bash tools/tla-ci-seconds.sh {{ run }}
 
-# Model-check every TLA+ family in one go (CI: tla.yml runs the same checks in 16 shares at once, within 20 minutes; reclaim alone takes 32 to 73 minutes here, by the machine's load)
+# Model-check every TLA+ family in 16 shares at once, one worker each at the lowest priority, within 15 minutes (CI: tla.yml, the same 16 shares within 15 minutes); rewrites every tlc-run.txt
 [group("proofs")]
 tla-all:
+    bash proofs/tla/run_tlc.sh local
+
+# Model-check every TLA+ family one after the other, each configuration with TLC's own worker count
+[group("proofs")]
+tla-serial:
     bash proofs/tla/run_tlc.sh all
 
 # Check every Lean proof, failing on any warning (CI: lean.yml)

@@ -77,8 +77,9 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 - `tla/reclaim/`: kovan's memory reclamation (pin, the protected load, retire, the traversal,
   flush, a thread's exit and the hand-over of its id, the flush and the exit of a thread that
   never pinned, a value retired after a thread's exit, a critical section after a thread's exit,
-  the recycling of retired nodes), 110 configurations: 48 that must pass and 62 mutations and
-  witnesses that must fail.
+  the recycling of retired nodes, the epoch's advance at a thread's first retire, the pin that
+  traverses what was attached to its slot, the exit that adopts what earlier exits parked), 116
+  configurations: 51 that must pass and 65 mutations and witnesses that must fail.
 - `tla/chained/`: `kovan_map::HashMap`, the chained map (the link words, the writes, the walks,
   the conditional writes, the freezing migration and clear), 47 configurations: 26 that must
   pass and 21 that must fail.
@@ -106,7 +107,11 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
   and its watermark), 53 configurations: 17 that must pass and 36 that must fail.
 - `tla/channel/`: `kovan_channel` (both flavors' list and counts, the wait lists and their
   cancel, the signals and the `AtomicWaker`, every wait, the bounded sends and the receiver count,
-  the disconnect, `select!`), 83 configurations: 27 that must pass and 56 that must fail.
+  the disconnect, `select!`, the rendezvous), 95 configurations: 34 that must pass and 61 that
+  must fail.
+- `tla/waitslots/`: `kovan_channel`'s wait list at its atomic steps (the slots, the count, the
+  scans, the takeover, the abandon, `notify_one` and `notify_all`), 11 configurations: 5 that must
+  pass and 6 that must fail.
 - `lean/Kovan/HopscotchShrink.lean`: the hopscotch map's shrink threshold, for one thread and
   every sequence of operations: a successful resize and a clear erase it; after a failed shrink
   at `c` entries, until the next erasure, no shrink is asked for while `max (c / 2) 1` entries

@@ -90,7 +90,51 @@ State 2: <BG0 line 899, col 14 to line 911, col 43 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 3: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
+State 3: <BG0 line 899, col 14 to line 911, col 43 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 0, 0>>
+/\ inflight = {}
+/\ issued = 0
+/\ h = << >>
+/\ i = <<1, 1, 1>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 0
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"BG0", "BG1", "BG1">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ todo = <<<<>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 0
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 4: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<0, 0, 0>>
 /\ inflight = {}
@@ -117,13 +161,13 @@ State 3: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ hiTs = 1
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"BG0", "BG0", "OP">>
+/\ pc = <<"BG0", "OP", "BG1">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 1 @@ 3 :> 0)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
@@ -134,277 +178,13 @@ State 3: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 4: <BG0 line 899, col 14 to line 911, col 43 of module Mvcc>
+State 5: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<0, 0, 0>>
-/\ inflight = {}
-/\ issued = 1
-/\ h = << >>
-/\ i = <<1, 1, 1>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 1
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "BG0", "OP">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 1
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 5: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<0, 0, 0>>
-/\ inflight = {}
-/\ issued = 1
-/\ h = << >>
-/\ i = <<1, 1, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 1
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "BG0", "PL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<3>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 1
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 6: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<0, 0, 3>>
-/\ inflight = {}
-/\ issued = 1
-/\ h = << >>
-/\ i = <<1, 1, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 1
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "BG0", "PC">>
-/\ acq = <<<<>>, <<>>, <<3>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<3>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 1
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 7: <BG0 line 899, col 14 to line 911, col 43 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<0, 0, 3>>
-/\ inflight = {}
-/\ issued = 1
-/\ h = << >>
-/\ i = <<1, 1, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 1
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "BG1", "PC">>
-/\ acq = <<<<>>, <<>>, <<3>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<3>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 1
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 8: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<0, 0, 3>>
-/\ inflight = {}
-/\ issued = 1
-/\ h = << >>
-/\ i = <<1, 1, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 1
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "BG1", "PD">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<3>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 1
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 9: <PD line 1265, col 13 to line 1280, col 53 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<0, 0, 3>>
-/\ inflight = {}
-/\ issued = 1
-/\ h = << >>
-/\ i = <<1, 1, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 1
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "BG1", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 1
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 10: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<0, 0, 3>>
 /\ inflight = {}
 /\ issued = 2
 /\ h = << >>
-/\ i = <<1, 1, 2>>
+/\ i = <<1, 1, 1>>
 /\ ck = <<0, 0, 0>>
 /\ gEver = {}
 /\ readTs = <<0, 0, 0>>
@@ -417,7 +197,7 @@ State 10: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{}, {}, {}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -425,13 +205,13 @@ State 10: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ hiTs = 2
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"BG1", "OP", "SL">>
+/\ pc = <<"BG0", "OP", "OP">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
@@ -442,13 +222,13 @@ State 10: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 11: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
+State 6: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ bef = << >>
-/\ lock = <<0, 0, 3>>
+/\ lock = <<0, 0, 0>>
 /\ inflight = {}
-/\ issued = 3
+/\ issued = 2
 /\ h = << >>
-/\ i = <<1, 1, 2>>
+/\ i = <<1, 2, 1>>
 /\ ck = <<0, 0, 0>>
 /\ gEver = {}
 /\ readTs = <<0, 0, 0>>
@@ -461,41 +241,41 @@ State 11: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{}, {}, {}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
 /\ mn = << >>
-/\ hiTs = 3
+/\ hiTs = 2
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"OP", "OP", "SL">>
+/\ pc = <<"BG0", "PL", "OP">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<1>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ ssi = 0
-/\ clock = 3
+/\ clock = 2
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 12: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
+State 7: <BG0 line 899, col 14 to line 911, col 43 of module Mvcc>
 /\ bef = << >>
-/\ lock = <<0, 0, 3>>
+/\ lock = <<0, 0, 0>>
 /\ inflight = {}
-/\ issued = 3
+/\ issued = 2
 /\ h = << >>
-/\ i = <<1, 1, 2>>
+/\ i = <<1, 2, 1>>
 /\ ck = <<0, 0, 0>>
 /\ gEver = {}
-/\ readTs = <<3, 0, 0>>
+/\ readTs = <<0, 0, 0>>
 /\ hEver = {}
 /\ gk = << >>
 /\ gr = << >>
@@ -505,41 +285,41 @@ State 12: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{}, {}, {}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
 /\ mn = << >>
-/\ hiTs = 3
+/\ hiTs = 2
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"RL", "OP", "SL">>
+/\ pc = <<"BG1", "PL", "OP">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 0 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<1>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ ssi = 0
-/\ clock = 3
+/\ clock = 2
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 13: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
+State 8: <BG1 line 913, col 14 to line 930, col 76 of module Mvcc>
 /\ bef = << >>
-/\ lock = <<0, 0, 3>>
+/\ lock = <<0, 0, 0>>
 /\ inflight = {}
 /\ issued = 3
 /\ h = << >>
-/\ i = <<1, 2, 2>>
+/\ i = <<1, 2, 1>>
 /\ ck = <<0, 0, 0>>
 /\ gEver = {}
-/\ readTs = <<3, 0, 0>>
+/\ readTs = <<0, 0, 0>>
 /\ hEver = {}
 /\ gk = << >>
 /\ gr = << >>
@@ -549,7 +329,7 @@ State 13: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{}, {}, {}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -557,13 +337,13 @@ State 13: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ hiTs = 3
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"RL", "PL", "SL">>
+/\ pc = <<"OP", "PL", "OP">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<1>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
@@ -574,7 +354,271 @@ State 13: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 14: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
+State 9: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 0, 0>>
+/\ inflight = {}
+/\ issued = 3
+/\ h = << >>
+/\ i = <<1, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 3
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "PL", "PL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<1>>, <<3>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 3
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 10: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 0, 3>>
+/\ inflight = {}
+/\ issued = 3
+/\ h = << >>
+/\ i = <<1, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 3
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "PL", "PC">>
+/\ acq = <<<<>>, <<>>, <<3>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<1>>, <<3>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 3
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 11: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<2, 0, 3>>
+/\ inflight = {}
+/\ issued = 3
+/\ h = << >>
+/\ i = <<1, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 3
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "PC", "PC">>
+/\ acq = <<<<>>, <<1>>, <<3>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<1>>, <<3>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 3
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 12: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<2, 0, 3>>
+/\ inflight = {}
+/\ issued = 3
+/\ h = << >>
+/\ i = <<1, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 3
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "PD", "PC">>
+/\ acq = <<<<>>, <<>>, <<3>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<1>>, <<3>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 3
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 13: <PD line 1265, col 13 to line 1280, col 53 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<2, 0, 3>>
+/\ inflight = {}
+/\ issued = 3
+/\ h = << >>
+/\ i = <<1, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 3
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "CT", "PC">>
+/\ acq = <<<<>>, <<>>, <<3>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<3>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 3
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 14: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<2, 0, 3>>
+/\ inflight = {}
+/\ issued = 3
+/\ h = << >>
+/\ i = <<1, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 3
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "CT", "PD">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<3>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 3
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 15: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<2, 0, 3>>
 /\ inflight = {}
@@ -593,7 +637,7 @@ State 14: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -601,14 +645,14 @@ State 14: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
 /\ hiTs = 3
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"RL", "PC", "SL">>
-/\ acq = <<<<>>, <<1>>, <<>>>>
+/\ pc = <<"RL", "CT", "PD">>
+/\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<1>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<3>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ ssi = 0
@@ -618,7 +662,7 @@ State 14: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 15: <RL line 1038, col 13 to line 1061, col 53 of module Mvcc>
+State 16: <RL line 1038, col 13 to line 1061, col 53 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<2, 0, 3>>
 /\ inflight = {}
@@ -637,7 +681,7 @@ State 15: <RL line 1038, col 13 to line 1061, col 53 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -645,14 +689,14 @@ State 15: <RL line 1038, col 13 to line 1061, col 53 of module Mvcc>
 /\ hiTs = 3
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"OP", "PC", "SL">>
-/\ acq = <<<<>>, <<1>>, <<>>>>
+/\ pc = <<"OP", "CT", "PD">>
+/\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<1>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<3>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ ssi = 0
@@ -662,7 +706,7 @@ State 15: <RL line 1038, col 13 to line 1061, col 53 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 16: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
+State 17: <PD line 1265, col 13 to line 1280, col 53 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<2, 0, 3>>
 /\ inflight = {}
@@ -681,7 +725,7 @@ State 16: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -689,14 +733,14 @@ State 16: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
 /\ hiTs = 3
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"OP", "PD", "SL">>
+/\ pc = <<"OP", "CT", "SL">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<1>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ ssi = 0
@@ -706,13 +750,13 @@ State 16: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 17: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
+State 18: <CT line 1341, col 13 to line 1355, col 75 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<2, 0, 3>>
 /\ inflight = {}
-/\ issued = 3
+/\ issued = 4
 /\ h = << >>
-/\ i = <<3, 2, 2>>
+/\ i = <<2, 2, 2>>
 /\ ck = <<0, 0, 0>>
 /\ gEver = {}
 /\ readTs = <<0, 0, 0>>
@@ -725,36 +769,80 @@ State 17: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
 /\ mn = << >>
-/\ hiTs = 3
+/\ hiTs = 4
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"PL", "PD", "SL">>
+/\ pc = <<"OP", "CP1", "SL">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<2>>, <<1>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
 /\ ssi = 0
-/\ clock = 3
+/\ clock = 4
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
 /\ wr = <<{}, {}, {}>>
 
-State 18: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
+State 19: <CP1 line 1357, col 14 to line 1371, col 58 of module Mvcc>
 /\ bef = << >>
-/\ lock = <<2, 1, 3>>
+/\ lock = <<2, 0, 3>>
 /\ inflight = {}
-/\ issued = 3
+/\ issued = 4
+/\ h = << >>
+/\ i = <<2, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"OP", "CP2", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 20: <OP line 958, col 13 to line 996, col 53 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<2, 0, 3>>
+/\ inflight = {}
+/\ issued = 4
 /\ h = << >>
 /\ i = <<3, 2, 2>>
 /\ ck = <<0, 0, 0>>
@@ -769,384 +857,208 @@ State 18: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
 /\ mn = << >>
-/\ hiTs = 3
+/\ hiTs = 4
 /\ cdone = {}
 /\ left = <<{}, {}, {}>>
-/\ pc = <<"PC", "PD", "SL">>
+/\ pc = <<"PL", "CP2", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<2>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{}, {}, {}>>
+
+State 21: <CP2 line 1373, col 14 to line 1383, col 58 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<2, 0, 3>>
+/\ inflight = {}
+/\ issued = 4
+/\ h = << >>
+/\ i = <<3, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {2}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"PL", "CP3", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<2>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
+
+State 22: <CP3 line 1385, col 14 to line 1403, col 54 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 0, 3>>
+/\ inflight = {}
+/\ issued = 4
+/\ h = << >>
+/\ i = <<3, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {2}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"PL", "UR", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<2>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
+
+State 23: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 0, 3>>
+/\ inflight = {}
+/\ issued = 4
+/\ h = << >>
+/\ i = <<3, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {2}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"PL", "Done", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<2>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
+
+State 24: <PL line 1147, col 13 to line 1186, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 1, 3>>
+/\ inflight = {}
+/\ issued = 4
+/\ h = << >>
+/\ i = <<3, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {2}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"PC", "Done", "SL">>
 /\ acq = <<<<2>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<2>>, <<1>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 3
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 19: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 3
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 3
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"PD", "PD", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<2>>, <<1>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 3
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 20: <PD line 1265, col 13 to line 1280, col 53 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 3
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 3
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"SL", "PD", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<1>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 3
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 21: <PD line 1265, col 13 to line 1280, col 53 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 3
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 3
-/\ cdone = {}
-/\ left = <<{}, {}, {}>>
-/\ pc = <<"SL", "CT", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 0
-/\ clock = 3
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 22: <SL line 1282, col 13 to line 1307, col 46 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 3
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 3
-/\ cdone = {}
-/\ left = <<{1}, {}, {}>>
-/\ pc = <<"SV", "CT", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
-/\ ssi = 1
-/\ clock = 3
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 23: <CT line 1341, col 13 to line 1355, col 75 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 4
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 4
-/\ cdone = {}
-/\ left = <<{1}, {}, {}>>
-/\ pc = <<"SV", "CP1", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<2>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
-/\ ssi = 1
+/\ ssi = 0
 /\ clock = 4
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = <<{}, {}, {}>>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
 
-State 24: <CP1 line 1357, col 14 to line 1371, col 58 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 4
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 4
-/\ cdone = {}
-/\ left = <<{1}, {}, {}>>
-/\ pc = <<"SV", "CP2", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
-/\ ssi = 1
-/\ clock = 4
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{}, {}, {}>>
-
-State 25: <CP2 line 1373, col 14 to line 1383, col 58 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 4
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 4
-/\ cdone = {2}
-/\ left = <<{1}, {}, {}>>
-/\ pc = <<"SV", "CP3", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
-/\ ssi = 1
-/\ clock = 4
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
-
-State 26: <SV line 1309, col 13 to line 1339, col 50 of module Mvcc>
-/\ bef = << >>
-/\ lock = <<2, 1, 3>>
-/\ inflight = {}
-/\ issued = 4
-/\ h = << >>
-/\ i = <<3, 2, 2>>
-/\ ck = <<0, 0, 0>>
-/\ gEver = {}
-/\ readTs = <<0, 0, 0>>
-/\ hEver = {}
-/\ gk = << >>
-/\ gr = << >>
-/\ scans = << >>
-/\ active = {}
-/\ bnd = << >>
-/\ att = << >>
-/\ epoch = 0
-/\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
-/\ now = << >>
-/\ ld = <<0, 0, 0>>
-/\ errs = {}
-/\ mn = << >>
-/\ hiTs = 4
-/\ cdone = {2}
-/\ left = <<{2}, {}, {}>>
-/\ pc = <<"RB1", "CP3", "SL">>
-/\ acq = <<<<>>, <<>>, <<>>>>
-/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0],
-   [st |-> 0, kind |-> "none", ts |-> 0] >>
-/\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
-/\ gThru = {}
-/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
-/\ ssi = 1
-/\ clock = 4
-/\ hThru = {}
-/\ cons = << >>
-/\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
-
-State 27: <CP3 line 1385, col 14 to line 1403, col 54 of module Mvcc>
+State 25: <PC line 1228, col 13 to line 1263, col 46 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<0, 1, 3>>
 /\ inflight = {}
@@ -1165,32 +1077,32 @@ State 27: <CP3 line 1385, col 14 to line 1403, col 54 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
 /\ mn = << >>
 /\ hiTs = 4
 /\ cdone = {2}
-/\ left = <<{2}, {}, {}>>
-/\ pc = <<"RB1", "UR", "SL">>
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"PD", "Done", "SL">>
 /\ acq = <<<<>>, <<>>, <<>>>>
 /\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
-/\ todo = <<<<>>, <<>>, <<>>>>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<2>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
-/\ ssi = 1
+/\ ssi = 0
 /\ clock = 4
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
 
-State 28: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
+State 26: <PD line 1265, col 13 to line 1280, col 53 of module Mvcc>
 /\ bef = << >>
 /\ lock = <<0, 1, 3>>
 /\ inflight = {}
@@ -1209,7 +1121,95 @@ State 28: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {2}
+/\ left = <<{}, {}, {}>>
+/\ pc = <<"SL", "Done", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 0
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
+
+State 27: <SL line 1282, col 13 to line 1307, col 46 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 1, 3>>
+/\ inflight = {}
+/\ issued = 4
+/\ h = << >>
+/\ i = <<3, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 2, val |-> 3]}>>
+/\ now = << >>
+/\ ld = <<0, 0, 0>>
+/\ errs = {}
+/\ mn = << >>
+/\ hiTs = 4
+/\ cdone = {2}
+/\ left = <<{1}, {}, {}>>
+/\ pc = <<"SV", "Done", "SL">>
+/\ acq = <<<<>>, <<>>, <<>>>>
+/\ rc = << [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0],
+   [st |-> 0, kind |-> "none", ts |-> 0] >>
+/\ rd = << >>
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
+/\ todo = <<<<>>, <<>>, <<>>>>
+/\ gThru = {}
+/\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
+/\ ssi = 1
+/\ clock = 4
+/\ hThru = {}
+/\ cons = << >>
+/\ wm = << >>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
+
+State 28: <SV line 1309, col 13 to line 1339, col 50 of module Mvcc>
+/\ bef = << >>
+/\ lock = <<0, 1, 3>>
+/\ inflight = {}
+/\ issued = 4
+/\ h = << >>
+/\ i = <<3, 2, 2>>
+/\ ck = <<0, 0, 0>>
+/\ gEver = {}
+/\ readTs = <<0, 0, 0>>
+/\ hEver = {}
+/\ gk = << >>
+/\ gr = << >>
+/\ scans = << >>
+/\ active = {}
+/\ bnd = << >>
+/\ att = << >>
+/\ epoch = 0
+/\ regTs = <<0, 0, 0>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -1223,7 +1223,7 @@ State 28: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
@@ -1232,7 +1232,7 @@ State 28: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
 
 State 29: <RB1 line 1523, col 14 to line 1540, col 58 of module Mvcc>
 /\ bef = << >>
@@ -1253,7 +1253,7 @@ State 29: <RB1 line 1523, col 14 to line 1540, col 58 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -1267,7 +1267,7 @@ State 29: <RB1 line 1523, col 14 to line 1540, col 58 of module Mvcc>
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
@@ -1276,7 +1276,7 @@ State 29: <RB1 line 1523, col 14 to line 1540, col 58 of module Mvcc>
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
 
 State 30: <RB2 line 1542, col 14 to line 1551, col 58 of module Mvcc>
 /\ bef = << >>
@@ -1297,7 +1297,7 @@ State 30: <RB2 line 1542, col 14 to line 1551, col 58 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {[st |-> 3, val |-> 1]}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -1311,7 +1311,7 @@ State 30: <RB2 line 1542, col 14 to line 1551, col 58 of module Mvcc>
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
@@ -1320,7 +1320,7 @@ State 30: <RB2 line 1542, col 14 to line 1551, col 58 of module Mvcc>
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
 
 State 31: <RB3 line 1553, col 14 to line 1561, col 58 of module Mvcc>
 /\ bef = << >>
@@ -1341,7 +1341,7 @@ State 31: <RB3 line 1553, col 14 to line 1561, col 58 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -1355,7 +1355,7 @@ State 31: <RB3 line 1553, col 14 to line 1561, col 58 of module Mvcc>
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
@@ -1364,7 +1364,7 @@ State 31: <RB3 line 1553, col 14 to line 1561, col 58 of module Mvcc>
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = <<{[st |-> 2, kind |-> "put", ts |-> 4]}, {}, {}>>
+/\ wr = <<{[st |-> 1, kind |-> "put", ts |-> 4]}, {}, {}>>
 
 State 32: <RB4 line 1563, col 14 to line 1576, col 58 of module Mvcc>
 /\ bef = << >>
@@ -1385,7 +1385,7 @@ State 32: <RB4 line 1563, col 14 to line 1576, col 58 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -1399,7 +1399,7 @@ State 32: <RB4 line 1563, col 14 to line 1576, col 58 of module Mvcc>
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
@@ -1408,7 +1408,7 @@ State 32: <RB4 line 1563, col 14 to line 1576, col 58 of module Mvcc>
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = << {[st |-> 2, kind |-> "put", ts |-> 4]},
+/\ wr = << {[st |-> 1, kind |-> "put", ts |-> 4]},
    {[st |-> 3, kind |-> "rb", ts |-> 3]},
    {} >>
 
@@ -1431,7 +1431,7 @@ State 33: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
 /\ att = << >>
 /\ epoch = 0
 /\ regTs = <<0, 0, 0>>
-/\ data = <<{[st |-> 2, val |-> 2]}, {}, {[st |-> 1, val |-> 3]}>>
+/\ data = <<{[st |-> 1, val |-> 2]}, {}, {[st |-> 2, val |-> 3]}>>
 /\ now = << >>
 /\ ld = <<0, 0, 0>>
 /\ errs = {}
@@ -1445,7 +1445,7 @@ State 33: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
    [st |-> 0, kind |-> "none", ts |-> 0],
    [st |-> 0, kind |-> "none", ts |-> 0] >>
 /\ rd = << >>
-/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 2 @@ 3 :> 1)
+/\ startTs = (0 :> 1 @@ 1 :> 3 @@ 2 :> 1 @@ 3 :> 2)
 /\ todo = <<<<>>, <<>>, <<>>>>
 /\ gThru = {}
 /\ commitTs = (0 :> 0 @@ 1 :> 0 @@ 2 :> 4 @@ 3 :> 0)
@@ -1454,10 +1454,10 @@ State 33: <UR line 1486, col 13 to line 1497, col 46 of module Mvcc>
 /\ hThru = {}
 /\ cons = << >>
 /\ wm = << >>
-/\ wr = << {[st |-> 2, kind |-> "put", ts |-> 4]},
+/\ wr = << {[st |-> 1, kind |-> "put", ts |-> 4]},
    {[st |-> 3, kind |-> "rb", ts |-> 3]},
    {} >>
 
 State 34: Stuttering
-Finished checking temporal properties in 00s at 2026-10-24 03:53:02
+Finished checking temporal properties in 00s at 2026-10-26 13:28:49
 87587 states generated, 34406 distinct states found, 0 states left on queue.

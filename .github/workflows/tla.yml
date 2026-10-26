@@ -5,9 +5,10 @@ name: TLA+
 # proofs/tla/ (a directory with an EXPECTED.txt) out to 16 shares by the seconds it took on a CI
 # runner (proofs/tla/ci-seconds.txt, or its family's tlc-run.txt), and checks share k against
 # EXPECTED.txt. The 16 jobs run at once, so a
-# new model needs no change to this workflow. The whole check stays within 20 minutes: a share
-# job is stopped at 20, and a configuration that runs past 18 is reported as having no verdict
-# (a model that outgrows the budget is cut down, not given more time).
+# new model needs no change to this workflow. The whole check stays within 15 minutes: a share
+# is stopped and fails at 13 (TLC_DEADLINE, the rest of the job's 15 is its setup), and a model
+# that outgrows the budget is cut down, not given more time. A local run, `run_tlc.sh local`,
+# keeps the same budget with 16 workers.
 
 on:
   push:
@@ -27,7 +28,7 @@ jobs:
   share:
     name: TLA+ share ${{ matrix.shard }} of 16
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +45,8 @@ jobs:
         env:
           TLC_SHARD: ${{ matrix.shard }}
           TLC_SHARDS: 16
-          TLC_LIMIT: 1080
+          TLC_LIMIT: 780
+          TLC_DEADLINE: 780
 
   tla:
     name: TLA+ model checking

@@ -39,8 +39,15 @@ java -cp "$JAR" tlc2.TLC 2>&1 | head -1 || true
 
 # CI runs the configurations in TLC_SHARDS shares at once, one per job (TLC_SHARD = 0, 1, ...);
 # without them this checks every family in one go.
+# A share past TLC_DEADLINE seconds is stopped and fails: the whole check keeps its budget.
 if [ -n "${TLC_SHARDS:-}" ]; then
-  TLA2TOOLS="$JAR" bash proofs/tla/run_tlc.sh shard "${TLC_SHARD:?TLC_SHARD is unset}" "$TLC_SHARDS"
+  rc=0
+  TLA2TOOLS="$JAR" timeout --signal=KILL "${TLC_DEADLINE:-780}" \
+    bash proofs/tla/run_tlc.sh shard "${TLC_SHARD:?TLC_SHARD is unset}" "$TLC_SHARDS" || rc=$?
+  if [ "$rc" = 137 ]; then
+    echo "share $TLC_SHARD did not finish within ${TLC_DEADLINE:-780} s: a model outgrew the budget" >&2
+  fi
+  exit "$rc"
 else
   TLA2TOOLS="$JAR" bash proofs/tla/run_tlc.sh all
 fi

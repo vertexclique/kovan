@@ -6,6 +6,9 @@
 #   bash proofs/tla/run_tlc.sh all                     every family
 #   bash proofs/tla/run_tlc.sh shard 2 8               the third of 8 shares of every family's
 #                                                      configurations (CI runs the 8 at once)
+#   bash proofs/tla/run_tlc.sh local                   every family in 16 shares at once, one
+#                                                      worker each, at the lowest priority, within
+#                                                      15 minutes; rewrites every tlc-run.txt
 #   bash proofs/tla/run_tlc.sh plan 8                  which share each configuration is in
 # The TLA+ tools come from $TLA2TOOLS when it names a tla2tools.jar, otherwise from
 # proofs/tla/.tools/tla2tools.jar, fetched on first use (release v1.7.4, TLC 2.19, the version every
@@ -13,26 +16,34 @@
 # TLC_LIMIT the seconds each configuration may take (default 3600). A configuration expected to
 # break a property runs one worker, so breadth-first search keeps its trace the shortest, and the
 # trace is kept in <family>/<name>_counterexample.txt. Exit status 0 means every result matched.
+# The whole check, of every family, stays within 15 minutes, locally (`local`, 16 workers in all)
+# and in CI (16 share jobs at once): a share past TLC_DEADLINE seconds (default 900) is stopped
+# and fails, and a model that outgrows the budget is cut down, not given more time.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 
 # Every configuration of every family as "family name seconds": the seconds it took on a CI
 # runner as ci-seconds.txt records them (tools/tla-ci-seconds.sh writes it from a CI run), else
 # the seconds its family's tlc-run.txt recorded, else 60. CI's shares are dealt by these, and the
-# ratio of a CI runner's time to a local run's differs from family to family.
+# ratio of a CI runner's time to a local run's differs from family to family. With TLC_COSTS=local
+# (what `local` sets) the family's tlc-run.txt comes first: the one-worker seconds a `local` run
+# recorded.
 costs() {
   local f
   for f in "$here"/*/EXPECTED.txt; do
     awk -v fam="$(basename "$(dirname "$f")")" -v rec="$(dirname "$f")/tlc-run.txt" \
-        -v ci="$here/ci-seconds.txt" '
-      BEGIN {
+        -v ci="$here/ci-seconds.txt" -v pref="${TLC_COSTS:-ci}" '
+      function readrec() {
         while ((getline l < rec) > 0) {
           split(l, c, /[ \t]+/); if (c[4] ~ /^[0-9]+$/) sec[c[1]] = c[4]
         }
+      }
+      function readci() {
         while ((getline l < ci) > 0) {
           split(l, c, /[ \t]+/); if (c[1] !~ /^#/ && c[2] ~ /^[0-9]+$/) sec[c[1]] = c[2]
         }
       }
+      BEGIN { if (pref == "local") { readci(); readrec() } else { readrec(); readci() } }
       !/^#/ && NF {
         s = ($1 in sec) ? sec[$1] : 60
         printf "%s %s %d\n", fam, $1, (s < 1 ? 1 : s)
@@ -74,6 +85,49 @@ if [ "$family" = shard ]; then
     mapfile -t names < <(printf '%s\n' "$mine" | awk -v f="$fam" '$2 == f {print $3}')
     bash "$0" "$fam" "${names[@]}" || bad=1
   done
+  exit $bad
+fi
+if [ "$family" = local ]; then
+  n=16; out="$(mktemp -d)"; pids=()
+  t0=$(date +%s)
+  echo "every family in $n shares at once, one worker each, within ${TLC_DEADLINE:-900} s"
+  for k in $(seq 0 $((n - 1))); do
+    TLC_WORKERS=1 TLC_COSTS=local timeout --signal=KILL "${TLC_DEADLINE:-900}" \
+      nice -n 19 ionice -c 3 bash "$0" shard "$k" "$n" > "$out/$k.log" 2>&1 &
+    pids+=($!)
+  done
+  bad=0
+  for k in $(seq 0 $((n - 1))); do
+    if ! wait "${pids[$k]}"; then
+      bad=1
+      grep -q "^share $k of" "$out/$k.log" && ! grep -q " NO$" "$out/$k.log" &&
+        echo "share $k: stopped at the ${TLC_DEADLINE:-900} s budget (or failed), see below"
+    fi
+  done
+  t1=$(date +%s)
+  # Every family's tlc-run.txt from this run's rows, in EXPECTED.txt's order.
+  jarv=$(java -cp "$jar" tlc2.TLC -h 2>&1 | grep -o 'Version [0-9.]* of [0-9A-Za-z ]*' | head -1)
+  for f in "$here"/*/EXPECTED.txt; do
+    fam="$(basename "$(dirname "$f")")"
+    { echo "TLC run of every configuration in proofs/tla/$fam, $(date -u '+%Y-%m-%d %H:%M UTC')."
+      echo "Written by proofs/tla/run_tlc.sh local, not by hand. $jarv."
+      echo "Java -Xmx8g; one worker, $n shares of every family at once. Limit: ${TLC_LIMIT:-3600} s each."
+      echo; printf "%-34s %12s %10s %6s  %-26s %-26s %s\n" configuration generated distinct sec result expected match
+      m=0; total=0
+      while read -r name; do
+        total=$((total + 1))
+        row=$(grep -h "^$name " "$out"/*.log | head -1)
+        if [ -n "$row" ]; then echo "$row"; case "$row" in *" yes") m=$((m + 1));; esac
+        else printf "%-34s %12s %10s %6s  %-26s %-26s %s\n" "$name" 0 0 - "not-run" "$(awk -v n="$name" '$1==n{print $3}' "$f")" NO; fi
+      done < <(awk '!/^#/ && NF {print $1}' "$f")
+      echo; echo "results matching EXPECTED.txt: $m of $total"
+    } > "$(dirname "$f")/tlc-run.txt"
+  done
+  grep -h -E " NO$|stopped|ERROR" "$out"/*.log
+  matched=$(cat "$here"/*/tlc-run.txt | grep -c ' yes$'); all=$(cat "$here"/*/EXPECTED.txt | awk '!/^#/ && NF' | wc -l)
+  echo "local run: $matched of $all configurations match EXPECTED.txt, in $((t1 - t0)) s of wall time"
+  [ "$matched" = "$all" ] || bad=1
+  rm -rf "$out"
   exit $bad
 fi
 if [ "$family" = all ]; then

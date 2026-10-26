@@ -20,7 +20,8 @@ none for the code as built.
 | [`atom/`](atom/README.md) | `kovan::Atom` and `AtomOption`: the pointer word, nodes at addresses that can be reused, load, store, `swap` and `take` with the `Removed` that reads the value in its node, `compare_and_swap` and its success guard, `rcu`'s retry loop, `into_inner` and `Drop`, over the reclamation's birth-epoch rule; one object per value, drop once, no use after free, no leak, linearizability, lock-free `rcu`; the 0.1.22 copy in `Removed` and six other defects as mutations | `just tla atom` |
 | [`stm/`](stm/README.md) | `kovan_stm`: the lock words, the version clock, a load's validation (a repeat load too), the commit's locking, clock, read-set validation, publication and unlocking, rollback and commit hooks, the drops and retires of values and variables; serializability, opacity, all-or-none, drop once, no use after free, no leak, termination; the 0.1.22 re-read and four other defects as mutations | `just tla stm` |
 | [`mvcc/`](mvcc/README.md) | `kovan_mvcc`: the timestamp oracle, `begin`'s registration, reads at their read timestamp that meet locks and back off, prewrite's three passes, the SSI validation, the primary's and the secondaries' commit, rollback, the embedder's in-flight registry and `safe_read_ts`, and a GC with `gc_watermark`; snapshot reads, no dirty read, first committer wins, all or nothing, serial reads, a sound watermark and read horizon, no leak, termination; the six defects of 0.1.22 it found and nineteen other wrong rules as mutations | `just tla mvcc` |
-| [`channel/`](channel/README.md) | `kovan_channel`: both flavors' list and counts, the wait lists, `Signal` and `AsyncSignal` with its `AtomicWaker`, the blocking, deadline and async waits, the bounded sends, the receiver count, the disconnect and `select!`; the list's safety and FIFO order, no loss, no duplicate, no lost wakeup, the waker's contract, termination; the eight defects it found (seven of 0.1.22, one in the fix as first written) and thirty other wrong rules as mutations | `just tla channel` |
+| [`channel/`](channel/README.md) | `kovan_channel`: both flavors' list and counts, the wait lists, `Signal` and `AsyncSignal` with its `AtomicWaker`, the blocking, deadline and async waits, the bounded sends, the receiver count, the disconnect and `select!`; the list's safety and FIFO order, no loss, no duplicate, no lost wakeup, the waker's contract, termination; the eight defects it found (seven of 0.1.22, one in the fix as first written), two of 0.2.0 it pins (a wait list that kept the waits that ended, a `select!` that used up a wakeup) and thirty-one other wrong rules as mutations | `just tla channel` |
+| [`waitslots/`](waitslots/README.md) | `kovan_channel`'s wait list at its atomic steps: the slots and the count, registration with its takeover, the abandon, `notify_one`'s scan bounded by the count, `notify_all`; no lost wakeup, one entry per waiter, a count that covers the entries; the 0.2.0 list that kept abandoned entries and five other wrong rules as mutations | `just tla waitslots` |
 
 Each family's README describes its model, what it leaves out and why, its properties, its
 configurations, its code map and its TLC results.
@@ -41,10 +42,14 @@ request against `master`, which fetches tla2tools.jar v1.7.4, checks its SHA-256
 configuration of every family out to the 16 shares, longest first by the seconds it took on a CI
 runner as `ci-seconds.txt` records them (`tools/tla-ci-seconds.sh` writes it from a CI run; for a
 configuration it does not list, the seconds its family's `tlc-run.txt` recorded, or 60), so each
-share takes about a sixteenth of the whole; `bash proofs/tla/run_tlc.sh plan 16` prints the shares. The check stays within 20 minutes:
-a share job is stopped at 20, and a configuration that runs past 18 reports no verdict, so a
-model that outgrows the budget is cut down rather than given more time. A new push to a pull
-request cancels the run it supersedes.
+share takes about a sixteenth of the whole; `bash proofs/tla/run_tlc.sh plan 16` prints the
+shares. Every proof check stays within 15 minutes, in CI and locally. In CI a share is stopped and
+fails at 13 minutes (`TLC_DEADLINE`, the rest of its job's 15 being setup). Locally, `bash
+proofs/tla/run_tlc.sh local` (`just tla-all`) runs the same 16 shares at once, one worker each at
+the lowest priority, dealt by the one-worker seconds the last local run wrote to each family's
+`tlc-run.txt`; a share still running at 15 minutes is stopped and fails, and the run rewrites every
+`tlc-run.txt`. A model that outgrows the budget is cut down rather than given more time. A new
+push to a pull request cancels the run it supersedes.
 
 ## What the map models check
 
