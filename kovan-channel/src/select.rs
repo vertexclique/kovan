@@ -78,10 +78,25 @@ macro_rules! select {
             use std::sync::atomic::{Ordering, fence};
             use $crate::signal::Signal;
 
+            // A wakeup this select! took, which may have been meant for a
+            // waiter on another channel than the arm it takes: it passes one
+            // on to every channel that still holds a value.
+            let mut woken = false;
+            let pass_on = || {
+                $(
+                    if !$rx.is_empty() {
+                        $rx.wake_one_waiter();
+                    }
+                )*
+            };
+
             loop {
                 // 1. Try all
                 $(
                     if let Some($name) = $rx.try_recv() {
+                        if woken {
+                            pass_on();
+                        }
                         #[allow(unreachable_code)]
                         break $body;
                     }
@@ -93,6 +108,9 @@ macro_rules! select {
                 if true $(&& $rx.is_disconnected())* {
                     $(
                         if let Some($name) = $rx.try_recv() {
+                            if woken {
+                                pass_on();
+                            }
                             #[allow(unreachable_code)]
                             break $body;
                         }
@@ -105,8 +123,11 @@ macro_rules! select {
 
                 // 2. Register on every channel that can still deliver. A
                 // fresh `Signal` every iteration: `Signal` has no reset. A
-                // disconnected channel gets none: no sender is left to pop
-                // its wait list, so entries there would pile up for good.
+                // disconnected channel gets none: nothing is left to wake
+                // its waiters but its disconnect, which already happened.
+                // A wakeup taken by an earlier pass found nothing: none is
+                // owed now.
+                woken = false;
                 let signal = Arc::new(Signal::new());
                 let mut live = 0usize;
                 $(
@@ -139,8 +160,11 @@ macro_rules! select {
                 // check above, and nothing is left to end the wait, so that
                 // check runs again.
                 if ready || live == 0 || live_now < live {
-                    // Not going to wait: withdraw the signal, and pass on a
-                    // wakeup a channel delivered to it first.
+                    // Not going to wait: take the signal back, withdraw it,
+                    // and pass on a wakeup a channel delivered to it first.
+                    $(
+                        $rx.unregister_signal(&*signal);
+                    )*
                     if !signal.cancel() {
                         $(
                             $rx.wake_one_waiter();
@@ -149,8 +173,27 @@ macro_rules! select {
                     continue;
                 }
 
-                // 4. Wait
-                signal.wait();
+                // 4. Wait: until a channel wakes the signal, or until the
+                // earliest message a clock (`after`, `tick`) has due, which
+                // no channel wakes it for.
+                let mut due: Option<std::time::Instant> = None;
+                $(
+                    if let Some(at) = $rx.next_due() {
+                        due = Some(due.map_or(at, |due| due.min(at)));
+                    }
+                )*
+                match due {
+                    Some(due) => {
+                        signal.wait_deadline(due);
+                    }
+                    None => signal.wait(),
+                }
+                // Take the signal back from every channel. A cancel that
+                // loses means a channel woke it: that wakeup is this pass's.
+                $(
+                    $rx.unregister_signal(&*signal);
+                )*
+                woken = !signal.cancel();
             }
         }
     };

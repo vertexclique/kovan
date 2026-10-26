@@ -1,0 +1,18 @@
+TLC run of every configuration in proofs/tla/waitslots, 2026-10-26 12:33 UTC.
+Written by proofs/tla/run_tlc.sh local, not by hand. Version 2.19 of 08 August 2024.
+Java -Xmx8g; one worker, 16 shares of every family at once. Limit: 780 s each.
+
+configuration                         generated   distinct    sec  result                     expected                   match
+WS_recv                                       0          0      -  not-run                    pass                       NO
+WS_three                                      0          0      -  not-run                    pass                       NO
+WS_deadline                                   0          0      -  not-run                    pass                       NO
+WS_disc                                       0          0      -  not-run                    pass                       NO
+WS_mixed                                      0          0      -  not-run                    pass                       NO
+WS_mut_no_count                               0          0      -  not-run                    violated:NoLostWakeup      NO
+WS_mut_abandon_keeps_entry                    0          0      -  not-run                    violated:OneEntryPerWaiter NO
+WS_mut_takeover_live                          0          0      -  not-run                    violated:NoLostWakeup      NO
+WS_mut_no_pass_on                             0          0      -  not-run                    violated:NoLostWakeup      NO
+WS_mut_decrement_first                        0          0      -  not-run                    violated:CountCovers       NO
+WS_mut_scan_stops_short                       0          0      -  not-run                    violated:NoLostWakeup      NO
+
+results matching EXPECTED.txt: 0 of 11

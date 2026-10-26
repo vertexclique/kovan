@@ -103,10 +103,24 @@ fn bounded_try_recv_roundtrip() {
     assert_eq!(r.try_recv(), None);
 }
 
+/// A capacity of 0 is a rendezvous: a send's value goes in and the send
+/// stays pending until a receiver has taken it. (It panicked.)
 #[test]
-#[should_panic(expected = "bounded channel capacity must be greater than zero")]
-fn bounded_zero_capacity_panics() {
-    let (_s, _r) = bounded::<i32>(0);
+fn bounded_zero_capacity_is_a_rendezvous() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    let (s, r) = bounded::<i32>(0);
+    assert_eq!(r.try_recv(), None);
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut send = pin!(s.send_async(7));
+    assert!(
+        send.as_mut().poll(&mut cx).is_pending(),
+        "a send was done before any receive"
+    );
+    assert_eq!(r.try_recv(), Some(7));
+    assert_eq!(send.as_mut().poll(&mut cx), Poll::Ready(()));
+    assert_eq!(r.try_recv(), None);
 }
 
 #[test]

@@ -220,14 +220,12 @@ fn shuttle_channel_blocking_recv_steals_notified_message_reparks() {
 /// independent locations (the registration queue, the message) could let
 /// both sides observe stale state and the wakeup vanish.
 ///
-/// The stale entry (registered and immediately self-notified, exactly
+/// The entry that stops waiting (registered and then abandoned, exactly
 /// what a `recv()` does when its own post-register recheck finds a
-/// message and never parks -- see "why registration can go stale" in the
-/// `waitlist` module docs) sits in the queue *ahead* of the fresh one by
-/// construction (`SegQueue` is a linearizable FIFO: a push that returned
-/// comes out before one that began after it), so `notify_one` must pop
-/// through it and land on the live, concurrently-registered receiver
-/// instead of discarding the wakeup on the stale head.
+/// message and never parks -- see "abandoning an entry" in the
+/// `waitlist` module docs) was registered *ahead* of the fresh one, so
+/// `notify_one` must not spend the wakeup on it: it reaches the live,
+/// concurrently-registered receiver.
 fn notify_one_reaches_fresh_registration_past_stale_entry() {
     let (tx, rx) = unbounded::<u64>();
 
@@ -421,4 +419,42 @@ fn shuttle_channel_select_sees_a_disconnect_during_its_registration() {
         WINDOW_RUNS,
         3,
     );
+}
+
+/// (l) `select!` woken by one channel that takes another arm's value passes
+/// the wakeup on (`CH_select_pass`, the model's program): it prefers B, a
+/// receiver waits on A behind it, and A's send wakes the select while B's
+/// send lands before it runs. Without the pass-on the receiver parks beside
+/// A's value for good, which shuttle reports as a deadlock. When the select
+/// takes A's value instead, A gets a second one, so every schedule ends.
+fn select_passes_on_a_wakeup_it_did_not_use() {
+    let (ta, ra) = unbounded::<u64>();
+    let (tb, rb) = unbounded::<u64>();
+    let (ta2, ra2) = (ta.clone(), ra.clone());
+    let selecting = shuttle::thread::spawn(move || {
+        kovan_channel::select! {
+            v = rb => v,
+            v = ra2 => v,
+        }
+    });
+    let receiving = shuttle::thread::spawn(move || ra.recv());
+    let sending = shuttle::thread::spawn(move || {
+        ta.send(1);
+        tb.send(2);
+    });
+    sending.join().unwrap();
+    let selected = selecting.join().unwrap();
+    if selected == 1 {
+        ta2.send(3);
+    }
+    let received = receiving.join().unwrap();
+    assert!(
+        matches!((selected, received), (2, Some(1)) | (1, Some(3))),
+        "select took {selected}, the receiver {received:?}"
+    );
+}
+
+#[test]
+fn shuttle_channel_select_passes_on_a_wakeup_it_did_not_use() {
+    shuttle::check_pct(select_passes_on_a_wakeup_it_did_not_use, WINDOW_RUNS, 3);
 }

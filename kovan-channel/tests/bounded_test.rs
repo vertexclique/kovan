@@ -9,10 +9,35 @@ fn test_bounded_capacity_one() {
     assert_eq!(r.recv(), Some(42));
 }
 
+/// A capacity of 0 is a rendezvous: a send returns once a receiver has
+/// taken its value, and before that `try_recv` finds it. (It panicked.)
 #[test]
-#[should_panic(expected = "bounded channel capacity must be greater than zero")]
-fn test_bounded_zero_capacity_panics() {
-    let (_s, _r) = bounded::<i32>(0);
+#[cfg_attr(miri, ignore)] // threads
+fn test_bounded_zero_capacity_is_a_rendezvous() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (s, r) = bounded::<i32>(0);
+    assert_eq!(
+        r.try_recv(),
+        None,
+        "a rendezvous with no send under way held a value"
+    );
+    let returned = Arc::new(AtomicBool::new(false));
+    let sender = {
+        let returned = Arc::clone(&returned);
+        thread::spawn(move || {
+            s.send(7);
+            returned.store(true, Ordering::SeqCst);
+        })
+    };
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        !returned.load(Ordering::SeqCst),
+        "a send returned before any receive"
+    );
+    assert_eq!(r.recv(), Some(7));
+    sender.join().unwrap();
+    assert!(returned.load(Ordering::SeqCst));
 }
 
 #[test]

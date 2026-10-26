@@ -80,6 +80,18 @@ WakeNotLost == \A s \in Sigs : owed[s] => InFlight(s)
 SelectOnce == \A t \in Threads : stake[t] <= 1
 \* The configuration's bound on signals never stopped a wait.
 NoBound == ~bound
+\* Each waiter holds at most one entry in each wait list: a wait that ended (woken, its recheck
+\* met, its deadline passed, its future completed or dropped) left nothing behind, so a list's
+\* entries, and WaitList's slots in use, are never more than its waiters at their peak.
+OneEntryPerWaiter ==
+    \A x \in Sides \X Chans, t \in Threads :
+        Cardinality({k \in DOMAIN wl[x] : sown[wl[x][k]] = t}) <= 1
+\* Once every receiver of an unbounded channel is gone and the last one drained it, the channel
+\* keeps at most one value per sender (one whose send read the flag before it was set), not every
+\* value sent since.
+NoneKeptForNoReceiver == \A c \in drained : Len(aq[c]) <= Cardinality(SendersOf(c))
+\* A rendezvous send returns only once its value was taken or every receiver is gone.
+RdvSound == "rdv_early" \notin errs
 
 \* No lost wakeup: when every thread is done or waits with no step it can take (parked without
 \* its unpark token; a future pending, not woken, that its executor neither polls spuriously nor
@@ -92,6 +104,8 @@ Blocked(t) ==
     \/ pc[t] \in {"AR9", "AS8"} /\ ~woken[t] /\ ~Spurious /\ ~Cancel
 Has(t) ==
     CASE CurOp(t).op \in {"recv", "arecv"} -> aq[CurOp(t).c] # <<>> \/ disc[CurOp(t).c]
+      [] CurOp(t).op \in SendOps /\ acking[t] ->
+            rtaken[CurOp(t).c] > btk[t] \/ rgone[CurOp(t).c]
       [] CurOp(t).op \in SendOps -> len[CurOp(t).c] < Cap \/ rgone[CurOp(t).c]
       [] CurOp(t).op = "select" -> (\E ch \in Chans : aq[ch] # <<>>) \/ \A ch \in Chans : disc[ch]
       [] OTHER -> FALSE
@@ -200,6 +214,37 @@ P_select == [t \in {1, 2, 3} |->
     CASE t = 1 -> <<OSend(1)>>
       [] t = 2 -> <<OSend(2)>>
       [] t = 3 -> <<OSelect>>]
+\* select! over two channels woken by the second one's send while a receiver waits there too, and
+\* taking the first one's value: it passes the wakeup it took on (select_no_pass_on).
+P_select_pass == [t \in {1, 2, 3, 4} |->
+    CASE t = 1 -> <<OSelect>>
+      [] t = 2 -> <<ORecv(2)>>
+      [] t = 3 -> <<OSend(2)>>
+      [] t = 4 -> <<OSend(1)>>]
+\* Two select!s over two channels: each pass that stops waiting takes its signal back from both
+\* (select_keeps_entries).
+P_select_twice == [t \in {1, 2, 3} |->
+    CASE t = 1 -> <<OSelect, OSelect>>
+      [] t = 2 -> <<OSend(1)>>
+      [] t = 3 -> <<OSend(2)>>]
+\* Two receives with a deadline in a row, on a channel with one send: a wait that times out takes
+\* its entry back before the next one registers (abandon_keeps_entry).
+P_deadline_twice == [t \in {1, 2} |->
+    CASE t = 1 -> <<ODeadline(1), ODeadline(1)>>
+      [] t = 2 -> <<OSend(1)>>]
+\* A rendezvous: a sender of two values, then its drop; a receiver of two values (CH_rdv).
+P_rdv == [t \in {1, 2} |->
+    CASE t = 1 -> <<OSend(1), OSend(1), ODrop(1)>>
+      [] t = 2 -> <<ORecv(1), ORecv(1)>>]
+\* A rendezvous send whose only receiver tries once and goes: the send returns (CH_rdv_gone).
+P_rdv_gone == [t \in {1, 2} |->
+    CASE t = 1 -> <<OSend(1), OSend(1)>>
+      [] t = 2 -> <<OTry(1)>>]
+\* A sender keeping its handle sends three values on a channel whose only receiver tries once and
+\* goes (unbounded_no_receiver_count).
+P_send_gone == [t \in {1, 2} |->
+    CASE t = 1 -> <<OTry(1)>>
+      [] t = 2 -> <<OSend(1), OSend(1), OSend(1)>>]
 \* select! over one channel.
 P_select1 == [t \in {1, 2} |->
     CASE t = 1 -> <<OSend(1), OSend(1), ODrop(1)>>
@@ -234,7 +279,10 @@ P_s_s_tt == [t \in {1, 2, 3} |->
     CASE t = 1 -> <<OSend(1), ODrop(1)>> [] t = 2 -> <<OSend(1), ODrop(1)>> [] t = 3 -> <<OTry(1), OTry(1)>>]
 P_s_t_t == [t \in {1, 2, 3} |->
     CASE t = 1 -> <<OSend(1), ODrop(1)>> [] t = 2 -> <<OTry(1)>> [] t = 3 -> <<OTry(1)>>]
-P_s_s == [t \in {1, 2} |-> CASE t = 1 -> <<OSend(1), ODrop(1)>> [] t = 2 -> <<OSend(1), ODrop(1)>>]
+\* Two senders racing to link, and a receiver that tries once: with a receiver alive, a send links
+\* its node (with none, it drops its value and never links).
+P_s_s == [t \in {1, 2, 3} |-> CASE t = 1 -> <<OSend(1), ODrop(1)>> [] t = 2 -> <<OSend(1), ODrop(1)>>
+                                 [] t = 3 -> <<OTry(1)>>]
 P_ss_r_t == [t \in {1, 2, 3} |->
     CASE t = 1 -> <<OSend(1), OSend(1), ODrop(1)>> [] t = 2 -> <<ORecv(1)>> [] t = 3 -> <<OTry(1)>>]
 P_d_sd_r == [t \in {1, 2, 3} |->

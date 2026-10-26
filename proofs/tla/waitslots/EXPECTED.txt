@@ -1,0 +1,12 @@
+# configuration                  module             expected
+WS_recv                            WaitSlots          pass
+WS_three                           WaitSlots          pass
+WS_deadline                        WaitSlots          pass
+WS_disc                            WaitSlots          pass
+WS_mixed                           WaitSlots          pass
+WS_mut_no_count                    WaitSlots          violated:NoLostWakeup
+WS_mut_abandon_keeps_entry         WaitSlots          violated:OneEntryPerWaiter
+WS_mut_takeover_live               WaitSlots          violated:NoLostWakeup
+WS_mut_no_pass_on                  WaitSlots          violated:NoLostWakeup
+WS_mut_decrement_first             WaitSlots          violated:CountCovers
+WS_mut_scan_stops_short            WaitSlots          violated:NoLostWakeup

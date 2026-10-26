@@ -28,6 +28,7 @@ State 1: <Initial predicate>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -85,7 +86,9 @@ State 1: <Initial predicate>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<1>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -99,6 +102,7 @@ State 1: <Initial predicate>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -108,6 +112,7 @@ State 1: <Initial predicate>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -121,6 +126,7 @@ State 1: <Initial predicate>
 /\ pc = (0 :> "TD1" @@ 1 :> "T1" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -132,6 +138,7 @@ State 1: <Initial predicate>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -155,12 +162,12 @@ State 1: <Initial predicate>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -173,7 +180,7 @@ State 1: <Initial predicate>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
+State 2: <T1 line 5670, col 13 to line 6145, col 79 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -201,6 +208,7 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -267,7 +275,9 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<1>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -281,6 +291,7 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -290,6 +301,7 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -303,6 +315,7 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -314,6 +327,7 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -337,12 +351,12 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -355,7 +369,7 @@ State 2: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
+State 3: <SE1 line 2512, col 14 to line 2560, col 35 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -383,6 +397,7 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -449,7 +464,9 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<1>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -463,6 +480,7 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -472,6 +490,7 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -485,6 +504,7 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE2" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -496,6 +516,7 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -519,12 +540,12 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -537,7 +558,7 @@ State 3: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
+State 4: <SE2 line 2578, col 14 to line 2593, col 67 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -565,6 +586,7 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -631,7 +653,9 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<1>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -645,6 +669,7 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -654,6 +679,7 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -667,6 +693,7 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE3" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -678,6 +705,7 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -701,12 +729,12 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -719,7 +747,7 @@ State 4: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
+State 5: <SE3 line 2595, col 14 to line 2635, col 73 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -747,6 +775,7 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -813,7 +842,9 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<1>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -827,6 +858,7 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -836,6 +868,7 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -849,6 +882,7 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE4" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -860,6 +894,7 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -883,12 +918,12 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -901,7 +936,7 @@ State 5: <SE3 line 2376, col 14 to line 2416, col 35 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
+State 6: <SE4 line 2637, col 14 to line 2671, col 55 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -929,6 +964,7 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -995,7 +1031,9 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -1009,6 +1047,7 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1018,6 +1057,7 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -1031,6 +1071,7 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE5" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1042,6 +1083,7 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -1065,12 +1107,12 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1083,7 +1125,7 @@ State 6: <SE4 line 2418, col 14 to line 2451, col 47 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
+State 7: <SE5 line 2673, col 14 to line 2691, col 52 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1111,6 +1153,7 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1168,7 +1211,9 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -1182,6 +1227,7 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1191,6 +1237,7 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -1204,6 +1251,7 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "T1" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1215,6 +1263,7 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1238,12 +1287,12 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1256,7 +1305,7 @@ State 7: <SE5 line 2453, col 14 to line 2470, col 50 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
+State 8: <T1 line 5670, col 13 to line 6145, col 79 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1284,6 +1333,7 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1350,7 +1400,9 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -1364,6 +1416,7 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1373,6 +1426,7 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -1386,6 +1440,7 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1397,6 +1452,7 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -1420,12 +1476,12 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1438,7 +1494,7 @@ State 8: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
+State 9: <T1 line 5670, col 13 to line 6145, col 79 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1466,6 +1522,7 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1538,7 +1595,9 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -1552,6 +1611,7 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1561,6 +1621,7 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -1574,6 +1635,7 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "TR1" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1585,6 +1647,7 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -1608,12 +1671,12 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1626,7 +1689,7 @@ State 9: <T1 line 5165, col 13 to line 5610, col 81 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
+State 10: <TR1 line 2238, col 14 to line 2258, col 67 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1654,6 +1717,7 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1726,7 +1790,9 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -1740,6 +1806,7 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1749,6 +1816,7 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -1762,6 +1830,7 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "TR2" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1773,6 +1842,7 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -1796,12 +1866,12 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1814,7 +1884,7 @@ State 10: <TR1 line 2031, col 14 to line 2050, col 58 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
+State 11: <TR2 line 2280, col 14 to line 2320, col 40 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1842,6 +1912,7 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -1914,7 +1985,9 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -1928,6 +2001,7 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1937,6 +2011,7 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -1950,6 +2025,7 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "TR3" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -1961,6 +2037,7 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -1984,12 +2061,12 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2002,7 +2079,7 @@ State 11: <TR2 line 2071, col 14 to line 2110, col 40 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
+State 12: <TR3 line 2322, col 14 to line 2365, col 40 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2030,6 +2107,7 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<11>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2102,7 +2180,9 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
 /\ dc_ = 1
 /\ retired = {}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -2116,6 +2196,7 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2125,6 +2206,7 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -2138,6 +2220,7 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "TR4h" @@ 3 :> "T1")
 /\ freed = {}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2149,6 +2232,7 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 0, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -2172,12 +2256,12 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2190,7 +2274,7 @@ State 12: <TR3 line 2112, col 14 to line 2154, col 40 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
+State 13: <TR4h line 2387, col 15 to line 2438, col 68 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2218,6 +2302,7 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2284,7 +2369,9 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
 /\ dc_ = 1
 /\ retired = {11}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -2298,6 +2385,7 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2307,6 +2395,7 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -2320,6 +2409,7 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE1" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {11}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2331,6 +2421,7 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 11, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -2354,12 +2445,12 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2372,7 +2463,7 @@ State 13: <TR4h line 2175, col 15 to line 2225, col 65 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
+State 14: <SE1 line 2512, col 14 to line 2560, col 35 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2400,6 +2491,7 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2466,7 +2558,9 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ dc_ = 1
 /\ retired = {11}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -2480,6 +2574,7 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2489,6 +2584,7 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -2502,6 +2598,7 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE2" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {11}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2513,6 +2610,7 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 11, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -2536,12 +2634,12 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2554,7 +2652,7 @@ State 14: <SE1 line 2297, col 14 to line 2343, col 79 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
+State 15: <SE2 line 2578, col 14 to line 2593, col 67 of module Channel>
 /\ xv = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2582,6 +2680,7 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ skind = <<"thread", "thread", "thread", "thread", "thread", "thread">>
 /\ aq = <<<<>>>>
 /\ dsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ drained = {}
 /\ bc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2648,7 +2747,9 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ dc_ = 1
 /\ retired = {11}
 /\ disc = <<FALSE>>
+/\ dch = <<0, 0, 0>>
 /\ dropped = {}
+/\ acking = <<FALSE, FALSE, FALSE>>
 /\ tail = <<11>>
 /\ stake = <<0, 0, 0>>
 /\ aws = <<0, 0, 0, 0, 0, 0>>
@@ -2662,6 +2763,7 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ apop = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ len = <<0>>
 /\ ready = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wk_ = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ bsg = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ nc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2671,6 +2773,7 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
+/\ btk = <<0, 0, 0>>
 /\ said = {}
 /\ rdone = <<{}, {}, {}>>
 /\ nstore = ( 0 :> defaultInitValue @@
@@ -2684,6 +2787,7 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ pc = (0 :> "TD1" @@ 1 :> "SE3" @@ 2 :> "T1" @@ 3 :> "T1")
 /\ freed = {11}
 /\ regd = (0 :> {} @@ 1 :> {} @@ 2 :> {} @@ 3 :> {})
+/\ rsent = <<0>>
 /\ sown = <<0, 0, 0, 0, 0, 0>>
 /\ rc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
@@ -2695,6 +2799,7 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
 /\ rv = <<0, 11, 0>>
+/\ rtaken = <<0>>
 /\ sc = ( 0 :> defaultInitValue @@
   1 :> 1 @@
   2 :> defaultInitValue @@
@@ -2718,12 +2823,12 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 /\ dpc = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
   3 :> defaultInitValue )
-/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>>)
+/\ wk = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
+/\ wl = (<<"S", 1>> :> <<>> @@ <<"R", 1>> :> <<>> @@ <<"A", 1>> :> <<>>)
 /\ ws = ( 0 :> defaultInitValue @@
   1 :> defaultInitValue @@
   2 :> defaultInitValue @@
@@ -2736,4 +2841,4 @@ State 15: <SE2 line 2360, col 14 to line 2374, col 64 of module Channel>
 /\ xl = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
 /\ xq = (0 :> FALSE @@ 1 :> FALSE @@ 2 :> FALSE @@ 3 :> FALSE)
 
-1889 states generated, 864 distinct states found, 229 states left on queue.
+1925 states generated, 884 distinct states found, 241 states left on queue.

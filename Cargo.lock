@@ -551,7 +551,6 @@ dependencies = [
  "crossbeam-utils",
  "futures",
  "kovan",
- "kovan-queue",
  "shuttle",
  "wasm-bindgen-test",
 ]

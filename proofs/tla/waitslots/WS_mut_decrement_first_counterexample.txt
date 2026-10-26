@@ -1,0 +1,304 @@
+Error: Invariant CountCovers is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ mine = <<0>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<0>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 1)
+/\ bi = (1 :> 0 @@ 10 :> 0)
+/\ ticket = (101 :> 0 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 0)
+/\ r = <<0>>
+/\ bound = FALSE
+/\ pc = (1 :> "WR" @@ 10 :> "NP")
+/\ slot = <<0>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 1
+/\ count = 0
+/\ sent = (10 :> 0)
+/\ best = (1 :> 0 @@ 10 :> 0)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 0
+/\ seen = (1 :> 0 @@ 10 :> 0)
+/\ stack = (1 :> <<>> @@ 10 :> <<>>)
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 2: <WR line 432, col 13 to line 452, col 79 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<0>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 1)
+/\ bi = (1 :> 0 @@ 10 :> 0)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 0)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WL" @@ 10 :> "NP")
+/\ slot = <<0>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 0)
+/\ best = (1 :> 0 @@ 10 :> 0)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 0
+/\ seen = (1 :> 0 @@ 10 :> 0)
+/\ stack = (1 :> <<>> @@ 10 :> <<>>)
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 3: <WL line 454, col 13 to line 464, col 69 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<0>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 1)
+/\ bi = (1 :> 0 @@ 10 :> 0)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 0)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WC" @@ 10 :> "NP")
+/\ slot = <<0>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 0)
+/\ best = (1 :> 0 @@ 10 :> 0)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 0
+/\ seen = (1 :> 0 @@ 10 :> 0)
+/\ stack = (1 :> <<>> @@ 10 :> <<>>)
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 4: <WC line 466, col 13 to line 478, col 62 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<1>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 1)
+/\ bi = (1 :> 0 @@ 10 :> 0)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 0)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WK" @@ 10 :> "NP")
+/\ slot = <<101>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 0)
+/\ best = (1 :> 0 @@ 10 :> 0)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 0
+/\ seen = (1 :> 0 @@ 10 :> 0)
+/\ stack = (1 :> <<>> @@ 10 :> <<>>)
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 5: <NP line 560, col 13 to line 583, col 40 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<1>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 1)
+/\ bi = (1 :> 0 @@ 10 :> 0)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 0)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WK" @@ 10 :> "NO1")
+/\ slot = <<101>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 1)
+/\ best = (1 :> 0 @@ 10 :> 0)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 1
+/\ seen = (1 :> 0 @@ 10 :> 0)
+/\ stack = ( 1 :> <<>> @@
+  10 :>
+      << [ pc |-> "NP",
+           ni |-> 1,
+           best |-> 0,
+           bi |-> 0,
+           pres |-> 0,
+           seen |-> 0,
+           procedure |-> "NotifyOne" ] >> )
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 6: <NO1 line 291, col 14 to line 309, col 51 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<1>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 1)
+/\ bi = (1 :> 0 @@ 10 :> 0)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 1)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WK" @@ 10 :> "NO2")
+/\ slot = <<101>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 1)
+/\ best = (1 :> 0 @@ 10 :> 0)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 1
+/\ seen = (1 :> 0 @@ 10 :> 0)
+/\ stack = ( 1 :> <<>> @@
+  10 :>
+      << [ pc |-> "NP",
+           ni |-> 1,
+           best |-> 0,
+           bi |-> 0,
+           pres |-> 0,
+           seen |-> 0,
+           procedure |-> "NotifyOne" ] >> )
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 7: <NO2 line 311, col 14 to line 339, col 51 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<1>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 2)
+/\ bi = (1 :> 0 @@ 10 :> 1)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 1)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WK" @@ 10 :> "NO2")
+/\ slot = <<101>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 1)
+/\ best = (1 :> 0 @@ 10 :> 101)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 1
+/\ seen = (1 :> 0 @@ 10 :> 1)
+/\ stack = ( 1 :> <<>> @@
+  10 :>
+      << [ pc |-> "NP",
+           ni |-> 1,
+           best |-> 0,
+           bi |-> 0,
+           pres |-> 0,
+           seen |-> 0,
+           procedure |-> "NotifyOne" ] >> )
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 8: <NO2 line 311, col 14 to line 339, col 51 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<1>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 2)
+/\ bi = (1 :> 0 @@ 10 :> 1)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 1)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WK" @@ 10 :> "NO3")
+/\ slot = <<101>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 1
+/\ sent = (10 :> 1)
+/\ best = (1 :> 0 @@ 10 :> 101)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 1
+/\ seen = (1 :> 0 @@ 10 :> 1)
+/\ stack = ( 1 :> <<>> @@
+  10 :>
+      << [ pc |-> "NP",
+           ni |-> 1,
+           best |-> 0,
+           bi |-> 0,
+           pres |-> 0,
+           seen |-> 0,
+           procedure |-> "NotifyOne" ] >> )
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+State 9: <NO3 line 341, col 14 to line 349, col 77 of module WaitSlots>
+/\ mine = <<101>>
+/\ done = <<0>>
+/\ fits = TRUE
+/\ seen_ = <<0>>
+/\ at = <<1>>
+/\ sst = (101 :> "waiting" @@ 102 :> "waiting")
+/\ ni = (1 :> 1 @@ 10 :> 2)
+/\ bi = (1 :> 0 @@ 10 :> 1)
+/\ ticket = (101 :> 1 @@ 102 :> 0)
+/\ bs = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+/\ pres = (1 :> 0 @@ 10 :> 1)
+/\ r = <<1>>
+/\ bound = FALSE
+/\ pc = (1 :> "WK" @@ 10 :> "NO4")
+/\ slot = <<101>>
+/\ disc = FALSE
+/\ di = << >>
+/\ tickets = 2
+/\ count = 0
+/\ sent = (10 :> 1)
+/\ best = (1 :> 0 @@ 10 :> 101)
+/\ timed = <<FALSE>>
+/\ wi = <<1>>
+/\ avail = 1
+/\ seen = (1 :> 0 @@ 10 :> 1)
+/\ stack = ( 1 :> <<>> @@
+  10 :>
+      << [ pc |-> "NP",
+           ni |-> 1,
+           best |-> 0,
+           bi |-> 0,
+           pres |-> 0,
+           seen |-> 0,
+           procedure |-> "NotifyOne" ] >> )
+/\ bslot = (1 :> defaultInitValue @@ 10 :> defaultInitValue)
+
+56 states generated, 40 distinct states found, 7 states left on queue.

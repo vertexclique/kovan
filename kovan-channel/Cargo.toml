@@ -22,20 +22,19 @@ path = "src/lib.rs"
 
 [features]
 # Takes the memory of the unbounded channel's nodes, and of its wait lists'
-# queue segments, from kovan's magazine cache (`kovan/recycle`): see kovan's
-# crate docs.
-recycle = ["kovan/recycle", "kovan-queue/recycle"]
+# entries, from kovan's magazine cache (`kovan/recycle`): see kovan's crate
+# docs.
+recycle = ["kovan/recycle"]
 # See `kovan`'s `shuttle` feature doc. Cascades so `Atomic<Node<T>>` (the
 # unbounded channel's linked-list message transport, which the bounded
 # channel is built on) is shuttle-instrumented; also swaps this crate's own
 # `AtomicWaker` state machine (see `signal.rs`), the register-vs-wake race
 # these tests target.
-shuttle = ["kovan/shuttle", "kovan-queue/shuttle", "dep:shuttle"]
+shuttle = ["kovan/shuttle", "dep:shuttle"]
 
 [dependencies]
 crossbeam-utils = "0.8.21"
 kovan = { workspace = true }
-kovan-queue = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
 
 [dev-dependencies]

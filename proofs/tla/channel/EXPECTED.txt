@@ -82,3 +82,15 @@ CH_wit_select_disconnected         MC_Channel         violated:NoSelectDisconnec
 CH_wit_rx_gone                     MC_Channel         violated:NoRxGoneW
 CH_wit_notified_register           MC_Channel         violated:NoNotifiedRegisterW
 CH_wit_cancel                      MC_Channel         violated:NoCancelW
+CH_select_pass                     MC_Channel         pass
+CH_select_twice                    MC_Channel         pass
+CH_deadline_twice                  MC_Channel         pass
+CH_mut_select_no_pass_on           MC_Channel         violated:NoLostWakeup
+CH_mut_select_keeps_entries        MC_Channel         violated:OneEntryPerWaiter
+CH_mut_abandon_keeps_entry         MC_Channel         violated:OneEntryPerWaiter
+CH_send_gone                       MC_Channel         pass
+CH_mut_unbounded_no_receiver_count MC_Channel         violated:NoneKeptForNoReceiver
+CH_rdv                             MC_Channel         pass
+CH_rdv_gone                        MC_Channel         pass
+CH_mut_rdv_no_wait                 MC_Channel         violated:RdvSound
+CH_mut_rdv_no_ack_notify           MC_Channel         violated:NoLostWakeup

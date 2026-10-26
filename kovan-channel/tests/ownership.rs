@@ -109,3 +109,80 @@ fn racing_sends_and_receives_hand_each_value_out_once() {
     drop((utx, urx, btx, brx));
     balanced(base, "racing channels");
 }
+
+/// Values left in a channel drop with it, at once and on the dropping
+/// thread, while another thread that pinned after they were sent holds its
+/// guard: they are not handed to kovan, which would free them once that
+/// guard goes, on that thread (a value that is not `Send` must never be
+/// dropped there).
+#[test]
+#[cfg_attr(miri, ignore)] // threads
+fn a_channel_drops_the_values_left_in_it_at_once_on_its_thread() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    static ELSEWHERE: AtomicUsize = AtomicUsize::new(0);
+    struct Here(thread::ThreadId);
+    impl Drop for Here {
+        fn drop(&mut self) {
+            if thread::current().id() != self.0 {
+                ELSEWHERE.fetch_add(1, Ordering::SeqCst);
+            }
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let _l = lock();
+    let me = thread::current().id();
+    let (tx, rx) = unbounded();
+    for _ in 0..100 {
+        tx.send(Here(me));
+    }
+    let (pinned_tx, pinned_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    // A protected load publishes the holder's reservation at the epoch it
+    // reads, which covers the values sent before it: their batches would be
+    // placed in its slot, and freed when it lets go, on its thread.
+    let cell = std::sync::Arc::new(kovan::Atom::new(0u8));
+    let holder = thread::spawn(move || {
+        let guard = kovan::pin();
+        let _ = *cell.load();
+        pinned_tx.send(()).unwrap();
+        let _ = go_rx.recv();
+        drop(guard);
+    });
+    pinned_rx.recv().unwrap();
+    drop((tx, rx));
+    let dropped = DROPS.load(Ordering::SeqCst);
+    go_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(dropped, 100, "values left in a channel outlived its drop");
+    assert_eq!(
+        ELSEWHERE.load(Ordering::SeqCst),
+        0,
+        "a value dropped on another thread"
+    );
+}
+
+/// Once every receiver is gone, a send drops its value at once and what was
+/// queued is dropped with the last receiver: nothing piles up for no one
+/// while a sender lives on. Every value sent then was kept until the last
+/// sender went.
+#[test]
+fn sends_once_every_receiver_is_gone_keep_nothing() {
+    let _l = lock();
+    let base = start();
+    let (tx, rx) = unbounded();
+    for _ in 0..10 {
+        tx.send(Val::new());
+    }
+    let rx2 = rx.clone();
+    drop(rx);
+    assert!(!tx.is_disconnected(), "a receiver is left");
+    drop(rx2);
+    assert!(tx.is_disconnected());
+    for _ in 0..100 {
+        tx.send(Val::new());
+    }
+    balanced(base, "sends once every receiver is gone");
+    drop(tx);
+}

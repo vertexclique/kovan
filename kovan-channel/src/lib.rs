@@ -73,13 +73,16 @@ pub fn unbounded<T: 'static>() -> (unbounded::Sender<T>, unbounded::Receiver<T>)
 
 /// Creates a channel of bounded capacity.
 ///
-/// This channel has a buffer of fixed capacity.
+/// This channel has a buffer of fixed capacity. A capacity of 0 makes a
+/// rendezvous channel: a send waits until a receiver has taken its value.
 pub fn bounded<T: 'static>(cap: usize) -> (bounded::Sender<T>, bounded::Receiver<T>) {
     bounded::channel(cap)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use flavors::after::after;
+#[cfg(not(target_arch = "wasm32"))]
+pub use flavors::clock::{Timer, set_timer};
 pub use flavors::never::never;
 #[cfg(not(target_arch = "wasm32"))]
 pub use flavors::tick::tick;

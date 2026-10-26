@@ -38,11 +38,14 @@ slots in use, and the two flavors' receives are the same code.
   itself) and `take` (its `fetch_or`, the cell, its `fetch_and`, the wake). The executor polls a
   pending future again once its task is woken, a wake its task may have left itself in the poll
   before; in the configurations that say so it also polls it spuriously or drops it.
-- The wait lists (`waitlist.rs`): `register` pushes; `notify_one` pops until an entry whose
-  `try_notify` wins (a compare-and-swap from waiting to notified), then unparks or wakes it;
-  `abandon` is the owner's `cancel` (a compare-and-swap from waiting to cancelled) and, when that
-  loses because a notifier woke the entry first, a `notify_one` that passes the wakeup on;
-  `notify_all` pops and notifies every entry.
+- The wait lists (`waitlist.rs`): `register` puts the entry in a slot, a free one or one whose
+  entry no longer waits (taken over); `notify_one` takes the oldest entry out and then its
+  `try_notify` (a compare-and-swap from waiting to notified) unparks or wakes it, or, lost, it
+  takes the next; `abandon` takes the owner's entry back out if it is still in its slot, then the
+  owner's `cancel` (a compare-and-swap from waiting to cancelled) and, when that loses because a
+  notifier took the entry and woke it first, a `notify_one` that passes the wakeup on;
+  `notify_all` takes and notifies every entry. A list is a sequence in the order of
+  registration.
 - The disconnect: a sender's drop fetch-subs the sender count, and the last one stores the
   disconnected flag and (after the fence) notifies every receiver. The bounded flavor's receivers
   are counted the same way: the last receiver's drop stores `receivers_gone` and (after the
@@ -51,9 +54,11 @@ slots in use, and the two flavors' receives are the same code.
   one, try every arm; if every channel is disconnected, try every arm once more, then take the
   `disconnected` arm (or panic without one); else register one fresh `Signal` on every channel
   not disconnected, (the fence) ask every channel's `is_empty` and `is_disconnected`, and, when
-  one holds a value, one registered on disconnected since, or none was registered on, abandon
-  the signal (a cancel that lost passes the wakeup on with `wake_one_waiter` on every channel)
-  and loop; else wait.
+  one holds a value, one registered on disconnected since, or none was registered on, take the
+  signal back from every channel (`unregister_signal`) and withdraw it (a cancel that lost
+  passes the wakeup on with `wake_one_waiter` on every channel) and loop; else wait, then take
+  the signal back from every channel, and a cancel that lost marks the pass woken: an arm it then
+  takes is followed by `wake_one_waiter` on every channel that holds a value.
 - The drop of a channel once every handle is gone: the walk from the head retiring every node;
   kovan drops each value with its node.
 
@@ -69,11 +74,14 @@ What is left out or folded, and why it changes nothing:
   treats every atomic as `SeqCst`; the stress tests (`tests/stress_test.rs`,
   `tests/mpmc_stress_test.rs`) run on the CI runners' hardware (x86-64 Linux and Windows, arm64
   macOS); Miri does not run this crate (`.github/workflows/miri.sh` runs `kovan` only).
-- The wait lists are `kovan_queue::SegQueue`, which [the segqueue family](../segqueue/README.md)
-  proves: here a push and a pop are one step each, of a FIFO queue. The protocol needs of it what
-  that family checks: a pop that answers empty began after every push that had returned was
-  claimed by a pop (`EmptySound`), no entry is popped twice (`UniqueTake`), none is lost
-  (`NoLoss`).
+- The wait lists are slots, which [the waitslots family](../waitslots/README.md) checks at
+  their atomic steps (the count, each slot's load and compare-and-swap, a scan that stops after as
+  many entries as the count said): here a registration, a take and a removal are one step each,
+  of a sequence in registration order, and a notify takes the oldest entry. The code takes the
+  lowest ticket among the entries its scan saw, which may be a later one than the oldest; the
+  waitslots family shows no wakeup is lost that way. A takeover is any entry that no longer
+  waits, or none, at the registration's choice, which covers the code's first free or stale
+  slot.
 - With `Stepped = FALSE` the list's send, `try_recv` and `is_empty` are one step each. The
   `Stepped = TRUE` configurations check that abstraction: each take takes the oldest value linked
   and not taken (`Fifo`, a send counted in the queue from its link), an answer of empty comes
@@ -161,6 +169,9 @@ state; each invariant says one kind of check never failed.
   woken (by the take, or by the register the take found in flight), or one of the two is still
   under way.
 - `SelectOnce`: a `select!` takes at most one value.
+- `OneEntryPerWaiter`: a thread holds at most one entry in each wait list: a wait that ended
+  (woken, its recheck met, its deadline passed, its future completed or dropped, its `select!`
+  done with the pass) left none behind, so a list's entries are never more than its waiters.
 - `NoBound`: the configuration's bound on signals never stopped a wait, so the configurations are
   complete for their programs.
 - `Termination` (the `CH_live_*` configurations, `CH_select_disconnected` and
@@ -224,6 +235,20 @@ one call).
    registered on no channel goes back to that check. `CH_select_disconnected`;
    `CH_mut_select_waits_unregistered`; shuttle (k), which deadlocks without the fix.
 
+Two more, found in 0.2.1's review by a measurement and by reading, and pinned here:
+
+9. A wait that ended without a wakeup (a recheck that found its condition met, a deadline, a
+   future completed or dropped while its entry was queued, a `select!` woken through another
+   channel) left its entry in the wait list until a notify popped it: on a channel nobody sends
+   on, the list grew for good (25,948,544 bytes over 30 rounds of 2,500 such waits in
+   `tests/steady_memory.rs`). Fix: the slots, every wait takes its entry back, a registration
+   takes over an entry that no longer waits, `select!` unregisters. `CH_deadline_twice`,
+   `CH_select_twice`; `CH_mut_abandon_keeps_entry`, `CH_mut_select_keeps_entries`.
+10. A `select!` woken by one channel that then took another arm's value used the wakeup up: a
+   receiver waiting on the first channel behind it stayed parked beside its value. Fix: a woken
+   pass that takes an arm wakes one waiter on every channel that holds a value.
+   `CH_select_pass`; `CH_mut_select_no_pass_on`; shuttle (l), which deadlocks without the fix.
+
 ## Mutations and witnesses
 
 Each mutation puts back one wrong rule on the program of a passing configuration and lists its
@@ -267,6 +292,9 @@ order broken. `CH_mut_retire_next` leaves it out too: the retired node is still 
 | `CH_mut_select_never_disconnects` | `select!` has no check that every channel is disconnected (finding 6); with the rest of the fix it registers on none and goes round for good | `NoBound` broken |
 | `CH_mut_no_receiver_count` | a bounded send waits for room whether or not a receiver is left (finding 7) | `NoLostWakeup` broken |
 | `CH_mut_select_waits_unregistered` | a `select!` pass that registered on no channel waits (finding 8) | `NoLostWakeup` broken |
+| `CH_mut_abandon_keeps_entry` | a wait that ends without a wakeup leaves its entry in the list (finding 9) | `OneEntryPerWaiter` broken |
+| `CH_mut_select_keeps_entries` | a `select!` that stops waiting leaves its signal registered (finding 9) | `OneEntryPerWaiter` broken |
+| `CH_mut_select_no_pass_on` | a woken `select!` takes another arm's value and passes nothing on (finding 10) | `NoLostWakeup` broken |
 
 The witnesses each claim a case never happens on the program of a passing configuration, so
 their counterexamples show the passing configurations reach it: `try_recv` finds the tail lagging
@@ -321,6 +349,9 @@ meets the bound `NoBound` checks (`CH_wit_bound`).
 | `CH_select_disconnected` | unbounded, fair | the only sender dropped, one thread of one `select!`; `Termination` |
 | `CH_recv_try` | unbounded | one sender (two sends, the drop), a receiver of one `recv`, a receiver of one `try_recv` |
 | `CH_send_no_receiver` | bounded, capacity one, fair | one sender (two sends, the drop), one receiver (a `try_recv`), whose thread then ends; `Termination` |
+| `CH_select_pass` | unbounded, two channels | one thread of one `select!`, a receiver of one `recv` on the second channel, a sender on each keeping its handle (a send) |
+| `CH_select_twice` | unbounded, two channels | one thread of two `select!`s, a sender on each keeping its handle (a send) |
+| `CH_deadline_twice` | unbounded | one sender keeping its handle (a send), one receiver (two `recv_deadline`s) |
 
 Every passing configuration checks every invariant above. A configuration whose last receive waits for good ends in a deadlock
 by design and sets `CHECK_DEADLOCK FALSE`; `NoLostWakeup` is what it checks there. The signals
@@ -333,40 +364,42 @@ for the unbounded flavor, and the bounded flavor's same code is at the lines aft
 
 | label | function | code | step |
 |---|---|---|---|
-| `SE1`, `SE1r` | `unbounded::Sender::send` | `unbounded.rs:163-167` | `Node::new`, the pin, `tail.load` |
-| `SE2` | `send` | `unbounded.rs:168` | the tail's `next.load` |
-| `SE3` | `send` | `unbounded.rs:170-182`, `unbounded.rs:201-210` | `next`'s compare-and-swap; or the lagging tail moved on |
-| `SE4` | `send` | `unbounded.rs:183-197` | `tail.compare_exchange`, the guard dropped, the fence, `notify_one` |
-| `T1` (send), `LinkAtomic` | `send` | `unbounded.rs:162-197` | the list's part in one step (not `Stepped`), then `notify_one` |
-| `TR1`, `TR1r` | `unbounded::Receiver::try_recv` | `unbounded.rs:223-226` | the pin, `head.load` |
-| `TR2` | `try_recv` | `unbounded.rs:227` | `tail.load` |
-| `TR3` | `try_recv` | `unbounded.rs:228-247` | the head's `next.load`: None, a lagging tail, or the take |
-| `TR4t` | `try_recv` | `unbounded.rs:234-241` | `tail.compare_exchange`, the loop again |
-| `TR4h` | `try_recv` | `unbounded.rs:250-278` | `head.compare_exchange`; its winner's `retire_node`, `ptr::replace` |
-| `TakeAtomic` | `try_recv` | `unbounded.rs:222-281` | the whole `try_recv` in one step (not `Stepped`) |
-| `RL1` | `bounded::Receiver::try_recv` | `bounded.rs:342-349` | `len.fetch_sub(1)`, the fence, the senders' `notify_one` |
-| `IE1`-`IE3`, `EmptyAtomic` | `is_empty` | `unbounded.rs:429-435`, `bounded.rs:301-304` | the pin and the three loads |
-| `BS0`, `BS1` | `bounded::Sender::send` | `bounded.rs:127-130` | `is_disconnected` (every receiver gone: the value dropped); `len.load` |
-| `BS2`, `BS3` | `send` | `bounded.rs:131-149` | a fresh `Signal` registered; the fence, `len.load`, `is_disconnected`, the own entry abandoned or `wait` |
-| `BS5`, `BS6` | `send` | `bounded.rs:153-167` | `len.compare_exchange`; the send into the list, the fence, `notify_one` |
-| `AS0`-`AS8`, `AS2l`, `AS2a`, `AS7l`, `AS7n` | `send_async`'s `poll`, `try_send`, its drop | `bounded.rs:232-287` | `begin_poll`; `is_disconnected`; `len.load` and its compare-and-swap; `AsyncWait::register`; the re-check; `finish`; Pending |
-| `T1` (sdrop), `DC1` | `Sender`'s drop, `wake_all_receivers` | `unbounded.rs:121-127`, `unbounded.rs:65-70`, `bounded.rs:57-65` | `sender_count.fetch_sub(1)`; the last: `disconnected.store`, the fence, `notify_all` |
-| `TX` | bounded `Receiver`'s drop | `bounded.rs:86-94` | `receiver_count.fetch_sub(1)`; the last: `receivers_gone.store`, the fence, the senders' `notify_all` |
-| `RV1`-`RV8` | `Receiver::recv` | `unbounded.rs:287-340`, `bounded.rs:366-414` | `try_recv`, `is_disconnected`; a fresh `Signal` registered, the fence, the re-check, the own entry abandoned; `wait`; the drain |
-| `RD1`-`RD9` | `recv_deadline` | `unbounded.rs:353-426`, `bounded.rs:427-500` | as `recv`, with `wait_deadline` and the timed-out path |
-| `AR0`-`AR9`, `ARf` | `recv_async`'s `poll`, its drop | `unbounded.rs:488-531`, `bounded.rs:520-564` | `begin_poll`; `try_recv`, `is_disconnected`, `AsyncWait::register`, the re-check, `finish`; Pending |
-| `SL1`-`SL7`, `SLd`, `SLa`, `SLf`, `SLx`, `SLy` | `select!` without default | `select.rs:81-154` | the arms' `try_recv`; every channel disconnected: the drain and the `disconnected` arm; a fresh `Signal`; `is_disconnected`, `register_signal`; the fence, `is_empty`, `is_disconnected`; `cancel` and `wake_one_waiter`, or `wait` |
+| `SE1`, `SE1r` | `unbounded::Sender::send` | `unbounded.rs:162-166` | `Node::new`, the pin, `tail.load` |
+| `SE2` | `send` | `unbounded.rs:167` | the tail's `next.load` |
+| `SE3` | `send` | `unbounded.rs:169-181`, `unbounded.rs:200-209` | `next`'s compare-and-swap; or the lagging tail moved on |
+| `SE4` | `send` | `unbounded.rs:182-196` | `tail.compare_exchange`, the guard dropped, the fence, `notify_one` |
+| `T1` (send), `LinkAtomic` | `send` | `unbounded.rs:161-196` | the list's part in one step (not `Stepped`), then `notify_one` |
+| `TR1`, `TR1r` | `unbounded::Receiver::try_recv` | `unbounded.rs:222-225` | the pin, `head.load` |
+| `TR2` | `try_recv` | `unbounded.rs:226` | `tail.load` |
+| `TR3` | `try_recv` | `unbounded.rs:227-246` | the head's `next.load`: None, a lagging tail, or the take |
+| `TR4t` | `try_recv` | `unbounded.rs:233-240` | `tail.compare_exchange`, the loop again |
+| `TR4h` | `try_recv` | `unbounded.rs:249-277` | `head.compare_exchange`; its winner's `retire_node`, `ptr::replace` |
+| `TakeAtomic` | `try_recv` | `unbounded.rs:221-280` | the whole `try_recv` in one step (not `Stepped`) |
+| `RL1` | `bounded::Receiver::try_recv` | `bounded.rs:401-408` | `len.fetch_sub(1)`, the fence, the senders' `notify_one` |
+| `IE1`-`IE3`, `EmptyAtomic` | `is_empty` | `unbounded.rs:428-434`, `bounded.rs:332-346` | the pin and the three loads |
+| `BS0`, `BS1` | `bounded::Sender::send` | `bounded.rs:147-150` | `is_disconnected` (every receiver gone: the value dropped); `len.load` |
+| `BS2`, `BS3` | `send` | `bounded.rs:151-169` | a fresh `Signal` registered; the fence, `len.load`, `is_disconnected`, the own entry abandoned or `wait` |
+| `BS5`, `BS6` | `send` | `bounded.rs:173-187` | `len.compare_exchange`; the send into the list, the fence, `notify_one` |
+| `AS0`-`AS8`, `AS2l`, `AS2a`, `AS7l`, `AS7n` | `send_async`'s `poll`, `try_send`, its drop | `bounded.rs:263-318` | `begin_poll`; `is_disconnected`; `len.load` and its compare-and-swap; `AsyncWait::register`; the re-check; `finish`; Pending |
+| `T1` (sdrop), `DC1` | `Sender`'s drop, `wake_all_receivers` | `unbounded.rs:120-126`, `unbounded.rs:64-69`, `bounded.rs:64-72` | `sender_count.fetch_sub(1)`; the last: `disconnected.store`, the fence, `notify_all` |
+| `TX` | bounded `Receiver`'s drop | `bounded.rs:93-101` | `receiver_count.fetch_sub(1)`; the last: `receivers_gone.store`, the fence, the senders' `notify_all` |
+| `RV1`-`RV8` | `Receiver::recv` | `unbounded.rs:286-339`, `bounded.rs:432-484` | `try_recv`, `is_disconnected`; a fresh `Signal` registered, the fence, the re-check, the own entry abandoned; `wait`; the drain |
+| `RD1`-`RD9` | `recv_deadline` | `unbounded.rs:352-425`, `bounded.rs:497-582` | as `recv`, with `wait_deadline` and the timed-out path |
+| `AR0`-`AR9`, `ARf` | `recv_async`'s `poll`, its drop | `unbounded.rs:506-549`, `bounded.rs:602-661` | `begin_poll`; `try_recv`, `is_disconnected`, `AsyncWait::register`, the re-check, `finish`; Pending |
+| `SL1`-`SL7`, `SLd`, `SLa`, `SLf`, `SLx`, `SLy` | `select!` without default | `select.rs:93-197` | the arms' `try_recv`; every channel disconnected: the drain and the `disconnected` arm; a fresh `Signal`; `is_disconnected`, `register_signal`; the fence, `is_empty`, `is_disconnected`; `cancel` and `wake_one_waiter`, or `wait` |
 | `SD_1`, `SD_2` | `select!` with default | `select.rs:39-57` | the arms' `try_recv`, the default |
 | `NT1`, `NT2` | `Signal::notify`, `AsyncSignal::notify`, the rest of `try_notify` | `signal.rs:148-151`, `signal.rs:473-476`, `signal.rs:157-166`, `signal.rs:482-491` | `state.store(NOTIFIED)` (none after a won `try_notify`); `unpark`, or the waker's wake |
 | `TK1`-`TK4` | `AtomicWaker::take`, `wake` | `signal.rs:404-430` | `fetch_or(WAKING)`, the cell, `fetch_and(!WAKING)`, `waker.wake()` |
 | `RG1`-`RG6` | `AtomicWaker::register` | `signal.rs:342-401` | the compare-and-swap in (or `wake_by_ref`), the cell, the compare-and-swap back, or the waker taken back, `swap`, `wake` |
 | `WT1`, `WT2` | `Signal::wait` | `signal.rs:199-203` | `state.load`, `thread::park` |
 | `WD1`, `WD2` | `Signal::wait_deadline` | `signal.rs:219-230` | `state.load`, the clock, `park_timeout` |
-| `NO1`, `NO2` | `WaitList::notify_one` | `waitlist.rs:129-135` | the pop; `try_notify`'s compare-and-swap |
-| `AB1` | `WaitList::abandon`, `cancel` | `waitlist.rs:140-144`, `signal.rs:168-172`, `signal.rs:493-497` | `cancel`'s compare-and-swap; lost, `notify_one` |
-| `NA1`, `NA2` | `WaitList::notify_all` | `waitlist.rs:148-152` | the pop, `notify` |
-| `Register`, `NewSig` | `WaitList::register`, `Arc::new(Signal::new())` | `waitlist.rs:122-124` | the push of a fresh signal |
-| `TD1`-`TD4` | `unbounded::Channel`'s drop | `unbounded.rs:74-103` | the pin, `head.load`; each node's `next.load` and `retire_node`; the guard dropped, `flush` |
+| `NO1`, `NO2` | `WaitList::notify_one`, `take` | `waitlist.rs:287-336`, `waitlist.rs:231-239` | the oldest entry taken out of its slot; `try_notify`'s compare-and-swap |
+| `AB0`, `AB1` | `WaitList::abandon`, `cancel` | `waitlist.rs:341-353`, `signal.rs:168-172`, `signal.rs:493-497` | the own entry taken back; `cancel`'s compare-and-swap; lost, `notify_one` |
+| `NA1`, `NA2` | `WaitList::notify_all` | `waitlist.rs:381-399` | each slot swapped empty, `notify` |
+| `Register`, `NewSig` | `WaitList::register`, `Arc::new(Signal::new())` | `waitlist.rs:244-282` | a fresh signal in a free slot, or one taken over |
+| `SLa`, `SLw` | `select!`, `unregister_signal`, `WaitList::unregister` | `select.rs:164-167`, `select.rs:193-195`, `waitlist.rs:359-377` | the signal taken back from every channel |
+| `SLb`, `SLc`, `SLq` | `select!` | `select.rs:168-174`, `select.rs:196`, `select.rs:84-99` | `cancel`; the pass woken; `wake_one_waiter` on every channel that holds a value |
+| `TD1`-`TD4` | `unbounded::Channel`'s drop | `unbounded.rs:73-102` | the pin, `head.load`; each node's `next.load` and `retire_node`; the guard dropped, `flush` |
 | (each unpin) | kovan | `retire_node`, the guard's drop | a retired node freed, with its value, once its holders' operations ended |
 
 ## TLC results

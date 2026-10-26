@@ -1,17 +1,19 @@
 /// Channel that delivers a message after a duration.
 ///
-/// Native-only: implemented with `thread::spawn` + `thread::sleep`, both
-/// unsupported (spawn panics, sleep panics) on `wasm32-*` targets.
+/// Native-only: it reads `Instant::now` and sleeps the receiving thread,
+/// both unsupported on `wasm32-*` targets.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod after;
 /// Bounded channel implementation.
 pub mod bounded;
+/// The clock behind `after` and `tick`.
+pub(crate) mod clock;
 /// Channel that never delivers a message.
 pub mod never;
 /// Channel that delivers messages periodically.
 ///
-/// Native-only: implemented with `thread::spawn` + `thread::sleep`, both
-/// unsupported (spawn panics, sleep panics) on `wasm32-*` targets.
+/// Native-only: it reads `Instant::now` and sleeps the receiving thread,
+/// both unsupported on `wasm32-*` targets.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tick;
 /// Unbounded channel implementation.

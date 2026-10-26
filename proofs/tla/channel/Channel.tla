@@ -43,12 +43,14 @@ CONSTANTS
     Cancel,     \* TRUE: the executor may drop a pending future
     MaxSig,     \* signals that can be made (NoBound)
     Watch,      \* the one case a witness configuration records in `said` ("none": none)
-    Mutation    \* "none", or one wrong rule put back
+    Mutation,   \* "none", or one wrong rule put back
+    Rdv         \* TRUE: every bounded channel is a rendezvous (bounded(0): Cap 1, a send waits
+                \* until its value is taken)
 
 NULL == 0
 Teardown == 0
 Chans == 1 .. NC
-Sides == {"R", "S"}
+Sides == {"R", "S", "A"}
 Sigs == 1 .. MaxSig
 Val(t, i) == t * 10 + i
 SendOps == {"send", "asend"}
@@ -175,6 +177,26 @@ MutNoRcount == Mutation = "no_receiver_count"
 \* select_waits_unregistered: the fix as first written: a select! pass whose channels all
 \* disconnected after its check that every one is, and so registered on none, waits (NoLostWakeup).
 MutSelNone == Mutation = "select_waits_unregistered"
+\* abandon_keeps_entry: the code before the fix: a wait that ends without a wakeup (its recheck
+\* found the condition met, its deadline passed, its future completed or was dropped) leaves its
+\* entry in the wait list (OneEntryPerWaiter).
+MutKeepsEntry == Mutation = "abandon_keeps_entry"
+\* select_keeps_entries: the code before the fix: a select! that stops waiting leaves its signal
+\* registered on every channel (OneEntryPerWaiter).
+MutSelKeeps == Mutation = "select_keeps_entries"
+\* select_no_pass_on: the code before the fix: a select! woken by one channel takes another arm's
+\* value and passes no wakeup on, so a waiter on the first channel parks beside its value
+\* (NoLostWakeup).
+MutNoPassOn == Mutation = "select_no_pass_on"
+\* unbounded_no_receiver_count: the code before the fix: an unbounded channel does not count its
+\* receivers, so a send once every receiver is gone queues its value for no one, and the last
+\* receiver leaves what is queued (NoneKeptForNoReceiver).
+MutNoURcount == Mutation = "unbounded_no_receiver_count"
+\* rdv_no_wait: a rendezvous send returns as soon as its value is in (RdvSound).
+MutRdvNoWait == Mutation = "rdv_no_wait"
+\* rdv_no_ack_notify: a rendezvous receive counts the value taken but wakes no send waiting for it
+\* (NoLostWakeup).
+MutRdvNoAck == Mutation = "rdv_no_ack_notify"
 
 (* --algorithm Channel
 variables
@@ -199,7 +221,15 @@ variables
     scount = [c \in Chans |-> Cardinality(SendersOf(c))],
     disc = [c \in Chans |-> SendersOf(c) = {}],
     rcount = [c \in Chans |-> Cardinality(ReceiversOf(c))],
-    rgone = [c \in Chans |-> Cap > 0 /\ ReceiversOf(c) = {}],
+    rgone = [c \in Chans |-> ReceiversOf(c) = {} /\ (Cap > 0 \/ ~MutNoURcount)],
+    \* (unbounded) the channels whose receivers are all gone and whose last receiver drained them
+    drained = {c \in Chans : Cap = 0 /\ ReceiversOf(c) = {}},
+    \* (rendezvous) the values sent into each channel and taken from it; each thread's ticket and
+    \* whether it waits for its value to be taken
+    rsent = [c \in Chans |-> 0],
+    rtaken = [c \in Chans |-> 0],
+    btk = [t \in Threads |-> 0],
+    acking = [t \in Threads |-> FALSE],
     \* the wait lists: the receivers' ("R") and, bounded, the senders' ("S") of each channel
     wl = [x \in Sides \X Chans |-> <<>>],
     \* the signals made: state (0 waiting, 1 notified, 2 cancelled by its owner), kind ("thread":
@@ -238,6 +268,11 @@ variables
 
 define
     AllDone == \A t \in Threads : pc[t] = "Done"
+    \* WaitList::register puts the fresh entry in a free slot, or takes over one whose entry no
+    \* longer waits (its signal notified or cancelled): k is that entry's place, 0 for none.
+    StaleAt(s) == {k \in DOMAIN s : sst[s[k]] # 0}
+    RemoveAt(s, k) == [n \in 1 .. Len(s) - 1 |-> IF n < k THEN s[n] ELSE s[n + 1]]
+    Reg(s, sig, k) == Append(IF k = 0 THEN s ELSE RemoveAt(s, k), sig)
     Touch(n) == IF n \in freed THEN {"uaf"} ELSE {}
     \* the threads pinned now, which hold a node retired now
     Holders == {u \in Pinners : busy[u]}
@@ -271,15 +306,17 @@ begin
     end if;
 end macro;
 
-\* A fresh Signal made and registered on wait list `side` of channel `ch` (WaitList::register,
-\* a SegQueue push).
+\* A fresh Signal made and registered on wait list `side` of channel `ch` (WaitList::register:
+\* a slot taken by compare-and-swap, maybe one whose entry no longer waits).
 macro Register(var, side, ch)
 begin
     if nsig >= MaxSig then
         bound := TRUE;
     else
-        var := nsig + 1 || nsig := nsig + 1 || skind[nsig + 1] := "thread" || sown[nsig + 1] := self
-            || wl[<<side, ch>>] := Append(wl[<<side, ch>>], nsig + 1);
+        with k \in StaleAt(wl[<<side, ch>>]) \cup {0} do
+            var := nsig + 1 || nsig := nsig + 1 || skind[nsig + 1] := "thread" || sown[nsig + 1] := self
+                || wl[<<side, ch>>] := Reg(wl[<<side, ch>>], nsig + 1, k);
+        end with;
     end if;
 end macro;
 
@@ -466,11 +503,14 @@ NO2: \* try_notify(): the compare-and-swap from waiting to notified, then the un
     end if;
 end procedure;
 
-\* WaitList::abandon: the owner's cancel, the compare-and-swap from waiting to cancelled; lost to a
-\* notifier, which woke the signal first, the wakeup passed on with a notify_one
-\* (self_notify_after_take: notify() on the own entry instead, the rule before the fix).
+\* WaitList::abandon: the own entry taken out of its slot if it is still there (abandon_keeps_entry:
+\* left there), then the owner's cancel, the compare-and-swap from waiting to cancelled; lost to a
+\* notifier, which took the entry and woke the signal first, the wakeup passed on with a
+\* notify_one (self_notify_after_take: notify() on the own entry instead, the rule before the fix).
 procedure Abandon(bside, bch, bsig)
 begin
+AB0:
+    if ~MutKeepsEntry then wl[<<bside, bch>>] := Remove(wl[<<bside, bch>>], bsig); end if;
 AB1:
     if MutSelfNotify then
         call Notify(bsig, TRUE);
@@ -505,8 +545,11 @@ end procedure;
 \* senders' notify_one.
 procedure Release(rlc)
 begin
-RL1:
-    len[rlc] := len[rlc] - 1;
+RL1: \* (rendezvous: one more taken, then, after the fence, the acks' notify_one;
+     \* rdv_no_ack_notify: none)
+    len[rlc] := len[rlc] - 1 || rtaken[rlc] := rtaken[rlc] + (IF Rdv THEN 1 ELSE 0);
+    if Rdv /\ ~MutRdvNoAck then call NotifyOne("A", rlc); goto RL2; end if;
+RL2:
     if MutReleaseNoNotify \/ ~SWaiters then return; else call NotifyOne("S", rlc); return; end if;
 end procedure;
 
@@ -705,16 +748,39 @@ BS3: \* the fence, len.load(Acquire) and is_disconnected(): room now, or every r
         goto BS0;
     end if;
 BS5: \* len.compare_exchange(len, len + 1), then the send into the list; a failure (a backoff
-     \* snooze) loops again
+     \* snooze) loops again; a rendezvous send takes its ticket with its slot
     if len[bc] = bl then
-        len[bc] := bl + 1;
-        if Stepped then call USend(bc, bv); return; end if;
+        len[bc] := bl + 1 || btk[self] := rsent[bc] || rsent[bc] := rsent[bc] + (IF Rdv THEN 1 ELSE 0);
+        if Stepped then call USend(bc, bv); goto BS7; end if;
     else
         goto BS0;
     end if;
 BS6: \* the link, then (the fence) the receivers' notify_one
     LinkAtomic(bc, bv);
-    if RWaiters then call NotifyOne("R", bc); return; else return; end if;
+    if RWaiters then call NotifyOne("R", bc); goto BS7; end if;
+BS7: \* (rendezvous) taken, or every receiver gone: done (rdv_no_wait: done at once)
+    if ~Rdv then
+        return;
+    elsif MutRdvNoWait then
+        errs := errs \cup (IF rtaken[bc] <= btk[self] /\ ~rgone[bc] THEN {"rdv_early"} ELSE {});
+        return;
+    elsif rtaken[bc] > btk[self] \/ rgone[bc] then
+        acking[self] := FALSE;
+        return;
+    end if;
+BS8: \* a fresh Signal registered on the acks' wait list
+    Register(bsg, "A", bc);
+    acking[self] := TRUE;
+BS9: \* the fence, the recheck: taken or every receiver gone, the own entry abandoned, done; else
+     \* signal.wait(), and the check again
+    if rtaken[bc] > btk[self] \/ rgone[bc] then
+        acking[self] := FALSE;
+        call Abandon("A", bc, bsg);
+        return;
+    else
+        call Wait(bsg);
+        goto BS7;
+    end if;
 end procedure;
 
 \* bounded::Sender::send_async: the future, polled by its executor, its entry an AsyncWait: one
@@ -755,7 +821,9 @@ AS3: \* register: queued, only the waker updated; else a signal not waiting repl
         goto AS5;
     end if;
 AS5: \* senders.register(signal)
-    wl[<<"S", xc>>] := Append(wl[<<"S", xc>>], xsg) || xq := TRUE;
+    with k \in StaleAt(wl[<<"S", xc>>]) \cup {0} do
+        wl[<<"S", xc>>] := Reg(wl[<<"S", xc>>], xsg, k) || xq := TRUE;
+    end with;
     if MutNoRecheck then goto AS8; end if;
 AS6: \* the fence, is_disconnected(), len.load(Acquire)
     if rgone[xc] /\ ~MutNoRcount then
@@ -1015,7 +1083,9 @@ AR3: \* register: queued, only the waker updated; else a signal not waiting repl
         goto AR5;
     end if;
 AR5: \* receivers.register(signal); the fence
-    wl[<<"R", yc>>] := Append(wl[<<"R", yc>>], ysg) || yq := TRUE;
+    with k \in StaleAt(wl[<<"R", yc>>]) \cup {0} do
+        wl[<<"R", yc>>] := Reg(wl[<<"R", yc>>], ysg, k) || yq := TRUE;
+    end with;
 AR5r:
     if MutNoRecheck then goto AR9; elsif Stepped then call TryRecv(yc); goto AR7; end if;
 AR6: \* try_recv
@@ -1062,7 +1132,7 @@ end procedure;
 \* signal abandoned (a wakeup it took passed on to every channel) and the loop again; else
 \* signal.wait() and the loop again. stake counts the values it took.
 procedure Select()
-variables j = 1, qsg = 0, ready = FALSE, regd = {}, fw = {};
+variables j = 1, qsg = 0, ready = FALSE, regd = {}, fw = {}, wk = FALSE;
 begin
 SL1: \* try_recv of the first arm
     if Stepped then
@@ -1072,10 +1142,17 @@ SL1: \* try_recv of the first arm
         TakeAtomic(j);
         if Cap > 0 /\ rv[self] # 0 then call Release(j); goto SL2; end if;
     end if;
-SL2: \* arm j gave a value: done (select_no_break: on to the next arm); else try the next arm
+SL2: \* arm j gave a value: done, after a wakeup the pass took is passed on to every channel that
+     \* holds a value (select_no_break: on to the next arm; select_no_pass_on: none passed on); else
+     \* try the next arm
     if rv[self] # 0 /\ ~MutNoBreak then
         stake[self] := stake[self] + 1;
-        return;
+        if wk /\ ~MutNoPassOn then
+            fw := {c \in Chans : aq[c] # <<>>};
+            goto SLq;
+        else
+            return;
+        end if;
     elsif j < NC then
         stake[self] := stake[self] + (IF rv[self] # 0 THEN 1 ELSE 0) || j := j + 1;
         if Stepped then
@@ -1099,9 +1176,10 @@ SL3: \* a fresh Signal (select_reuse_signal: the first pass's: a pass registers 
      \* is notified once it woke a pass)
     if qsg = 0 \/ ~MutReuseSig then
         NewSig(qsg, "thread");
-        j := 1 || regd := {};
+        j := 1 || regd := {} || wk := FALSE;
     else
-        j := 1 || regd := {} || errs := errs \cup (IF sst[qsg] # 0 THEN {"notified_register"} ELSE {});
+        j := 1 || regd := {} || wk := FALSE
+            || errs := errs \cup (IF sst[qsg] # 0 THEN {"notified_register"} ELSE {});
     end if;
 SL4: \* is_disconnected() of channel j: no registration on it if so (select_registers_dead: one
      \* on it too)
@@ -1111,9 +1189,11 @@ SL4: \* is_disconnected() of channel j: no registration on it if so (select_regi
 SL5: \* register_signal on channel j, counted live (select_registers_dead: nothing counted, the
      \* recheck looking for a value only); a signal a send on a channel before it notified already
      \* may be registered (select_asserts_fresh: the debug_assert! against that)
-    wl[<<"R", j>>] := Append(wl[<<"R", j>>], qsg) || regd := regd \cup (IF MutSelDead THEN {} ELSE {j})
+    with k \in StaleAt(wl[<<"R", j>>]) \cup {0} do
+    wl[<<"R", j>>] := Reg(wl[<<"R", j>>], qsg, k) || regd := regd \cup (IF MutSelDead THEN {} ELSE {j})
         || errs := errs \cup (IF MutSelAssert /\ sst[qsg] # 0 THEN {"notified_register"} ELSE {})
         || said := said \cup (IF sst[qsg] # 0 THEN Say("notified_register") ELSE {});
+    end with;
     if j < NC then
         j := j + 1;
         goto SL4;
@@ -1134,14 +1214,17 @@ SL7: \* not empty, or disconnected since registered on, or no channel registered
     else
         j := 1;
         call Wait(qsg);
-        goto SL1;
+        goto SLw;
     end if;
-SLa: \* the cancel: lost to a notifier, the wakeup passed on to every channel
+SLa: \* unregister_signal on channel j (select_keeps_entries: none)
+    if ~MutSelKeeps then wl[<<"R", j>>] := Remove(wl[<<"R", j>>], qsg); end if;
+    if j < NC then j := j + 1; goto SLa; end if;
+SLb: \* the cancel: lost to a notifier, the wakeup passed on to every channel
     if sst[qsg] = 0 then
-        sst[qsg] := 2;
+        sst[qsg] := 2 || j := 1;
         goto SL1;
     else
-        fw := Chans || said := said \cup Say("select_forward");
+        fw := Chans || j := 1 || said := said \cup Say("select_forward");
     end if;
 SLf: \* wake_one_waiter on each channel
     if fw = {} then
@@ -1151,6 +1234,22 @@ SLf: \* wake_one_waiter on each channel
             fw := fw \ {c};
             call NotifyOne("R", c);
             goto SLf;
+        end with;
+    end if;
+SLw: \* woken: unregister_signal on channel j (select_keeps_entries: none)
+    if ~MutSelKeeps then wl[<<"R", j>>] := Remove(wl[<<"R", j>>], qsg); end if;
+    if j < NC then j := j + 1; goto SLw; end if;
+SLc: \* the cancel: lost, as a channel woke the signal: that wakeup is this pass's
+    if sst[qsg] = 0 then sst[qsg] := 2 || j := 1 || wk := FALSE; else j := 1 || wk := TRUE; end if;
+    goto SL1;
+SLq: \* wake_one_waiter on each channel that holds a value (is_empty() of each as one), then done
+    if fw = {} then
+        return;
+    else
+        with c \in fw do
+            fw := fw \ {c};
+            call NotifyOne("R", c);
+            goto SLq;
         end with;
     end if;
 SLx: \* the drain: try_recv of every arm once more, then the disconnected arm
@@ -1164,7 +1263,12 @@ SLx: \* the drain: try_recv of every arm once more, then the disconnected arm
 SLy:
     if rv[self] # 0 then
         stake[self] := stake[self] + 1;
-        return;
+        if wk /\ ~MutNoPassOn then
+            fw := {c \in Chans : aq[c] # <<>>};
+            goto SLq;
+        else
+            return;
+        end if;
     elsif j < NC then
         j := j + 1;
         goto SLx;
@@ -1208,7 +1312,7 @@ end procedure;
 
 \* ---------------------------------------------------------------- the threads
 process Thread \in Threads
-variables i = 1, rdone = {};
+variables i = 1, rdone = {}, dch = 0;
 begin
 T1: \* the next operation (`i` names the one after it)
     while i <= Len(Prog[self]) do
@@ -1217,6 +1321,9 @@ T1: \* the next operation (`i` names the one after it)
             created := created \cup {Val(self, i - 1)} || rv[self] := 0;
             if Cap > 0 then
                 call BSend(Prog[self][i - 1].c, Val(self, i - 1));
+            elsif rgone[Prog[self][i - 1].c] /\ ~MutNoURcount then
+                \* every receiver gone: the value dropped, the send returns
+                drops[Val(self, i - 1)] := drops[Val(self, i - 1)] + 1 || said := said \cup Say("rx_gone");
             elsif Stepped \/ MutWakeEarly then
                 call USend(Prog[self][i - 1].c, Val(self, i - 1));
             else
@@ -1261,16 +1368,34 @@ T1: \* the next operation (`i` names the one after it)
     end while;
     \* the thread's last answer, deadline and select count let go
     rv[self] := 0 || late[self] := FALSE || stake[self] := 0;
-TX: \* the thread's receivers dropped with it (bounded): receiver_count.fetch_sub(1); the last one
-    \* sets receivers_gone and (the fence) notifies every sender
-    while Cap > 0 /\ \E c \in Chans : self \in ReceiversOf(c) /\ rcount[c] > 0 /\ ~(c \in rdone) do
+TX: \* the thread's receivers dropped with it: receiver_count.fetch_sub(1); the last one sets
+    \* receivers_gone and (bounded, the fence) notifies every sender, or (unbounded) drains what is
+    \* queued with try_recv (unbounded_no_receiver_count: no count, no drain)
+    while \E c \in Chans : self \in ReceiversOf(c) /\ rcount[c] > 0 /\ ~(c \in rdone) do
         with c \in {x \in Chans : self \in ReceiversOf(x) /\ rcount[x] > 0 /\ ~(x \in rdone)} do
-            rcount[c] := rcount[c] - 1 || rdone := rdone \cup {c};
+            rcount[c] := rcount[c] - 1 || rdone := rdone \cup {c} || dch := c;
             if rcount[c] = 0 then
-                rgone[c] := TRUE;
-                if SWaiters then call NotifyAll("S", c); end if;
+                rgone[c] := Cap > 0 \/ ~MutNoURcount;
+                if Cap > 0 /\ SWaiters then call NotifyAll("S", c); goto TXa; end if;
             end if;
         end with;
+TXa:    \* (rendezvous) the last receiver's drop also wakes every send waiting for its value
+        if Rdv /\ rcount[dch] = 0 then
+            call NotifyAll("A", dch);
+            goto TXd;
+        end if;
+TXd:    \* (unbounded) the last receiver's drain, try_recv until None
+        if Cap = 0 /\ rcount[dch] = 0 /\ dch \notin drained then
+            if MutNoURcount then
+                drained := drained \cup {dch};
+            elsif Stepped then
+                call TryRecv(dch);
+                goto TXe;
+            else
+                TakeAtomic(dch);
+            end if;
+TXe:        if rv[self] # 0 then goto TXd; else drained := drained \cup {dch} || rv[self] := 0; end if;
+        end if;
     end while;
 end process;
 
@@ -1286,13 +1411,15 @@ TD2:
         if scount[dc] = 0 then
             \* Channel::drop: the pin, head.load
             busy[Teardown] := TRUE || cur := head[dc] || dropped := dropped \cup {dc};
-TD3:        \* next.load, retire_node(curr); (drop_no_drain) the head only
+TD3:        \* next.load, drop_node(curr): no thread reaches the node, so it is freed, its value
+            \* dropped, at once; (drop_no_drain) the head only
             while cur # NULL do
                 errs := errs \cup Touch(cur) \cup (IF cur \in retired THEN {"uaf"} ELSE {})
-                    || retired := retired \cup {cur} || holders[cur] := Holders
+                    || freed := freed \cup {cur} || ndata := Wiped(ndata, {cur})
+                    || drops := Dropped(drops, ndata, {cur}) || said := said \cup NodeDrops(ndata, {cur})
                     || cur := IF MutNoDrain THEN NULL ELSE nnext[cur];
             end while;
-            \* the guard dropped, kovan::flush(): kovan frees what it retired
+TD5:        \* the guard dropped, kovan::flush(): kovan frees what the operations retired
             with hold = LetGo(Teardown, holders) do
             with F = Unheld(retired, hold) do
                 busy[Teardown] := FALSE || holders := hold || freed := freed \cup F
@@ -1307,16 +1434,23 @@ TD4:
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "afeecd3a" /\ chksum(tla) = "ef09f5e6")
-\* Process variable dc of process TheDrop at line 1280 col 11 changed to dc_
+\* BEGIN TRANSLATION (chksum(pcal) = "8da2a000" /\ chksum(tla) = "c6d51186")
+\* Process variable dc of process TheDrop at line 1405 col 11 changed to dc_
+\* Procedure variable wk of procedure Notify at line 373 col 11 changed to wk_
 CONSTANT defaultInitValue
 VARIABLES head, tail, nnext, ndata, allocated, retired, freed, holders, busy, 
-          aq, links, len, scount, disc, rcount, rgone, wl, nsig, sst, skind, 
-          sown, aws, cell, incell, owed, token, woken, late, stake, created, 
-          drops, took, dropped, said, errs, bound, rv, final, popd, pc, stack
+          aq, links, len, scount, disc, rcount, rgone, drained, rsent, rtaken, 
+          btk, acking, wl, nsig, sst, skind, sown, aws, cell, incell, owed, 
+          token, woken, late, stake, created, drops, took, dropped, said, 
+          errs, bound, rv, final, popd, pc, stack
 
 (* define statement *)
 AllDone == \A t \in Threads : pc[t] = "Done"
+
+
+StaleAt(s) == {k \in DOMAIN s : sst[s[k]] # 0}
+RemoveAt(s, k) == [n \in 1 .. Len(s) - 1 |-> IF n < k THEN s[n] ELSE s[n + 1]]
+Reg(s, sig, k) == Append(IF k = 0 THEN s ELSE RemoveAt(s, k), sig)
 Touch(n) == IF n \in freed THEN {"uaf"} ELSE {}
 
 Holders == {u \in Pinners : busy[u]}
@@ -1339,20 +1473,20 @@ TakeCheck(ch, v) == IF v = 0 \/ aq[ch] = <<>> \/ Head(aq[ch]) # v THEN {"order"}
 Consume(v) == IF v = 0 THEN drops ELSE [drops EXCEPT ![v] = @ + 1]
 Drained(t, v) == IF v # 0 /\ final[t] THEN Say("drain_value") ELSE {}
 
-VARIABLES ns, nstore, wk, rs, ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-          apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
-          bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
-          ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, cur
+VARIABLES ns, nstore, wk_, rs, ws, dws, nside, nc, bside, bch, bsig, aside, 
+          ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
+          sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
+          ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur
 
 vars == << head, tail, nnext, ndata, allocated, retired, freed, holders, busy, 
-           aq, links, len, scount, disc, rcount, rgone, wl, nsig, sst, skind, 
-           sown, aws, cell, incell, owed, token, woken, late, stake, created, 
-           drops, took, dropped, said, errs, bound, rv, final, popd, pc, 
-           stack, ns, nstore, wk, rs, ws, dws, nside, nc, bside, bch, bsig, 
-           aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-           sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-           dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, cur
-        >>
+           aq, links, len, scount, disc, rcount, rgone, drained, rsent, 
+           rtaken, btk, acking, wl, nsig, sst, skind, sown, aws, cell, incell, 
+           owed, token, woken, late, stake, created, drops, took, dropped, 
+           said, errs, bound, rv, final, popd, pc, stack, ns, nstore, wk_, rs, 
+           ws, dws, nside, nc, bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+           lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
+           xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+           ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 ProcSet == (Threads) \cup {Teardown}
 
@@ -1372,7 +1506,12 @@ Init == (* Global variables *)
         /\ scount = [c \in Chans |-> Cardinality(SendersOf(c))]
         /\ disc = [c \in Chans |-> SendersOf(c) = {}]
         /\ rcount = [c \in Chans |-> Cardinality(ReceiversOf(c))]
-        /\ rgone = [c \in Chans |-> Cap > 0 /\ ReceiversOf(c) = {}]
+        /\ rgone = [c \in Chans |-> ReceiversOf(c) = {} /\ (Cap > 0 \/ ~MutNoURcount)]
+        /\ drained = {c \in Chans : Cap = 0 /\ ReceiversOf(c) = {}}
+        /\ rsent = [c \in Chans |-> 0]
+        /\ rtaken = [c \in Chans |-> 0]
+        /\ btk = [t \in Threads |-> 0]
+        /\ acking = [t \in Threads |-> FALSE]
         /\ wl = [x \in Sides \X Chans |-> <<>>]
         /\ nsig = 0
         /\ sst = [s \in Sigs |-> 0]
@@ -1399,7 +1538,7 @@ Init == (* Global variables *)
         (* Procedure Notify *)
         /\ ns = [ self \in ProcSet |-> defaultInitValue]
         /\ nstore = [ self \in ProcSet |-> defaultInitValue]
-        /\ wk = [ self \in ProcSet |-> FALSE]
+        /\ wk_ = [ self \in ProcSet |-> FALSE]
         (* Procedure AwRegister *)
         /\ rs = [ self \in ProcSet |-> defaultInitValue]
         (* Procedure Wait *)
@@ -1464,11 +1603,13 @@ Init == (* Global variables *)
         /\ ready = [ self \in ProcSet |-> FALSE]
         /\ regd = [ self \in ProcSet |-> {}]
         /\ fw = [ self \in ProcSet |-> {}]
+        /\ wk = [ self \in ProcSet |-> FALSE]
         (* Procedure SelectD *)
         /\ dj = [ self \in ProcSet |-> 1]
         (* Process Thread *)
         /\ i = [self \in Threads |-> 1]
         /\ rdone = [self \in Threads |-> {}]
+        /\ dch = [self \in Threads |-> 0]
         (* Process TheDrop *)
         /\ dc_ = 1
         /\ cur = NULL
@@ -1482,7 +1623,7 @@ NT1(self) == /\ pc[self] = "NT1"
                    THEN /\ IF skind[ns[self]] = "thread"
                               THEN /\ token' = [token EXCEPT ![sown[ns[self]]] = TRUE]
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                   /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                                   /\ wk_' = [wk_ EXCEPT ![self] = Head(stack[self]).wk_]
                                    /\ ns' = [ns EXCEPT ![self] = Head(stack[self]).ns]
                                    /\ nstore' = [nstore EXCEPT ![self] = Head(stack[self]).nstore]
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
@@ -1492,10 +1633,10 @@ NT1(self) == /\ pc[self] = "NT1"
                                                  /\ incell' = [incell EXCEPT ![ns[self]] = incell[ns[self]] \cup {self}]
                                               /\ pc' = [pc EXCEPT ![self] = "TK2"]
                                               /\ UNCHANGED << stack, ns, 
-                                                              nstore, wk >>
+                                                              nstore, wk_ >>
                                          ELSE /\ aws' = [aws EXCEPT ![ns[self]] = IF aws[ns[self]] >= 2 THEN aws[ns[self]] ELSE aws[ns[self]] + 2]
                                               /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                              /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                                              /\ wk_' = [wk_ EXCEPT ![self] = Head(stack[self]).wk_]
                                               /\ ns' = [ns EXCEPT ![self] = Head(stack[self]).ns]
                                               /\ nstore' = [nstore EXCEPT ![self] = Head(stack[self]).nstore]
                                               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
@@ -1509,17 +1650,18 @@ NT1(self) == /\ pc[self] = "NT1"
                                       /\ sst' = [sst EXCEPT ![ns[self]] = 1]
                                    /\ token' = token
                         /\ pc' = [pc EXCEPT ![self] = "NT2"]
-                        /\ UNCHANGED << aws, incell, stack, ns, nstore, wk >>
+                        /\ UNCHANGED << aws, incell, stack, ns, nstore, wk_ >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, skind, sown, cell, 
-                             woken, late, stake, created, drops, took, dropped, 
-                             said, errs, bound, rv, final, rs, ws, dws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, skind, sown, cell, woken, late, 
+                             stake, created, drops, took, dropped, said, errs, 
+                             bound, rv, final, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 NT2(self) == /\ pc[self] = "NT2"
              /\ IF skind[ns[self]] = "thread"
@@ -1529,65 +1671,68 @@ NT2(self) == /\ pc[self] = "NT2"
                               ELSE /\ token' = [token EXCEPT ![sown[ns[self]]] = TRUE]
                                    /\ sst' = sst
                         /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                        /\ wk_' = [wk_ EXCEPT ![self] = Head(stack[self]).wk_]
                         /\ ns' = [ns EXCEPT ![self] = Head(stack[self]).ns]
                         /\ nstore' = [nstore EXCEPT ![self] = Head(stack[self]).nstore]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TK1"]
-                        /\ UNCHANGED << sst, token, stack, ns, nstore, wk >>
+                        /\ UNCHANGED << sst, token, stack, ns, nstore, wk_ >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, skind, sown, aws, 
-                             cell, incell, owed, woken, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, rs, ws, dws, nside, nc, bside, bch, 
-                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
-                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
-                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
-                             yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, skind, sown, aws, cell, incell, 
+                             owed, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, rs, 
+                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 TK1(self) == /\ pc[self] = "TK1"
              /\ IF aws[ns[self]] = 0 \/ MutTakeAny
                    THEN /\ /\ aws' = [aws EXCEPT ![ns[self]] = IF aws[ns[self]] >= 2 THEN aws[ns[self]] ELSE aws[ns[self]] + 2]
                            /\ incell' = [incell EXCEPT ![ns[self]] = incell[ns[self]] \cup {self}]
                         /\ pc' = [pc EXCEPT ![self] = "TK2"]
-                        /\ UNCHANGED << stack, ns, nstore, wk >>
+                        /\ UNCHANGED << stack, ns, nstore, wk_ >>
                    ELSE /\ aws' = [aws EXCEPT ![ns[self]] = IF aws[ns[self]] >= 2 THEN aws[ns[self]] ELSE aws[ns[self]] + 2]
                         /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                        /\ wk_' = [wk_ EXCEPT ![self] = Head(stack[self]).wk_]
                         /\ ns' = [ns EXCEPT ![self] = Head(stack[self]).ns]
                         /\ nstore' = [nstore EXCEPT ![self] = Head(stack[self]).nstore]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED incell
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             cell, owed, token, woken, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, rs, ws, dws, nside, nc, bside, bch, 
-                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
-                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
-                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
-                             yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, cell, owed, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, rs, 
+                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 TK2(self) == /\ pc[self] = "TK2"
              /\ /\ cell' = [cell EXCEPT ![ns[self]] = FALSE]
                 /\ owed' = [owed EXCEPT ![ns[self]] = owed[ns[self]] /\ cell[ns[self]]]
-                /\ wk' = [wk EXCEPT ![self] = cell[ns[self]]]
+                /\ wk_' = [wk_ EXCEPT ![self] = cell[ns[self]]]
              /\ pc' = [pc EXCEPT ![self] = "TK3"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, incell, token, woken, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, incell, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 TK3(self) == /\ pc[self] = "TK3"
              /\ /\ aws' = [aws EXCEPT ![ns[self]] = IF aws[ns[self]] >= 2 THEN aws[ns[self]] - 2 ELSE aws[ns[self]]]
@@ -1595,38 +1740,40 @@ TK3(self) == /\ pc[self] = "TK3"
              /\ pc' = [pc EXCEPT ![self] = "TK4"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             cell, owed, token, woken, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, cell, owed, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 TK4(self) == /\ pc[self] = "TK4"
-             /\ IF wk[self]
+             /\ IF wk_[self]
                    THEN /\ /\ owed' = [owed EXCEPT ![ns[self]] = FALSE]
                            /\ woken' = [woken EXCEPT ![sown[ns[self]]] = TRUE]
                    ELSE /\ TRUE
                         /\ UNCHANGED << owed, woken >>
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-             /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+             /\ wk_' = [wk_ EXCEPT ![self] = Head(stack[self]).wk_]
              /\ ns' = [ns EXCEPT ![self] = Head(stack[self]).ns]
              /\ nstore' = [nstore EXCEPT ![self] = Head(stack[self]).nstore]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, token, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, rs, ws, dws, nside, nc, bside, bch, 
-                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
-                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
-                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
-                             yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, token, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, rs, 
+                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 Notify(self) == NT1(self) \/ NT2(self) \/ TK1(self) \/ TK2(self)
                    \/ TK3(self) \/ TK4(self)
@@ -1653,29 +1800,31 @@ RG1(self) == /\ pc[self] = "RG1"
                         /\ UNCHANGED << aws, incell >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             cell, token, late, stake, created, drops, took, 
-                             dropped, bound, rv, final, popd, ns, nstore, wk, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
-                             j, qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, cell, token, 
+                             late, stake, created, drops, took, dropped, bound, 
+                             rv, final, popd, ns, nstore, wk_, ws, dws, nside, 
+                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
+                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RG2(self) == /\ pc[self] = "RG2"
              /\ cell' = [cell EXCEPT ![rs[self]] = TRUE]
              /\ pc' = [pc EXCEPT ![self] = "RG3"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, stack, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RG3(self) == /\ pc[self] = "RG3"
              /\ IF aws[rs[self]] = 1 \/ MutNoRedeliver
@@ -1688,15 +1837,16 @@ RG3(self) == /\ pc[self] = "RG3"
                         /\ UNCHANGED << aws, incell, stack, rs >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             cell, owed, token, woken, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, ns, nstore, wk, ws, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
-                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
-                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, cell, owed, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, ns, 
+                             nstore, wk_, ws, dws, nside, nc, bside, bch, bsig, 
+                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
+                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
+                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
+                             yq, j, qsg, ready, regd, fw, wk, dj, i, rdone, 
+                             dch, dc_, cur >>
 
 RG4(self) == /\ pc[self] = "RG4"
              /\ /\ cell' = [cell EXCEPT ![rs[self]] = FALSE]
@@ -1704,15 +1854,16 @@ RG4(self) == /\ pc[self] = "RG4"
              /\ pc' = [pc EXCEPT ![self] = "RG5"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RG5(self) == /\ pc[self] = "RG5"
              /\ /\ aws' = [aws EXCEPT ![rs[self]] = 0]
@@ -1720,15 +1871,16 @@ RG5(self) == /\ pc[self] = "RG5"
              /\ pc' = [pc EXCEPT ![self] = "RG6"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             cell, owed, token, woken, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, cell, owed, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RG6(self) == /\ pc[self] = "RG6"
              /\ /\ owed' = [owed EXCEPT ![rs[self]] = FALSE]
@@ -1738,15 +1890,16 @@ RG6(self) == /\ pc[self] = "RG6"
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, token, late, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, ns, nstore, wk, ws, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
-                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
-                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, token, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, ns, 
+                             nstore, wk_, ws, dws, nside, nc, bside, bch, bsig, 
+                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
+                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
+                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
+                             yq, j, qsg, ready, regd, fw, wk, dj, i, rdone, 
+                             dch, dc_, cur >>
 
 AwRegister(self) == RG1(self) \/ RG2(self) \/ RG3(self) \/ RG4(self)
                        \/ RG5(self) \/ RG6(self)
@@ -1760,15 +1913,16 @@ WT1(self) == /\ pc[self] = "WT1"
                         /\ UNCHANGED << stack, ws >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, ns, nstore, wk, rs, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 WT2(self) == /\ pc[self] = "WT2"
              /\ token[self]
@@ -1777,15 +1931,16 @@ WT2(self) == /\ pc[self] = "WT2"
              /\ pc' = [pc EXCEPT ![self] = "WT1"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, woken, late, stake, 
-                             created, drops, took, dropped, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, woken, late, stake, created, drops, 
+                             took, dropped, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 Wait(self) == WT1(self) \/ WT2(self)
 
@@ -1804,15 +1959,16 @@ WD1(self) == /\ pc[self] = "WD1"
                                    /\ UNCHANGED << rv, stack, dws >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, final, popd, ns, nstore, wk, rs, ws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, final, 
+                             popd, ns, nstore, wk_, rs, ws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 WD2(self) == /\ pc[self] = "WD2"
              /\ IF token[self]
@@ -1823,15 +1979,16 @@ WD2(self) == /\ pc[self] = "WD2"
              /\ pc' = [pc EXCEPT ![self] = "WD1"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, woken, stake, created, 
-                             drops, took, dropped, said, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, woken, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 WaitDeadline(self) == WD1(self) \/ WD2(self)
 
@@ -1849,31 +2006,32 @@ NO1(self) == /\ pc[self] = "NO1"
                         /\ UNCHANGED << stack, nside, nc >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, ns, nstore, wk, rs, ws, dws, bside, 
-                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
-                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
-                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, ns, 
+                             nstore, wk_, rs, ws, dws, bside, bch, bsig, aside, 
+                             ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 NO2(self) == /\ pc[self] = "NO2"
              /\ IF sst[popd[self]] # 0 /\ ~MutNoSkip
                    THEN /\ said' = (said \cup Say("skip"))
                         /\ pc' = [pc EXCEPT ![self] = "NO1"]
-                        /\ UNCHANGED << sst, owed, stack, ns, nstore, wk >>
+                        /\ UNCHANGED << sst, owed, stack, ns, nstore, wk_ >>
                    ELSE /\ IF MutCheckNotify \/ MutNoSkip \/ MutUnparkFirst
                               THEN /\ /\ ns' = [ns EXCEPT ![self] = popd[self]]
                                       /\ nstore' = [nstore EXCEPT ![self] = TRUE]
                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                                                pc        |->  Head(stack[self]).pc,
-                                                                               wk        |->  wk[self],
+                                                                               wk_       |->  wk_[self],
                                                                                ns        |->  ns[self],
                                                                                nstore    |->  nstore[self] ] >>
                                                                            \o Tail(stack[self])]
-                                   /\ wk' = [wk EXCEPT ![self] = FALSE]
+                                   /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = "NT1"]
                                    /\ UNCHANGED << sst, owed >>
                               ELSE /\ /\ owed' = [owed EXCEPT ![popd[self]] = skind[popd[self]] = "async"
@@ -1883,26 +2041,45 @@ NO2(self) == /\ pc[self] = "NO2"
                                       /\ nstore' = [nstore EXCEPT ![self] = FALSE]
                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                                                pc        |->  Head(stack[self]).pc,
-                                                                               wk        |->  wk[self],
+                                                                               wk_       |->  wk_[self],
                                                                                ns        |->  ns[self],
                                                                                nstore    |->  nstore[self] ] >>
                                                                            \o Tail(stack[self])]
-                                   /\ wk' = [wk EXCEPT ![self] = FALSE]
+                                   /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = "NT1"]
                         /\ said' = said
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, skind, sown, aws, 
-                             cell, incell, token, woken, late, stake, created, 
-                             drops, took, dropped, errs, bound, rv, final, 
-                             popd, rs, ws, dws, nside, nc, bside, bch, bsig, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
-                             yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, 
-                             cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, skind, sown, aws, cell, incell, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, errs, bound, rv, final, popd, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
+                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 NotifyOne(self) == NO1(self) \/ NO2(self)
+
+AB0(self) == /\ pc[self] = "AB0"
+             /\ IF ~MutKeepsEntry
+                   THEN /\ wl' = [wl EXCEPT ![<<bside[self], bch[self]>>] = Remove(wl[<<bside[self], bch[self]>>], bsig[self])]
+                   ELSE /\ TRUE
+                        /\ wl' = wl
+             /\ pc' = [pc EXCEPT ![self] = "AB1"]
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AB1(self) == /\ pc[self] = "AB1"
              /\ IF MutSelfNotify
@@ -1910,11 +2087,11 @@ AB1(self) == /\ pc[self] = "AB1"
                            /\ nstore' = [nstore EXCEPT ![self] = TRUE]
                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                                     pc        |->  Head(stack[self]).pc,
-                                                                    wk        |->  wk[self],
+                                                                    wk_       |->  wk_[self],
                                                                     ns        |->  ns[self],
                                                                     nstore    |->  nstore[self] ] >>
                                                                 \o Tail(stack[self])]
-                        /\ wk' = [wk EXCEPT ![self] = FALSE]
+                        /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
                         /\ pc' = [pc EXCEPT ![self] = "NT1"]
                         /\ UNCHANGED << sst, said, nside, nc, bside, bch, bsig >>
                    ELSE /\ IF sst[bsig[self]] = 0
@@ -1935,19 +2112,20 @@ AB1(self) == /\ pc[self] = "AB1"
                                                                            \o Tail(stack[self])]
                                    /\ pc' = [pc EXCEPT ![self] = "NO1"]
                                    /\ UNCHANGED << sst, bside, bch, bsig >>
-                        /\ UNCHANGED << ns, nstore, wk >>
+                        /\ UNCHANGED << ns, nstore, wk_ >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, errs, bound, rv, 
-                             final, popd, rs, ws, dws, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, errs, bound, rv, final, popd, rs, 
+                             ws, dws, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
-Abandon(self) == AB1(self)
+Abandon(self) == AB0(self) \/ AB1(self)
 
 NA1(self) == /\ pc[self] = "NA1"
              /\ IF wl[<<aside[self], ac[self]>>] = <<>>
@@ -1963,43 +2141,71 @@ NA1(self) == /\ pc[self] = "NA1"
                         /\ UNCHANGED << stack, aside, ac >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, rlc, rc, lh, lt, ln, 
-                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
-                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             ns, nstore, wk_, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 NA2(self) == /\ pc[self] = "NA2"
              /\ /\ ns' = [ns EXCEPT ![self] = apop[self]]
                 /\ nstore' = [nstore EXCEPT ![self] = TRUE]
                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                          pc        |->  "NA1",
-                                                         wk        |->  wk[self],
+                                                         wk_       |->  wk_[self],
                                                          ns        |->  ns[self],
                                                          nstore    |->  nstore[self] ] >>
                                                      \o stack[self]]
-             /\ wk' = [wk EXCEPT ![self] = FALSE]
+             /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
              /\ pc' = [pc EXCEPT ![self] = "NT1"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, rs, ws, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
-                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
-                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 NotifyAll(self) == NA1(self) \/ NA2(self)
 
 RL1(self) == /\ pc[self] = "RL1"
-             /\ len' = [len EXCEPT ![rlc[self]] = len[rlc[self]] - 1]
+             /\ /\ len' = [len EXCEPT ![rlc[self]] = len[rlc[self]] - 1]
+                /\ rtaken' = [rtaken EXCEPT ![rlc[self]] = rtaken[rlc[self]] + (IF Rdv THEN 1 ELSE 0)]
+             /\ IF Rdv /\ ~MutRdvNoAck
+                   THEN /\ /\ nc' = [nc EXCEPT ![self] = rlc[self]]
+                           /\ nside' = [nside EXCEPT ![self] = "A"]
+                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyOne",
+                                                                    pc        |->  "RL2",
+                                                                    nside     |->  nside[self],
+                                                                    nc        |->  nc[self] ] >>
+                                                                \o stack[self]]
+                        /\ pc' = [pc EXCEPT ![self] = "NO1"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "RL2"]
+                        /\ UNCHANGED << stack, nside, nc >>
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, scount, disc, 
+                             rcount, rgone, drained, rsent, btk, acking, wl, 
+                             nsig, sst, skind, sown, aws, cell, incell, owed, 
+                             token, woken, late, stake, created, drops, took, 
+                             dropped, said, errs, bound, rv, final, popd, ns, 
+                             nstore, wk_, rs, ws, dws, bside, bch, bsig, aside, 
+                             ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
+
+RL2(self) == /\ pc[self] = "RL2"
              /\ IF MutReleaseNoNotify \/ ~SWaiters
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ rlc' = [rlc EXCEPT ![self] = Head(stack[self]).rlc]
@@ -2015,18 +2221,19 @@ RL1(self) == /\ pc[self] = "RL1"
                         /\ pc' = [pc EXCEPT ![self] = "NO1"]
                         /\ rlc' = rlc
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
-                             freed, holders, busy, aq, links, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             bside, bch, bsig, aside, ac, apop, rc, lh, lt, ln, 
-                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
-                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, bside, 
+                             bch, bsig, aside, ac, apop, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
-Release(self) == RL1(self)
+Release(self) == RL1(self) \/ RL2(self)
 
 TR1(self) == /\ pc[self] = "TR1"
              /\ IF MutTailFirst
@@ -2039,15 +2246,16 @@ TR1(self) == /\ pc[self] = "TR1"
              /\ pc' = [pc EXCEPT ![self] = "TR2"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, aq, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, stack, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                             rlc, rc, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
                              zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 TR1r(self) == /\ pc[self] = "TR1r"
               /\ IF MutTailFirst
@@ -2058,15 +2266,16 @@ TR1r(self) == /\ pc[self] = "TR1r"
               /\ pc' = [pc EXCEPT ![self] = "TR2"]
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, errs, 
-                              bound, rv, final, popd, stack, ns, nstore, wk, 
-                              rs, ws, dws, nside, nc, bside, bch, bsig, aside, 
-                              ac, apop, rlc, rc, ln, ec, eh, et, ene, elinks, 
-                              sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, 
-                              xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                              ready, regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, errs, bound, rv, 
+                              final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                              nside, nc, bside, bch, bsig, aside, ac, apop, 
+                              rlc, rc, ln, ec, eh, et, ene, elinks, sc, sv, st, 
+                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                              regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 TR2(self) == /\ pc[self] = "TR2"
              /\ IF MutTailFirst
@@ -2099,14 +2308,15 @@ TR2(self) == /\ pc[self] = "TR2"
                                                    drops, said, errs, rv, 
                                                    final, stack, rc, lh, ln >>
              /\ UNCHANGED << head, tail, nnext, allocated, retired, aq, links, 
-                             len, scount, disc, rcount, rgone, wl, nsig, sst, 
-                             skind, sown, aws, cell, incell, owed, token, 
-                             woken, late, stake, created, took, dropped, bound, 
-                             popd, ns, nstore, wk, rs, ws, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, ec, eh, 
-                             et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
-                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
-                             ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, 
+                             len, scount, disc, rcount, rgone, drained, rsent, 
+                             rtaken, btk, acking, wl, nsig, sst, skind, sown, 
+                             aws, cell, incell, owed, token, woken, late, 
+                             stake, created, took, dropped, bound, popd, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
                              dc_, cur >>
 
 TR3(self) == /\ pc[self] = "TR3"
@@ -2143,14 +2353,15 @@ TR3(self) == /\ pc[self] = "TR3"
                         /\ UNCHANGED << ndata, freed, holders, busy, drops, 
                                         said, rv, final, stack, rc, lh, lt >>
              /\ UNCHANGED << head, tail, nnext, allocated, retired, aq, links, 
-                             len, scount, disc, rcount, rgone, wl, nsig, sst, 
-                             skind, sown, aws, cell, incell, owed, token, 
-                             woken, late, stake, created, took, dropped, bound, 
-                             popd, ns, nstore, wk, rs, ws, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, ec, eh, 
-                             et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
-                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
-                             ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, 
+                             len, scount, disc, rcount, rgone, drained, rsent, 
+                             rtaken, btk, acking, wl, nsig, sst, skind, sown, 
+                             aws, cell, incell, owed, token, woken, late, 
+                             stake, created, took, dropped, bound, popd, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
                              dc_, cur >>
 
 TR4t(self) == /\ pc[self] = "TR4t"
@@ -2162,15 +2373,16 @@ TR4t(self) == /\ pc[self] = "TR4t"
               /\ pc' = [pc EXCEPT ![self] = "TR1r"]
               /\ UNCHANGED << head, nnext, ndata, allocated, retired, freed, 
                               holders, busy, aq, links, len, scount, disc, 
-                              rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                              cell, incell, owed, token, woken, late, stake, 
-                              created, drops, took, dropped, errs, bound, rv, 
-                              final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                              nside, nc, bside, bch, bsig, aside, ac, apop, 
-                              rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                              sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                              dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                              ready, regd, fw, dj, i, rdone, dc_, cur >>
+                              rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, errs, bound, rv, final, 
+                              popd, stack, ns, nstore, wk_, rs, ws, dws, nside, 
+                              nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                              lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
+                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                              regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 TR4h(self) == /\ pc[self] = "TR4h"
               /\ IF head[rc[self]] = lh[self]
@@ -2215,14 +2427,15 @@ TR4h(self) == /\ pc[self] = "TR4h"
                                          busy, aq, drops, took, said, errs, rv, 
                                          final, stack, rlc, rc, lh, lt, ln >>
               /\ UNCHANGED << tail, nnext, allocated, links, len, scount, disc, 
-                              rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                              cell, incell, owed, token, woken, late, stake, 
-                              created, dropped, bound, popd, ns, nstore, wk, 
-                              rs, ws, dws, nside, nc, bside, bch, bsig, aside, 
-                              ac, apop, ec, eh, et, ene, elinks, sc, sv, st, 
-                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                              regd, fw, dj, i, rdone, dc_, cur >>
+                              rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                              dws, nside, nc, bside, bch, bsig, aside, ac, 
+                              apop, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                              bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                              zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                              fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 TryRecv(self) == TR1(self) \/ TR1r(self) \/ TR2(self) \/ TR3(self)
                     \/ TR4t(self) \/ TR4h(self)
@@ -2235,30 +2448,32 @@ IE1(self) == /\ pc[self] = "IE1"
              /\ pc' = [pc EXCEPT ![self] = "IE2"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, aq, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, stack, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                             rlc, rc, lh, lt, ln, ec, et, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, et, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 IE2(self) == /\ pc[self] = "IE2"
              /\ et' = [et EXCEPT ![self] = tail[ec[self]]]
              /\ pc' = [pc EXCEPT ![self] = "IE3"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, ene, elinks, 
-                             sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, 
-                             xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                             ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, ene, elinks, sc, sv, st, 
+                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 IE3(self) == /\ pc[self] = "IE3"
              /\ LET hold == LetGo(self, holders) IN
@@ -2282,15 +2497,15 @@ IE3(self) == /\ pc[self] = "IE3"
              /\ ec' = [ec EXCEPT ![self] = Head(stack[self]).ec]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << head, tail, nnext, allocated, retired, aq, links, 
-                             len, scount, disc, rcount, rgone, wl, nsig, sst, 
-                             skind, sown, aws, cell, incell, owed, token, 
-                             woken, late, stake, created, took, dropped, bound, 
-                             final, popd, ns, nstore, wk, rs, ws, dws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
-                             yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, 
-                             cur >>
+                             len, scount, disc, rcount, rgone, drained, rsent, 
+                             rtaken, btk, acking, wl, nsig, sst, skind, sown, 
+                             aws, cell, incell, owed, token, woken, late, 
+                             stake, created, took, dropped, bound, final, popd, 
+                             ns, nstore, wk_, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, 
+                             xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                             ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 IsEmpty(self) == IE1(self) \/ IE2(self) \/ IE3(self)
 
@@ -2333,29 +2548,32 @@ SE1(self) == /\ pc[self] = "SE1"
                                                    errs, stack, sc, sv, sn >>
                         /\ UNCHANGED << nside, nc >>
              /\ UNCHANGED << head, retired, freed, holders, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, bound, rv, 
-                             final, popd, ns, nstore, wk, rs, ws, dws, bside, 
-                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
-                             ec, eh, et, ene, elinks, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
-                             j, qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, bound, rv, final, 
+                             popd, ns, nstore, wk_, rs, ws, dws, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, bc, bv, bl, bsg, xc, xv, xl, 
+                             xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
+                             cur >>
 
 SE1r(self) == /\ pc[self] = "SE1r"
               /\ st' = [st EXCEPT ![self] = tail[sc[self]]]
               /\ pc' = [pc EXCEPT ![self] = "SE2"]
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, errs, 
-                              bound, rv, final, popd, stack, ns, nstore, wk, 
-                              rs, ws, dws, nside, nc, bside, bch, bsig, aside, 
-                              ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                              elinks, sc, sv, sn, bc, bv, bl, bsg, xc, xv, xl, 
-                              xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                              qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, errs, bound, rv, 
+                              final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                              nside, nc, bside, bch, bsig, aside, ac, apop, 
+                              rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                              sv, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
+                              dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                              ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SE2(self) == /\ pc[self] = "SE2"
              /\ /\ errs' = (errs \cup Touch(st[self]))
@@ -2363,15 +2581,16 @@ SE2(self) == /\ pc[self] = "SE2"
              /\ pc' = [pc EXCEPT ![self] = "SE3"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, bound, 
-                             rv, final, popd, stack, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                             sv, st, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, bound, rv, final, 
+                             popd, stack, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SE3(self) == /\ pc[self] = "SE3"
              /\ IF sn[self] = NULL
@@ -2404,16 +2623,16 @@ SE3(self) == /\ pc[self] = "SE3"
                                    /\ pc' = [pc EXCEPT ![self] = "SE1r"]
                                    /\ UNCHANGED << nnext, aq, links, errs >>
              /\ UNCHANGED << head, ndata, allocated, retired, freed, holders, 
-                             busy, len, scount, disc, rcount, rgone, wl, nsig, 
-                             sst, skind, sown, aws, cell, incell, owed, token, 
-                             woken, late, stake, created, drops, took, dropped, 
-                             said, bound, rv, final, popd, stack, ns, nstore, 
-                             wk, rs, ws, dws, nside, nc, bside, bch, bsig, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
-                             yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, 
-                             cur >>
+                             busy, len, scount, disc, rcount, rgone, drained, 
+                             rsent, rtaken, btk, acking, wl, nsig, sst, skind, 
+                             sown, aws, cell, incell, owed, token, woken, late, 
+                             stake, created, drops, took, dropped, said, bound, 
+                             rv, final, popd, stack, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
+                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SE4(self) == /\ pc[self] = "SE4"
              /\ IF tail[sc[self]] = st[self]
@@ -2440,15 +2659,16 @@ SE4(self) == /\ pc[self] = "SE4"
                                                                 \o stack[self]]
                         /\ pc' = [pc EXCEPT ![self] = "NO1"]
              /\ UNCHANGED << head, nnext, allocated, retired, aq, links, len, 
-                             scount, disc, rcount, rgone, wl, nsig, sst, skind, 
-                             sown, aws, cell, incell, owed, token, woken, late, 
+                             scount, disc, rcount, rgone, drained, rsent, 
+                             rtaken, btk, acking, wl, nsig, sst, skind, sown, 
+                             aws, cell, incell, owed, token, woken, late, 
                              stake, created, took, dropped, errs, bound, rv, 
-                             final, popd, ns, nstore, wk, rs, ws, dws, bside, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, bside, 
                              bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
                              ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
                              bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 SE5(self) == /\ pc[self] = "SE5"
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
@@ -2459,15 +2679,16 @@ SE5(self) == /\ pc[self] = "SE5"
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                             lh, lt, ln, ec, eh, et, ene, elinks, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 USend(self) == SE1(self) \/ SE1r(self) \/ SE2(self) \/ SE3(self)
                   \/ SE4(self) \/ SE5(self)
@@ -2486,15 +2707,16 @@ BS0(self) == /\ pc[self] = "BS0"
                         /\ UNCHANGED << drops, said, stack, bc, bv, bl, bsg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, took, dropped, errs, bound, rv, 
-                             final, popd, ns, nstore, wk, rs, ws, dws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
-                             yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             took, dropped, errs, bound, rv, final, popd, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, xc, xv, xl, 
+                             xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
+                             cur >>
 
 BS1(self) == /\ pc[self] = "BS1"
              /\ bl' = [bl EXCEPT ![self] = len[bc[self]]]
@@ -2503,25 +2725,27 @@ BS1(self) == /\ pc[self] = "BS1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "BS5"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bsg, xc, xv, xl, 
-                             xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 BS2(self) == /\ pc[self] = "BS2"
              /\ IF nsig >= MaxSig
                    THEN /\ bound' = TRUE
                         /\ UNCHANGED << wl, nsig, skind, sown, bsg >>
-                   ELSE /\ /\ bsg' = [bsg EXCEPT ![self] = nsig + 1]
-                           /\ nsig' = nsig + 1
-                           /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
-                           /\ sown' = [sown EXCEPT ![nsig + 1] = self]
-                           /\ wl' = [wl EXCEPT ![<<"S", bc[self]>>] = Append(wl[<<"S", bc[self]>>], nsig + 1)]
+                   ELSE /\ \E k \in StaleAt(wl[<<"S", bc[self]>>]) \cup {0}:
+                             /\ bsg' = [bsg EXCEPT ![self] = nsig + 1]
+                             /\ nsig' = nsig + 1
+                             /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
+                             /\ sown' = [sown EXCEPT ![nsig + 1] = self]
+                             /\ wl' = [wl EXCEPT ![<<"S", bc[self]>>] = Reg(wl[<<"S", bc[self]>>], nsig + 1, k)]
                         /\ bound' = bound
              /\ IF MutNoRecheck
                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Wait",
@@ -2534,14 +2758,15 @@ BS2(self) == /\ pc[self] = "BS2"
                         /\ UNCHANGED << stack, ws >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, sst, aws, cell, incell, owed, 
-                             token, woken, late, stake, created, drops, took, 
-                             dropped, said, errs, rv, final, popd, ns, nstore, 
-                             wk, rs, dws, nside, nc, bside, bch, bsig, aside, 
-                             ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, xc, xv, xl, 
-                             xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, sst, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, errs, rv, final, popd, ns, nstore, wk_, rs, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                             sv, st, sn, bc, bv, bl, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 BS3(self) == /\ pc[self] = "BS3"
              /\ IF len[bc[self]] < Cap \/ (rgone[bc[self]] /\ ~MutNoRcount)
@@ -2554,7 +2779,7 @@ BS3(self) == /\ pc[self] = "BS3"
                                                                     bch       |->  bch[self],
                                                                     bsig      |->  bsig[self] ] >>
                                                                 \o stack[self]]
-                        /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                        /\ pc' = [pc EXCEPT ![self] = "AB0"]
                         /\ UNCHANGED << said, ws >>
                    ELSE /\ said' = (said \cup Say("full_wait"))
                         /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Wait",
@@ -2566,50 +2791,50 @@ BS3(self) == /\ pc[self] = "BS3"
                         /\ UNCHANGED << bside, bch, bsig >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, dws, nside, 
-                             nc, aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, 
-                             et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
-                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
-                             ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, errs, bound, rv, final, 
+                             popd, ns, nstore, wk_, rs, dws, nside, nc, aside, 
+                             ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
                              dc_, cur >>
 
 BS5(self) == /\ pc[self] = "BS5"
              /\ IF len[bc[self]] = bl[self]
-                   THEN /\ len' = [len EXCEPT ![bc[self]] = bl[self] + 1]
+                   THEN /\ /\ btk' = [btk EXCEPT ![self] = rsent[bc[self]]]
+                           /\ len' = [len EXCEPT ![bc[self]] = bl[self] + 1]
+                           /\ rsent' = [rsent EXCEPT ![bc[self]] = rsent[bc[self]] + (IF Rdv THEN 1 ELSE 0)]
                         /\ IF Stepped
-                              THEN /\ /\ bl' = [bl EXCEPT ![self] = Head(stack[self]).bl]
-                                      /\ bsg' = [bsg EXCEPT ![self] = Head(stack[self]).bsg]
-                                      /\ sc' = [sc EXCEPT ![self] = bc[self]]
+                              THEN /\ /\ sc' = [sc EXCEPT ![self] = bc[self]]
                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "USend",
-                                                                               pc        |->  Head(stack[self]).pc,
+                                                                               pc        |->  "BS7",
                                                                                st        |->  st[self],
                                                                                sn        |->  sn[self],
                                                                                sc        |->  sc[self],
                                                                                sv        |->  sv[self] ] >>
-                                                                           \o Tail(stack[self])]
+                                                                           \o stack[self]]
                                       /\ sv' = [sv EXCEPT ![self] = bv[self]]
                                    /\ st' = [st EXCEPT ![self] = 0]
                                    /\ sn' = [sn EXCEPT ![self] = 0]
                                    /\ pc' = [pc EXCEPT ![self] = "SE1"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "BS6"]
-                                   /\ UNCHANGED << stack, sc, sv, st, sn, bl, 
-                                                   bsg >>
+                                   /\ UNCHANGED << stack, sc, sv, st, sn >>
                    ELSE /\ pc' = [pc EXCEPT ![self] = "BS0"]
-                        /\ UNCHANGED << len, stack, sc, sv, st, sn, bl, bsg >>
+                        /\ UNCHANGED << len, rsent, btk, stack, sc, sv, st, sn >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, bc, bv, 
-                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
-                             ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, 
-                             dc_, cur >>
+                             rcount, rgone, drained, rtaken, acking, wl, nsig, 
+                             sst, skind, sown, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, errs, bound, rv, final, popd, ns, nstore, 
+                             wk_, rs, ws, dws, nside, nc, bside, bch, bsig, 
+                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
+                             ene, elinks, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
+                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 BS6(self) == /\ pc[self] = "BS6"
              /\ LET last == LastOf(bc[self]) IN
@@ -2621,37 +2846,134 @@ BS6(self) == /\ pc[self] = "BS6"
                   /\ nnext' = [nnext EXCEPT ![last] = bv[self]]
                   /\ tail' = [tail EXCEPT ![bc[self]] = bv[self]]
              /\ IF RWaiters
-                   THEN /\ /\ bl' = [bl EXCEPT ![self] = Head(stack[self]).bl]
-                           /\ bsg' = [bsg EXCEPT ![self] = Head(stack[self]).bsg]
-                           /\ nc' = [nc EXCEPT ![self] = bc[self]]
+                   THEN /\ /\ nc' = [nc EXCEPT ![self] = bc[self]]
                            /\ nside' = [nside EXCEPT ![self] = "R"]
                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyOne",
-                                                                    pc        |->  Head(stack[self]).pc,
+                                                                    pc        |->  "BS7",
                                                                     nside     |->  nside[self],
                                                                     nc        |->  nc[self] ] >>
-                                                                \o Tail(stack[self])]
+                                                                \o stack[self]]
                         /\ pc' = [pc EXCEPT ![self] = "NO1"]
-                        /\ UNCHANGED << bc, bv >>
-                   ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "BS7"]
+                        /\ UNCHANGED << stack, nside, nc >>
+             /\ UNCHANGED << head, retired, freed, holders, busy, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, bound, rv, final, 
+                             popd, ns, nstore, wk_, rs, ws, dws, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
+
+BS7(self) == /\ pc[self] = "BS7"
+             /\ IF ~Rdv
+                   THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ bl' = [bl EXCEPT ![self] = Head(stack[self]).bl]
                         /\ bsg' = [bsg EXCEPT ![self] = Head(stack[self]).bsg]
                         /\ bc' = [bc EXCEPT ![self] = Head(stack[self]).bc]
                         /\ bv' = [bv EXCEPT ![self] = Head(stack[self]).bv]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                        /\ UNCHANGED << nside, nc >>
-             /\ UNCHANGED << head, retired, freed, holders, busy, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
-                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
-                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
-                             ysg, yq, j, qsg, ready, regd, fw, dj, i, rdone, 
-                             dc_, cur >>
+                        /\ UNCHANGED << acking, errs >>
+                   ELSE /\ IF MutRdvNoWait
+                              THEN /\ errs' = (errs \cup (IF rtaken[bc[self]] <= btk[self] /\ ~rgone[bc[self]] THEN {"rdv_early"} ELSE {}))
+                                   /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                   /\ bl' = [bl EXCEPT ![self] = Head(stack[self]).bl]
+                                   /\ bsg' = [bsg EXCEPT ![self] = Head(stack[self]).bsg]
+                                   /\ bc' = [bc EXCEPT ![self] = Head(stack[self]).bc]
+                                   /\ bv' = [bv EXCEPT ![self] = Head(stack[self]).bv]
+                                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                                   /\ UNCHANGED acking
+                              ELSE /\ IF rtaken[bc[self]] > btk[self] \/ rgone[bc[self]]
+                                         THEN /\ acking' = [acking EXCEPT ![self] = FALSE]
+                                              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                              /\ bl' = [bl EXCEPT ![self] = Head(stack[self]).bl]
+                                              /\ bsg' = [bsg EXCEPT ![self] = Head(stack[self]).bsg]
+                                              /\ bc' = [bc EXCEPT ![self] = Head(stack[self]).bc]
+                                              /\ bv' = [bv EXCEPT ![self] = Head(stack[self]).bv]
+                                              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                                         ELSE /\ pc' = [pc EXCEPT ![self] = "BS8"]
+                                              /\ UNCHANGED << acking, stack, 
+                                                              bc, bv, bl, bsg >>
+                                   /\ errs' = errs
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             wl, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, bound, rv, final, popd, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, xc, xv, xl, 
+                             xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
+                             cur >>
+
+BS8(self) == /\ pc[self] = "BS8"
+             /\ IF nsig >= MaxSig
+                   THEN /\ bound' = TRUE
+                        /\ UNCHANGED << wl, nsig, skind, sown, bsg >>
+                   ELSE /\ \E k \in StaleAt(wl[<<"A", bc[self]>>]) \cup {0}:
+                             /\ bsg' = [bsg EXCEPT ![self] = nsig + 1]
+                             /\ nsig' = nsig + 1
+                             /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
+                             /\ sown' = [sown EXCEPT ![nsig + 1] = self]
+                             /\ wl' = [wl EXCEPT ![<<"A", bc[self]>>] = Reg(wl[<<"A", bc[self]>>], nsig + 1, k)]
+                        /\ bound' = bound
+             /\ acking' = [acking EXCEPT ![self] = TRUE]
+             /\ pc' = [pc EXCEPT ![self] = "BS9"]
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             sst, aws, cell, incell, owed, token, woken, late, 
+                             stake, created, drops, took, dropped, said, errs, 
+                             rv, final, popd, stack, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                             sv, st, sn, bc, bv, bl, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
+
+BS9(self) == /\ pc[self] = "BS9"
+             /\ IF rtaken[bc[self]] > btk[self] \/ rgone[bc[self]]
+                   THEN /\ acking' = [acking EXCEPT ![self] = FALSE]
+                        /\ /\ bch' = [bch EXCEPT ![self] = bc[self]]
+                           /\ bl' = [bl EXCEPT ![self] = Head(stack[self]).bl]
+                           /\ bsg' = [bsg EXCEPT ![self] = Head(stack[self]).bsg]
+                           /\ bside' = [bside EXCEPT ![self] = "A"]
+                           /\ bsig' = [bsig EXCEPT ![self] = bsg[self]]
+                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Abandon",
+                                                                    pc        |->  Head(stack[self]).pc,
+                                                                    bside     |->  bside[self],
+                                                                    bch       |->  bch[self],
+                                                                    bsig      |->  bsig[self] ] >>
+                                                                \o Tail(stack[self])]
+                        /\ pc' = [pc EXCEPT ![self] = "AB0"]
+                        /\ ws' = ws
+                   ELSE /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Wait",
+                                                                    pc        |->  "BS7",
+                                                                    ws        |->  ws[self] ] >>
+                                                                \o stack[self]]
+                           /\ ws' = [ws EXCEPT ![self] = bsg[self]]
+                        /\ pc' = [pc EXCEPT ![self] = "WT1"]
+                        /\ UNCHANGED << acking, bside, bch, bsig, bl, bsg >>
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             wl, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             ns, nstore, wk_, rs, dws, nside, nc, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, xc, xv, xl, xsg, 
+                             xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                             ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 BSend(self) == BS0(self) \/ BS1(self) \/ BS2(self) \/ BS3(self)
-                  \/ BS5(self) \/ BS6(self)
+                  \/ BS5(self) \/ BS6(self) \/ BS7(self) \/ BS8(self)
+                  \/ BS9(self)
 
 AS0(self) == /\ pc[self] = "AS0"
              /\ IF xq[self] /\ sst[xsg[self]] = 1 /\ ~MutKeepEntry
@@ -2661,15 +2983,16 @@ AS0(self) == /\ pc[self] = "AS0"
              /\ pc' = [pc EXCEPT ![self] = "AS0r"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AS0r(self) == /\ pc[self] = "AS0r"
               /\ IF rgone[xc[self]] /\ ~MutNoRcount
@@ -2688,7 +3011,7 @@ AS0r(self) == /\ pc[self] = "AS0r"
                                        /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
                                        /\ xq' = [xq EXCEPT ![self] = Head(stack[self]).xq]
                                        /\ xsg' = [xsg EXCEPT ![self] = Head(stack[self]).xsg]
-                                    /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                                    /\ pc' = [pc EXCEPT ![self] = "AB0"]
                                     /\ UNCHANGED << xc, xv >>
                                ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                     /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
@@ -2703,14 +3026,15 @@ AS0r(self) == /\ pc[self] = "AS0r"
                                          xc, xv, xl, xsg, xq >>
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, took, dropped, errs, bound, rv, 
-                              final, popd, ns, nstore, wk, rs, ws, dws, nside, 
-                              nc, aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, 
-                              et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
-                              dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                              ready, regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              took, dropped, errs, bound, rv, final, popd, ns, 
+                              nstore, wk_, rs, ws, dws, nside, nc, aside, ac, 
+                              apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                              elinks, sc, sv, st, sn, bc, bv, bl, bsg, dpc, zc, 
+                              zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                              fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AS1(self) == /\ pc[self] = "AS1"
              /\ xl' = [xl EXCEPT ![self] = len[xc[self]]]
@@ -2719,15 +3043,16 @@ AS1(self) == /\ pc[self] = "AS1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "AS2"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AS2(self) == /\ pc[self] = "AS2"
              /\ IF len[xc[self]] = xl[self]
@@ -2751,15 +3076,16 @@ AS2(self) == /\ pc[self] = "AS2"
                         /\ UNCHANGED << len, stack, sc, sv, st, sn >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, bc, bv, 
-                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                             lh, lt, ln, ec, eh, et, ene, elinks, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 AS3(self) == /\ pc[self] = "AS3"
              /\ IF xq[self] /\ ~MutKeepEntry
@@ -2796,32 +3122,35 @@ AS3(self) == /\ pc[self] = "AS3"
                                                    xsg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, sst, aws, cell, incell, 
-                             owed, token, woken, late, stake, created, drops, 
-                             took, dropped, said, errs, rv, final, popd, ns, 
-                             nstore, wk, ws, dws, nside, nc, bside, bch, bsig, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, sst, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, errs, rv, final, popd, ns, nstore, wk_, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AS5(self) == /\ pc[self] = "AS5"
-             /\ /\ wl' = [wl EXCEPT ![<<"S", xc[self]>>] = Append(wl[<<"S", xc[self]>>], xsg[self])]
-                /\ xq' = [xq EXCEPT ![self] = TRUE]
+             /\ \E k \in StaleAt(wl[<<"S", xc[self]>>]) \cup {0}:
+                  /\ wl' = [wl EXCEPT ![<<"S", xc[self]>>] = Reg(wl[<<"S", xc[self]>>], xsg[self], k)]
+                  /\ xq' = [xq EXCEPT ![self] = TRUE]
              /\ IF MutNoRecheck
                    THEN /\ pc' = [pc EXCEPT ![self] = "AS8"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "AS6"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, stack, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, dpc, zc, zsg, 
+                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, 
+                             dj, i, rdone, dch, dc_, cur >>
 
 AS6(self) == /\ pc[self] = "AS6"
              /\ IF rgone[xc[self]] /\ ~MutNoRcount
@@ -2836,15 +3165,16 @@ AS6(self) == /\ pc[self] = "AS6"
                         /\ UNCHANGED << drops, said >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, took, dropped, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             took, dropped, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xsg, xq, dpc, zc, zsg, 
+                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, 
+                             dj, i, rdone, dch, dc_, cur >>
 
 AS7(self) == /\ pc[self] = "AS7"
              /\ IF len[xc[self]] = xl[self]
@@ -2868,15 +3198,16 @@ AS7(self) == /\ pc[self] = "AS7"
                         /\ UNCHANGED << len, stack, sc, sv, st, sn >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, bc, bv, 
-                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                             lh, lt, ln, ec, eh, et, ene, elinks, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 AS8(self) == /\ pc[self] = "AS8"
              /\ \/ /\ woken[self]
@@ -2903,7 +3234,7 @@ AS8(self) == /\ pc[self] = "AS8"
                                  /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
                                  /\ xq' = [xq EXCEPT ![self] = Head(stack[self]).xq]
                                  /\ xsg' = [xsg EXCEPT ![self] = Head(stack[self]).xsg]
-                              /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                              /\ pc' = [pc EXCEPT ![self] = "AB0"]
                               /\ UNCHANGED << xc, xv >>
                          ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                               /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
@@ -2916,14 +3247,15 @@ AS8(self) == /\ pc[self] = "AS8"
                    /\ woken' = woken
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, late, stake, 
-                             created, took, dropped, errs, bound, rv, final, 
-                             popd, ns, nstore, wk, rs, ws, dws, nside, nc, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, late, stake, created, took, 
+                             dropped, errs, bound, rv, final, popd, ns, nstore, 
+                             wk_, rs, ws, dws, nside, nc, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 AS2l(self) == /\ pc[self] = "AS2l"
               /\ LET last == LastOf(xc[self]) IN
@@ -2946,15 +3278,16 @@ AS2l(self) == /\ pc[self] = "AS2l"
                     ELSE /\ pc' = [pc EXCEPT ![self] = "AS2a"]
                          /\ UNCHANGED << stack, nside, nc >>
               /\ UNCHANGED << head, retired, freed, holders, busy, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, 
-                              bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                              dws, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                              lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                              regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, bound, rv, final, 
+                              popd, ns, nstore, wk_, rs, ws, dws, bside, bch, 
+                              bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                              eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                              bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                              yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                              rdone, dch, dc_, cur >>
 
 AS2a(self) == /\ pc[self] = "AS2a"
               /\ IF xq[self] /\ ~MutKeepEntry
@@ -2970,7 +3303,7 @@ AS2a(self) == /\ pc[self] = "AS2a"
                             /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
                             /\ xq' = [xq EXCEPT ![self] = Head(stack[self]).xq]
                             /\ xsg' = [xsg EXCEPT ![self] = Head(stack[self]).xsg]
-                         /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                         /\ pc' = [pc EXCEPT ![self] = "AB0"]
                          /\ UNCHANGED << xc, xv >>
                     ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                          /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
@@ -2982,14 +3315,15 @@ AS2a(self) == /\ pc[self] = "AS2a"
                          /\ UNCHANGED << bside, bch, bsig >>
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, errs, 
-                              bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                              dws, nside, nc, aside, ac, apop, rlc, rc, lh, lt, 
-                              ln, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                              bv, bl, bsg, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
-                              j, qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, errs, bound, rv, 
+                              final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                              nc, aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, 
+                              et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
+                              dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                              ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AS7l(self) == /\ pc[self] = "AS7l"
               /\ LET last == LastOf(xc[self]) IN
@@ -3012,15 +3346,16 @@ AS7l(self) == /\ pc[self] = "AS7l"
                     ELSE /\ pc' = [pc EXCEPT ![self] = "AS7n"]
                          /\ UNCHANGED << stack, nside, nc >>
               /\ UNCHANGED << head, retired, freed, holders, busy, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, 
-                              bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                              dws, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                              lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                              regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, bound, rv, final, 
+                              popd, ns, nstore, wk_, rs, ws, dws, bside, bch, 
+                              bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                              eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                              bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                              yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                              rdone, dch, dc_, cur >>
 
 AS7n(self) == /\ pc[self] = "AS7n"
               /\ IF MutKeepEntry
@@ -3028,14 +3363,14 @@ AS7n(self) == /\ pc[self] = "AS7n"
                             /\ nstore' = [nstore EXCEPT ![self] = TRUE]
                             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                                      pc        |->  Head(stack[self]).pc,
-                                                                     wk        |->  wk[self],
+                                                                     wk_       |->  wk_[self],
                                                                      ns        |->  ns[self],
                                                                      nstore    |->  nstore[self] ] >>
                                                                  \o Tail(stack[self])]
                             /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
                             /\ xq' = [xq EXCEPT ![self] = Head(stack[self]).xq]
                             /\ xsg' = [xsg EXCEPT ![self] = Head(stack[self]).xsg]
-                         /\ wk' = [wk EXCEPT ![self] = FALSE]
+                         /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
                          /\ pc' = [pc EXCEPT ![self] = "NT1"]
                          /\ UNCHANGED << bside, bch, bsig >>
                     ELSE /\ /\ bch' = [bch EXCEPT ![self] = xc[self]]
@@ -3050,18 +3385,19 @@ AS7n(self) == /\ pc[self] = "AS7n"
                             /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
                             /\ xq' = [xq EXCEPT ![self] = Head(stack[self]).xq]
                             /\ xsg' = [xsg EXCEPT ![self] = Head(stack[self]).xsg]
-                         /\ pc' = [pc EXCEPT ![self] = "AB1"]
-                         /\ UNCHANGED << ns, nstore, wk >>
+                         /\ pc' = [pc EXCEPT ![self] = "AB0"]
+                         /\ UNCHANGED << ns, nstore, wk_ >>
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, errs, 
-                              bound, rv, final, popd, rs, ws, dws, nside, nc, 
-                              aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                              ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                              xv, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                              ready, regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, errs, bound, rv, 
+                              final, popd, rs, ws, dws, nside, nc, aside, ac, 
+                              apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                              elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                              dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                              ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 ASend(self) == AS0(self) \/ AS0r(self) \/ AS1(self) \/ AS2(self)
                   \/ AS3(self) \/ AS5(self) \/ AS6(self) \/ AS7(self)
@@ -3099,14 +3435,16 @@ DC1(self) == /\ pc[self] = "DC1"
                         /\ dpc' = dpc
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, ns, nstore, wk, rs, ws, dws, 
-                             bside, bch, bsig, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, zc, zsg, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, bside, 
+                             bch, bsig, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, zc, zsg, dc, dsg, yc, ysg, yq, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
+                             cur >>
 
 Disconnect(self) == DC1(self)
 
@@ -3166,14 +3504,15 @@ RV1(self) == /\ pc[self] = "RV1"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 RV2(self) == /\ pc[self] = "RV2"
              /\ IF rv[self] # 0
@@ -3190,25 +3529,27 @@ RV2(self) == /\ pc[self] = "RV2"
                         /\ UNCHANGED << stack, zc, zsg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, popd, 
+                             ns, nstore, wk_, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, dc, dsg, yc, 
+                             ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 RV3(self) == /\ pc[self] = "RV3"
              /\ IF nsig >= MaxSig
                    THEN /\ bound' = TRUE
                         /\ UNCHANGED << wl, nsig, skind, sown, zsg >>
-                   ELSE /\ /\ nsig' = nsig + 1
-                           /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
-                           /\ sown' = [sown EXCEPT ![nsig + 1] = self]
-                           /\ wl' = [wl EXCEPT ![<<"R", zc[self]>>] = Append(wl[<<"R", zc[self]>>], nsig + 1)]
-                           /\ zsg' = [zsg EXCEPT ![self] = nsig + 1]
+                   ELSE /\ \E k \in StaleAt(wl[<<"R", zc[self]>>]) \cup {0}:
+                             /\ nsig' = nsig + 1
+                             /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
+                             /\ sown' = [sown EXCEPT ![nsig + 1] = self]
+                             /\ wl' = [wl EXCEPT ![<<"R", zc[self]>>] = Reg(wl[<<"R", zc[self]>>], nsig + 1, k)]
+                             /\ zsg' = [zsg EXCEPT ![self] = nsig + 1]
                         /\ bound' = bound
              /\ IF MutNoRecheck
                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Wait",
@@ -3236,14 +3577,15 @@ RV3(self) == /\ pc[self] = "RV3"
                         /\ ws' = ws
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, sst, aws, cell, incell, owed, 
-                             token, woken, late, stake, created, drops, took, 
-                             dropped, said, errs, rv, final, popd, ns, nstore, 
-                             wk, rs, dws, nside, nc, bside, bch, bsig, aside, 
-                             ac, apop, rlc, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, 
-                             dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, sst, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, errs, rv, final, popd, ns, nstore, wk_, rs, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rlc, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
+                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 RV4(self) == /\ pc[self] = "RV4"
              /\ IF nnext[head[zc[self]]] = NULL
@@ -3283,14 +3625,15 @@ RV4(self) == /\ pc[self] = "RV4"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "RV5"]
                         /\ UNCHANGED << stack, rlc >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RV5(self) == /\ pc[self] = "RV5"
              /\ IF rv[self] # 0
@@ -3311,7 +3654,7 @@ RV5(self) == /\ pc[self] = "RV5"
                                                                                bsig      |->  bsig[self] ] >>
                                                                            \o Tail(stack[self])]
                                       /\ zsg' = [zsg EXCEPT ![self] = Head(stack[self]).zsg]
-                                   /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                                   /\ pc' = [pc EXCEPT ![self] = "AB0"]
                                    /\ zc' = zc
                         /\ UNCHANGED << final, ws >>
                    ELSE /\ IF disc[zc[self]]
@@ -3325,7 +3668,7 @@ RV5(self) == /\ pc[self] = "RV5"
                                                                                bch       |->  bch[self],
                                                                                bsig      |->  bsig[self] ] >>
                                                                            \o stack[self]]
-                                   /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                                   /\ pc' = [pc EXCEPT ![self] = "AB0"]
                                    /\ ws' = ws
                               ELSE /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Wait",
                                                                                pc        |->  "RV6",
@@ -3337,14 +3680,15 @@ RV5(self) == /\ pc[self] = "RV5"
                         /\ UNCHANGED << said, zc, zsg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, errs, bound, 
-                             rv, popd, ns, nstore, wk, rs, dws, nside, nc, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, dc, dsg, yc, ysg, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, errs, bound, rv, popd, ns, 
+                             nstore, wk_, rs, dws, nside, nc, aside, ac, apop, 
+                             rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
+                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
+                             dpc, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RV6(self) == /\ pc[self] = "RV6"
              /\ IF Stepped
@@ -3402,14 +3746,15 @@ RV6(self) == /\ pc[self] = "RV6"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 RV7(self) == /\ pc[self] = "RV7"
              /\ IF rv[self] # 0
@@ -3435,15 +3780,16 @@ RV7(self) == /\ pc[self] = "RV7"
                                    /\ UNCHANGED << errs, stack, zc, zsg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, bound, rv, 
-                             popd, ns, nstore, wk, rs, ws, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
-                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
-                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, bound, rv, popd, ns, nstore, 
+                             wk_, rs, ws, dws, nside, nc, bside, bch, bsig, 
+                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
+                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
+                             xv, xl, xsg, xq, dpc, dc, dsg, yc, ysg, yq, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
+                             cur >>
 
 RV8(self) == /\ pc[self] = "RV8"
              /\ IF Stepped
@@ -3507,14 +3853,15 @@ RV8(self) == /\ pc[self] = "RV8"
                                    /\ rlc' = rlc
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, dc, dsg, 
-                             yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, dc, dsg, yc, 
+                             ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 Recv(self) == RV1(self) \/ RV2(self) \/ RV3(self) \/ RV4(self) \/ RV5(self)
                  \/ RV6(self) \/ RV7(self) \/ RV8(self)
@@ -3575,14 +3922,15 @@ RD1(self) == /\ pc[self] = "RD1"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 RD2(self) == /\ pc[self] = "RD2"
              /\ IF rv[self] # 0
@@ -3599,25 +3947,27 @@ RD2(self) == /\ pc[self] = "RD2"
                         /\ UNCHANGED << stack, dc, dsg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, popd, 
+                             ns, nstore, wk_, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, yc, 
+                             ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 RD3(self) == /\ pc[self] = "RD3"
              /\ IF nsig >= MaxSig
                    THEN /\ bound' = TRUE
                         /\ UNCHANGED << wl, nsig, skind, sown, dsg >>
-                   ELSE /\ /\ dsg' = [dsg EXCEPT ![self] = nsig + 1]
-                           /\ nsig' = nsig + 1
-                           /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
-                           /\ sown' = [sown EXCEPT ![nsig + 1] = self]
-                           /\ wl' = [wl EXCEPT ![<<"R", dc[self]>>] = Append(wl[<<"R", dc[self]>>], nsig + 1)]
+                   ELSE /\ \E k \in StaleAt(wl[<<"R", dc[self]>>]) \cup {0}:
+                             /\ dsg' = [dsg EXCEPT ![self] = nsig + 1]
+                             /\ nsig' = nsig + 1
+                             /\ skind' = [skind EXCEPT ![nsig + 1] = "thread"]
+                             /\ sown' = [sown EXCEPT ![nsig + 1] = self]
+                             /\ wl' = [wl EXCEPT ![<<"R", dc[self]>>] = Reg(wl[<<"R", dc[self]>>], nsig + 1, k)]
                         /\ bound' = bound
              /\ IF Stepped
                    THEN /\ /\ rc' = [rc EXCEPT ![self] = dc[self]]
@@ -3636,14 +3986,15 @@ RD3(self) == /\ pc[self] = "RD3"
                         /\ UNCHANGED << stack, rc, lh, lt, ln >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, sst, aws, cell, incell, owed, 
-                             token, woken, late, stake, created, drops, took, 
-                             dropped, said, errs, rv, final, popd, ns, nstore, 
-                             wk, rs, ws, dws, nside, nc, bside, bch, bsig, 
-                             aside, ac, apop, rlc, ec, eh, et, ene, elinks, sc, 
-                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                             dpc, zc, zsg, dc, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, sst, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, errs, rv, final, popd, ns, nstore, wk_, rs, 
+                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
+                             apop, rlc, ec, eh, et, ene, elinks, sc, sv, st, 
+                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, yc, ysg, yq, j, qsg, ready, regd, fw, wk, 
+                             dj, i, rdone, dch, dc_, cur >>
 
 RD4(self) == /\ pc[self] = "RD4"
              /\ IF nnext[head[dc[self]]] = NULL
@@ -3683,14 +4034,15 @@ RD4(self) == /\ pc[self] = "RD4"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "RD5"]
                         /\ UNCHANGED << stack, rlc >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 RD5(self) == /\ pc[self] = "RD5"
              /\ IF rv[self] # 0
@@ -3704,7 +4056,7 @@ RD5(self) == /\ pc[self] = "RD5"
                                                                     bch       |->  bch[self],
                                                                     bsig      |->  bsig[self] ] >>
                                                                 \o Tail(stack[self])]
-                        /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                        /\ pc' = [pc EXCEPT ![self] = "AB0"]
                         /\ UNCHANGED << final, dws >>
                    ELSE /\ IF disc[dc[self]]
                               THEN /\ final' = [final EXCEPT ![self] = TRUE]
@@ -3717,7 +4069,7 @@ RD5(self) == /\ pc[self] = "RD5"
                                                                                bch       |->  bch[self],
                                                                                bsig      |->  bsig[self] ] >>
                                                                            \o stack[self]]
-                                   /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                                   /\ pc' = [pc EXCEPT ![self] = "AB0"]
                                    /\ dws' = dws
                               ELSE /\ /\ dws' = [dws EXCEPT ![self] = dsg[self]]
                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "WaitDeadline",
@@ -3729,14 +4081,15 @@ RD5(self) == /\ pc[self] = "RD5"
                         /\ dsg' = dsg
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, popd, ns, nstore, wk, rs, ws, nside, 
-                             nc, aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, 
-                             et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
-                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, yc, ysg, 
-                             yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, popd, 
+                             ns, nstore, wk_, rs, ws, nside, nc, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, yc, ysg, yq, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
                              cur >>
 
 RD6(self) == /\ pc[self] = "RD6"
@@ -3750,7 +4103,7 @@ RD6(self) == /\ pc[self] = "RD6"
                                                                     bch       |->  bch[self],
                                                                     bsig      |->  bsig[self] ] >>
                                                                 \o stack[self]]
-                        /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                        /\ pc' = [pc EXCEPT ![self] = "AB0"]
                         /\ UNCHANGED << head, tail, ndata, retired, freed, 
                                         holders, aq, drops, took, said, errs, 
                                         rv, final, rlc, rc, lh, lt, ln >>
@@ -3813,14 +4166,15 @@ RD6(self) == /\ pc[self] = "RD6"
                                    /\ UNCHANGED << rc, lh, lt, ln >>
                         /\ UNCHANGED << bside, bch, bsig >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, aside, ac, apop, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
-                             yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, 
-                             cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, aside, ac, apop, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 RD6d(self) == /\ pc[self] = "RD6d"
               /\ IF rv[self] # 0
@@ -3837,15 +4191,16 @@ RD6d(self) == /\ pc[self] = "RD6d"
                          /\ UNCHANGED << stack, dc, dsg >>
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, errs, 
-                              bound, rv, popd, ns, nstore, wk, rs, ws, dws, 
-                              nside, nc, bside, bch, bsig, aside, ac, apop, 
-                              rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                              sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                              dpc, zc, zsg, yc, ysg, yq, j, qsg, ready, regd, 
-                              fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, errs, bound, rv, 
+                              popd, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                              bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                              lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                              bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                              zsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, 
+                              dj, i, rdone, dch, dc_, cur >>
 
 RD7(self) == /\ pc[self] = "RD7"
              /\ IF Stepped
@@ -3903,14 +4258,15 @@ RD7(self) == /\ pc[self] = "RD7"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 RD7d(self) == /\ pc[self] = "RD7d"
               /\ IF rv[self] # 0
@@ -3931,15 +4287,16 @@ RD7d(self) == /\ pc[self] = "RD7d"
                                     /\ UNCHANGED << said, stack, dc, dsg >>
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, errs, 
-                              bound, rv, popd, ns, nstore, wk, rs, ws, dws, 
-                              nside, nc, bside, bch, bsig, aside, ac, apop, 
-                              rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                              sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                              dpc, zc, zsg, yc, ysg, yq, j, qsg, ready, regd, 
-                              fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, errs, bound, rv, popd, ns, 
+                              nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                              bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                              eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                              bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, yc, ysg, 
+                              yq, j, qsg, ready, regd, fw, wk, dj, i, rdone, 
+                              dch, dc_, cur >>
 
 RD9(self) == /\ pc[self] = "RD9"
              /\ IF Stepped
@@ -4003,14 +4360,15 @@ RD9(self) == /\ pc[self] = "RD9"
                                    /\ rlc' = rlc
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, yc, 
+                             ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
 
 RecvDeadline(self) == RD1(self) \/ RD2(self) \/ RD3(self) \/ RD4(self)
                          \/ RD5(self) \/ RD6(self) \/ RD6d(self)
@@ -4024,15 +4382,16 @@ AR0(self) == /\ pc[self] = "AR0"
              /\ pc' = [pc EXCEPT ![self] = "AR1"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AR1(self) == /\ pc[self] = "AR1"
              /\ IF Stepped
@@ -4090,14 +4449,15 @@ AR1(self) == /\ pc[self] = "AR1"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 AR2(self) == /\ pc[self] = "AR2"
              /\ IF rv[self] # 0
@@ -4115,7 +4475,7 @@ AR2(self) == /\ pc[self] = "AR2"
                                                                                           bch       |->  bch[self],
                                                                                           bsig      |->  bsig[self] ] >>
                                                                                       \o stack[self]]
-                                              /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                                              /\ pc' = [pc EXCEPT ![self] = "AB0"]
                                          ELSE /\ pc' = [pc EXCEPT ![self] = "AR8"]
                                               /\ UNCHANGED << stack, bside, 
                                                               bch, bsig >>
@@ -4124,15 +4484,16 @@ AR2(self) == /\ pc[self] = "AR2"
                                                    bsig >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, aside, ac, apop, rlc, rc, lh, lt, ln, 
-                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
-                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
-                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, popd, 
+                             ns, nstore, wk_, rs, ws, dws, nside, nc, aside, 
+                             ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             j, qsg, ready, regd, fw, wk, dj, i, rdone, dch, 
+                             dc_, cur >>
 
 AR3(self) == /\ pc[self] = "AR3"
              /\ IF yq[self] /\ ~MutKeepEntry
@@ -4169,30 +4530,33 @@ AR3(self) == /\ pc[self] = "AR3"
                                                    ysg >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, sst, aws, cell, incell, 
-                             owed, token, woken, late, stake, created, drops, 
-                             took, dropped, said, errs, rv, final, popd, ns, 
-                             nstore, wk, ws, dws, nside, nc, bside, bch, bsig, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, yq, j, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
-
-AR5(self) == /\ pc[self] = "AR5"
-             /\ /\ wl' = [wl EXCEPT ![<<"R", yc[self]>>] = Append(wl[<<"R", yc[self]>>], ysg[self])]
-                /\ yq' = [yq EXCEPT ![self] = TRUE]
-             /\ pc' = [pc EXCEPT ![self] = "AR5r"]
-             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
-                             freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, said, errs, bound, 
-                             rv, final, popd, stack, ns, nstore, wk, rs, ws, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, sst, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, errs, rv, final, popd, ns, nstore, wk_, ws, 
                              dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
                              rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
                              sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                             dpc, zc, zsg, dc, dsg, yc, ysg, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             dpc, zc, zsg, dc, dsg, yc, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
+
+AR5(self) == /\ pc[self] = "AR5"
+             /\ \E k \in StaleAt(wl[<<"R", yc[self]>>]) \cup {0}:
+                  /\ wl' = [wl EXCEPT ![<<"R", yc[self]>>] = Reg(wl[<<"R", yc[self]>>], ysg[self], k)]
+                  /\ yq' = [yq EXCEPT ![self] = TRUE]
+             /\ pc' = [pc EXCEPT ![self] = "AR5r"]
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, j, qsg, ready, regd, fw, 
+                             wk, dj, i, rdone, dch, dc_, cur >>
 
 AR5r(self) == /\ pc[self] = "AR5r"
               /\ IF MutNoRecheck
@@ -4215,15 +4579,16 @@ AR5r(self) == /\ pc[self] = "AR5r"
                                     /\ UNCHANGED << stack, rc, lh, lt, ln >>
               /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                               freed, holders, busy, aq, links, len, scount, 
-                              disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                              aws, cell, incell, owed, token, woken, late, 
-                              stake, created, drops, took, dropped, said, errs, 
-                              bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                              dws, nside, nc, bside, bch, bsig, aside, ac, 
-                              apop, rlc, ec, eh, et, ene, elinks, sc, sv, st, 
-                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                              regd, fw, dj, i, rdone, dc_, cur >>
+                              disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              drops, took, dropped, said, errs, bound, rv, 
+                              final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                              nc, bside, bch, bsig, aside, ac, apop, rlc, ec, 
+                              eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                              bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                              yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                              rdone, dch, dc_, cur >>
 
 AR6(self) == /\ pc[self] = "AR6"
              /\ IF nnext[head[yc[self]]] = NULL
@@ -4263,14 +4628,15 @@ AR6(self) == /\ pc[self] = "AR6"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "AR7"]
                         /\ UNCHANGED << stack, rlc >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, 
-                             sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, 
-                             dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, fw, dj, i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 AR7(self) == /\ pc[self] = "AR7"
              /\ IF rv[self] # 0
@@ -4279,13 +4645,13 @@ AR7(self) == /\ pc[self] = "AR7"
                                       /\ nstore' = [nstore EXCEPT ![self] = TRUE]
                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                                                pc        |->  Head(stack[self]).pc,
-                                                                               wk        |->  wk[self],
+                                                                               wk_       |->  wk_[self],
                                                                                ns        |->  ns[self],
                                                                                nstore    |->  nstore[self] ] >>
                                                                            \o Tail(stack[self])]
                                       /\ yq' = [yq EXCEPT ![self] = Head(stack[self]).yq]
                                       /\ ysg' = [ysg EXCEPT ![self] = Head(stack[self]).ysg]
-                                   /\ wk' = [wk EXCEPT ![self] = FALSE]
+                                   /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = "NT1"]
                                    /\ UNCHANGED << bside, bch, bsig >>
                               ELSE /\ /\ bch' = [bch EXCEPT ![self] = yc[self]]
@@ -4299,8 +4665,8 @@ AR7(self) == /\ pc[self] = "AR7"
                                                                            \o Tail(stack[self])]
                                       /\ yq' = [yq EXCEPT ![self] = Head(stack[self]).yq]
                                       /\ ysg' = [ysg EXCEPT ![self] = Head(stack[self]).ysg]
-                                   /\ pc' = [pc EXCEPT ![self] = "AB1"]
-                                   /\ UNCHANGED << ns, nstore, wk >>
+                                   /\ pc' = [pc EXCEPT ![self] = "AB0"]
+                                   /\ UNCHANGED << ns, nstore, wk_ >>
                         /\ final' = final
                    ELSE /\ IF disc[yc[self]]
                               THEN /\ final' = [final EXCEPT ![self] = TRUE]
@@ -4309,11 +4675,11 @@ AR7(self) == /\ pc[self] = "AR7"
                                                  /\ nstore' = [nstore EXCEPT ![self] = TRUE]
                                                  /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Notify",
                                                                                           pc        |->  "AR8",
-                                                                                          wk        |->  wk[self],
+                                                                                          wk_       |->  wk_[self],
                                                                                           ns        |->  ns[self],
                                                                                           nstore    |->  nstore[self] ] >>
                                                                                       \o stack[self]]
-                                              /\ wk' = [wk EXCEPT ![self] = FALSE]
+                                              /\ wk_' = [wk_ EXCEPT ![self] = FALSE]
                                               /\ pc' = [pc EXCEPT ![self] = "NT1"]
                                               /\ UNCHANGED << bside, bch, bsig >>
                                          ELSE /\ /\ bch' = [bch EXCEPT ![self] = yc[self]]
@@ -4325,22 +4691,23 @@ AR7(self) == /\ pc[self] = "AR7"
                                                                                           bch       |->  bch[self],
                                                                                           bsig      |->  bsig[self] ] >>
                                                                                       \o stack[self]]
-                                              /\ pc' = [pc EXCEPT ![self] = "AB1"]
-                                              /\ UNCHANGED << ns, nstore, wk >>
+                                              /\ pc' = [pc EXCEPT ![self] = "AB0"]
+                                              /\ UNCHANGED << ns, nstore, wk_ >>
                               ELSE /\ pc' = [pc EXCEPT ![self] = "AR9"]
                                    /\ UNCHANGED << final, stack, ns, nstore, 
-                                                   wk, bside, bch, bsig >>
+                                                   wk_, bside, bch, bsig >>
                         /\ UNCHANGED << ysg, yq >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, popd, rs, ws, dws, nside, nc, aside, 
-                             ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, j, qsg, 
-                             ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, popd, 
+                             rs, ws, dws, nside, nc, aside, ac, apop, rlc, rc, 
+                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
+                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 AR9(self) == /\ pc[self] = "AR9"
              /\ \/ /\ woken[self]
@@ -4366,7 +4733,7 @@ AR9(self) == /\ pc[self] = "AR9"
                                                                       \o Tail(stack[self])]
                                  /\ yq' = [yq EXCEPT ![self] = Head(stack[self]).yq]
                                  /\ ysg' = [ysg EXCEPT ![self] = Head(stack[self]).ysg]
-                              /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                              /\ pc' = [pc EXCEPT ![self] = "AB0"]
                               /\ yc' = yc
                          ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                               /\ ysg' = [ysg EXCEPT ![self] = Head(stack[self]).ysg]
@@ -4377,14 +4744,15 @@ AR9(self) == /\ pc[self] = "AR9"
                    /\ woken' = woken
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, late, stake, 
-                             created, drops, took, dropped, errs, bound, final, 
-                             popd, ns, nstore, wk, rs, ws, dws, nside, nc, 
-                             aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
-                             ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, j, qsg, 
-                             ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, late, stake, created, drops, 
+                             took, dropped, errs, bound, final, popd, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, j, qsg, ready, 
+                             regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 ARf(self) == /\ pc[self] = "ARf"
              /\ IF yq[self] /\ ~MutKeepEntry
@@ -4399,7 +4767,7 @@ ARf(self) == /\ pc[self] = "ARf"
                                                                 \o Tail(stack[self])]
                            /\ yq' = [yq EXCEPT ![self] = Head(stack[self]).yq]
                            /\ ysg' = [ysg EXCEPT ![self] = Head(stack[self]).ysg]
-                        /\ pc' = [pc EXCEPT ![self] = "AB1"]
+                        /\ pc' = [pc EXCEPT ![self] = "AB0"]
                         /\ yc' = yc
                    ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ ysg' = [ysg EXCEPT ![self] = Head(stack[self]).ysg]
@@ -4409,15 +4777,16 @@ ARf(self) == /\ pc[self] = "ARf"
                         /\ UNCHANGED << bside, bch, bsig >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                             dws, nside, nc, aside, ac, apop, rlc, rc, lh, lt, 
-                             ln, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, j, qsg, ready, regd, fw, dj, i, rdone, 
-                             dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, 
+                             et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
+                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, j, 
+                             qsg, ready, regd, fw, wk, dj, i, rdone, dch, dc_, 
+                             cur >>
 
 AR8(self) == /\ pc[self] = "AR8"
              /\ IF Stepped
@@ -4484,14 +4853,15 @@ AR8(self) == /\ pc[self] = "AR8"
                                    /\ rlc' = rlc
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, j, qsg, ready, regd, fw, dj, i, rdone, 
-                             dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, j, qsg, ready, regd, fw, wk, dj, i, rdone, 
+                             dch, dc_, cur >>
 
 RecvAsync(self) == AR0(self) \/ AR1(self) \/ AR2(self) \/ AR3(self)
                       \/ AR5(self) \/ AR5r(self) \/ AR6(self) \/ AR7(self)
@@ -4553,25 +4923,32 @@ SL1(self) == /\ pc[self] = "SL1"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 SL2(self) == /\ pc[self] = "SL2"
              /\ IF rv[self] # 0 /\ ~MutNoBreak
                    THEN /\ stake' = [stake EXCEPT ![self] = stake[self] + 1]
-                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ j' = [j EXCEPT ![self] = Head(stack[self]).j]
-                        /\ qsg' = [qsg EXCEPT ![self] = Head(stack[self]).qsg]
-                        /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
-                        /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
-                        /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
-                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                        /\ IF wk[self] /\ ~MutNoPassOn
+                              THEN /\ fw' = [fw EXCEPT ![self] = {c \in Chans : aq[c] # <<>>}]
+                                   /\ pc' = [pc EXCEPT ![self] = "SLq"]
+                                   /\ UNCHANGED << stack, j, qsg, ready, regd, 
+                                                   wk >>
+                              ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                   /\ j' = [j EXCEPT ![self] = Head(stack[self]).j]
+                                   /\ qsg' = [qsg EXCEPT ![self] = Head(stack[self]).qsg]
+                                   /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
+                                   /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
+                                   /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
+                                   /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << head, tail, ndata, retired, freed, 
                                         holders, aq, drops, took, said, errs, 
                                         rv, final, rlc, rc, lh, lt, ln >>
@@ -4643,7 +5020,7 @@ SL2(self) == /\ pc[self] = "SL2"
                                                          /\ UNCHANGED << stack, 
                                                                          rlc >>
                                               /\ UNCHANGED << rc, lh, lt, ln >>
-                                   /\ UNCHANGED << qsg, ready, regd, fw >>
+                                   /\ UNCHANGED << qsg, ready, regd, fw, wk >>
                               ELSE /\ IF rv[self] # 0 \/ stake[self] > 0
                                          THEN /\ stake' = [stake EXCEPT ![self] = stake[self] + (IF rv[self] # 0 THEN 1 ELSE 0)]
                                               /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
@@ -4652,23 +5029,25 @@ SL2(self) == /\ pc[self] = "SL2"
                                               /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
                                               /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
                                               /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
+                                              /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
                                               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                                          ELSE /\ pc' = [pc EXCEPT ![self] = "SLd"]
                                               /\ UNCHANGED << stake, stack, j, 
                                                               qsg, ready, regd, 
-                                                              fw >>
+                                                              fw, wk >>
                                    /\ UNCHANGED << head, tail, ndata, retired, 
                                                    freed, holders, aq, drops, 
                                                    took, said, errs, rv, final, 
                                                    rlc, rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, created, 
-                             dropped, bound, popd, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, ec, 
-                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
-                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
-                             yc, ysg, yq, dj, i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, dj, i, rdone, dch, dc_, cur >>
 
 SLd(self) == /\ pc[self] = "SLd"
              /\ IF (\A c \in Chans : disc[c]) /\ ~MutSelStuck
@@ -4678,15 +5057,16 @@ SLd(self) == /\ pc[self] = "SLd"
                         /\ j' = j
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SL3(self) == /\ pc[self] = "SL3"
              /\ IF qsg[self] = 0 \/ ~MutReuseSig
@@ -4700,22 +5080,25 @@ SL3(self) == /\ pc[self] = "SL3"
                                    /\ bound' = bound
                         /\ /\ j' = [j EXCEPT ![self] = 1]
                            /\ regd' = [regd EXCEPT ![self] = {}]
+                           /\ wk' = [wk EXCEPT ![self] = FALSE]
                         /\ errs' = errs
                    ELSE /\ /\ errs' = (errs \cup (IF sst[qsg[self]] # 0 THEN {"notified_register"} ELSE {}))
                            /\ j' = [j EXCEPT ![self] = 1]
                            /\ regd' = [regd EXCEPT ![self] = {}]
+                           /\ wk' = [wk EXCEPT ![self] = FALSE]
                         /\ UNCHANGED << nsig, skind, sown, bound, qsg >>
              /\ pc' = [pc EXCEPT ![self] = "SL4"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, sst, aws, cell, incell, 
-                             owed, token, woken, late, stake, created, drops, 
-                             took, dropped, said, rv, final, popd, stack, ns, 
-                             nstore, wk, rs, ws, dws, nside, nc, bside, bch, 
-                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
-                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
-                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
-                             yc, ysg, yq, ready, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, sst, aws, cell, incell, owed, token, 
+                             woken, late, stake, created, drops, took, dropped, 
+                             said, rv, final, popd, stack, ns, nstore, wk_, rs, 
+                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
+                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
+                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
+                             ready, fw, dj, i, rdone, dch, dc_, cur >>
 
 SL4(self) == /\ pc[self] = "SL4"
              /\ IF disc[j[self]] /\ ~MutSelDead
@@ -4728,21 +5111,23 @@ SL4(self) == /\ pc[self] = "SL4"
                         /\ j' = j
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                             elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
-                             qsg, ready, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
+                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
+                             zc, zsg, dc, dsg, yc, ysg, yq, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SL5(self) == /\ pc[self] = "SL5"
-             /\ /\ errs' = (errs \cup (IF MutSelAssert /\ sst[qsg[self]] # 0 THEN {"notified_register"} ELSE {}))
-                /\ regd' = [regd EXCEPT ![self] = regd[self] \cup (IF MutSelDead THEN {} ELSE {j[self]})]
-                /\ said' = (said \cup (IF sst[qsg[self]] # 0 THEN Say("notified_register") ELSE {}))
-                /\ wl' = [wl EXCEPT ![<<"R", j[self]>>] = Append(wl[<<"R", j[self]>>], qsg[self])]
+             /\ \E k \in StaleAt(wl[<<"R", j[self]>>]) \cup {0}:
+                  /\ errs' = (errs \cup (IF MutSelAssert /\ sst[qsg[self]] # 0 THEN {"notified_register"} ELSE {}))
+                  /\ regd' = [regd EXCEPT ![self] = regd[self] \cup (IF MutSelDead THEN {} ELSE {j[self]})]
+                  /\ said' = (said \cup (IF sst[qsg[self]] # 0 THEN Say("notified_register") ELSE {}))
+                  /\ wl' = [wl EXCEPT ![<<"R", j[self]>>] = Reg(wl[<<"R", j[self]>>], qsg[self], k)]
              /\ IF j[self] < NC
                    THEN /\ j' = [j EXCEPT ![self] = j[self] + 1]
                         /\ pc' = [pc EXCEPT ![self] = "SL4"]
@@ -4750,15 +5135,16 @@ SL5(self) == /\ pc[self] = "SL5"
                         /\ pc' = [pc EXCEPT ![self] = "SL6"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, bound, rv, final, 
-                             popd, stack, ns, nstore, wk, rs, ws, dws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, qsg, ready, fw, dj, i, 
-                             rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, bound, rv, final, popd, stack, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, qsg, ready, fw, wk, dj, i, rdone, 
+                             dch, dc_, cur >>
 
 SL6(self) == /\ pc[self] = "SL6"
              /\ IF Stepped
@@ -4783,15 +5169,15 @@ SL6(self) == /\ pc[self] = "SL6"
                         /\ UNCHANGED << stack, ec, eh, et, ene, elinks >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, bound, 
-                             final, popd, ns, nstore, wk, rs, ws, dws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, sc, sv, st, sn, bc, bv, bl, bsg, xc, 
-                             xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
-                             yq, j, qsg, ready, regd, fw, dj, i, rdone, dc_, 
-                             cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, bound, final, popd, 
+                             ns, nstore, wk_, rs, ws, dws, nside, nc, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, 
+                             xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                             ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SL7(self) == /\ pc[self] = "SL7"
              /\ IF j[self] < NC
@@ -4829,7 +5215,7 @@ SL7(self) == /\ pc[self] = "SL7"
                                    /\ UNCHANGED << stack, ws >>
                               ELSE /\ j' = [j EXCEPT ![self] = 1]
                                    /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Wait",
-                                                                               pc        |->  "SL1",
+                                                                               pc        |->  "SLw",
                                                                                ws        |->  ws[self] ] >>
                                                                            \o stack[self]]
                                       /\ ws' = [ws EXCEPT ![self] = qsg[self]]
@@ -4838,35 +5224,62 @@ SL7(self) == /\ pc[self] = "SL7"
                         /\ UNCHANGED << errs, rv, ec, eh, et, ene, elinks >>
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, bound, 
-                             final, popd, ns, nstore, wk, rs, dws, nside, nc, 
-                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
-                             lt, ln, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
-                             xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, 
-                             qsg, regd, fw, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, bound, final, popd, ns, 
+                             nstore, wk_, rs, dws, nside, nc, bside, bch, bsig, 
+                             aside, ac, apop, rlc, rc, lh, lt, ln, sc, sv, st, 
+                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, qsg, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 SLa(self) == /\ pc[self] = "SLa"
+             /\ IF ~MutSelKeeps
+                   THEN /\ wl' = [wl EXCEPT ![<<"R", j[self]>>] = Remove(wl[<<"R", j[self]>>], qsg[self])]
+                   ELSE /\ TRUE
+                        /\ wl' = wl
+             /\ IF j[self] < NC
+                   THEN /\ j' = [j EXCEPT ![self] = j[self] + 1]
+                        /\ pc' = [pc EXCEPT ![self] = "SLa"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "SLb"]
+                        /\ j' = j
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, qsg, ready, regd, fw, 
+                             wk, dj, i, rdone, dch, dc_, cur >>
+
+SLb(self) == /\ pc[self] = "SLb"
              /\ IF sst[qsg[self]] = 0
-                   THEN /\ sst' = [sst EXCEPT ![qsg[self]] = 2]
+                   THEN /\ /\ j' = [j EXCEPT ![self] = 1]
+                           /\ sst' = [sst EXCEPT ![qsg[self]] = 2]
                         /\ pc' = [pc EXCEPT ![self] = "SL1"]
                         /\ UNCHANGED << said, fw >>
                    ELSE /\ /\ fw' = [fw EXCEPT ![self] = Chans]
+                           /\ j' = [j EXCEPT ![self] = 1]
                            /\ said' = (said \cup Say("select_forward"))
                         /\ pc' = [pc EXCEPT ![self] = "SLf"]
                         /\ sst' = sst
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, drops, took, dropped, errs, bound, rv, 
-                             final, popd, stack, ns, nstore, wk, rs, ws, dws, 
-                             nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
-                             rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                             st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                             zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                             regd, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, qsg, ready, regd, wk, 
+                             dj, i, rdone, dch, dc_, cur >>
 
 SLf(self) == /\ pc[self] = "SLf"
              /\ IF fw[self] = {}
@@ -4884,15 +5297,95 @@ SLf(self) == /\ pc[self] = "SLf"
                              /\ pc' = [pc EXCEPT ![self] = "NO1"]
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             stake, created, drops, took, dropped, said, errs, 
-                             bound, rv, final, popd, ns, nstore, wk, rs, ws, 
-                             dws, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                             dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
+
+SLw(self) == /\ pc[self] = "SLw"
+             /\ IF ~MutSelKeeps
+                   THEN /\ wl' = [wl EXCEPT ![<<"R", j[self]>>] = Remove(wl[<<"R", j[self]>>], qsg[self])]
+                   ELSE /\ TRUE
+                        /\ wl' = wl
+             /\ IF j[self] < NC
+                   THEN /\ j' = [j EXCEPT ![self] = j[self] + 1]
+                        /\ pc' = [pc EXCEPT ![self] = "SLw"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "SLc"]
+                        /\ j' = j
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, qsg, ready, regd, fw, 
+                             wk, dj, i, rdone, dch, dc_, cur >>
+
+SLc(self) == /\ pc[self] = "SLc"
+             /\ IF sst[qsg[self]] = 0
+                   THEN /\ /\ j' = [j EXCEPT ![self] = 1]
+                           /\ sst' = [sst EXCEPT ![qsg[self]] = 2]
+                           /\ wk' = [wk EXCEPT ![self] = FALSE]
+                   ELSE /\ /\ j' = [j EXCEPT ![self] = 1]
+                           /\ wk' = [wk EXCEPT ![self] = TRUE]
+                        /\ sst' = sst
+             /\ pc' = [pc EXCEPT ![self] = "SL1"]
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, rv, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, qsg, ready, regd, fw, 
+                             dj, i, rdone, dch, dc_, cur >>
+
+SLq(self) == /\ pc[self] = "SLq"
+             /\ IF fw[self] = {}
+                   THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                        /\ j' = [j EXCEPT ![self] = Head(stack[self]).j]
+                        /\ qsg' = [qsg EXCEPT ![self] = Head(stack[self]).qsg]
+                        /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
+                        /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
+                        /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
+                        /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                        /\ UNCHANGED << nside, nc >>
+                   ELSE /\ \E c \in fw[self]:
+                             /\ fw' = [fw EXCEPT ![self] = fw[self] \ {c}]
+                             /\ /\ nc' = [nc EXCEPT ![self] = c]
+                                /\ nside' = [nside EXCEPT ![self] = "R"]
+                                /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyOne",
+                                                                         pc        |->  "SLq",
+                                                                         nside     |->  nside[self],
+                                                                         nc        |->  nc[self] ] >>
+                                                                     \o stack[self]]
+                             /\ pc' = [pc EXCEPT ![self] = "NO1"]
+                        /\ UNCHANGED << j, qsg, ready, regd, wk >>
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, bside, 
+                             bch, bsig, aside, ac, apop, rlc, rc, lh, lt, ln, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, dj, i, rdone, dch, dc_, cur >>
 
 SLx(self) == /\ pc[self] = "SLx"
              /\ IF Stepped
@@ -4950,31 +5443,38 @@ SLx(self) == /\ pc[self] = "SLx"
                                    /\ UNCHANGED << stack, rlc >>
                         /\ UNCHANGED << rc, lh, lt, ln >>
              /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                             rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                             cell, incell, owed, token, woken, late, stake, 
-                             created, dropped, bound, popd, ns, nstore, wk, rs, 
-                             ws, dws, nside, nc, bside, bch, bsig, aside, ac, 
-                             apop, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
-                             bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
-                             dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                             i, rdone, dc_, cur >>
+                             rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                             dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
+                             ec, eh, et, ene, elinks, sc, sv, st, sn, bc, bv, 
+                             bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                             dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, 
+                             i, rdone, dch, dc_, cur >>
 
 SLy(self) == /\ pc[self] = "SLy"
              /\ IF rv[self] # 0
                    THEN /\ stake' = [stake EXCEPT ![self] = stake[self] + 1]
-                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ j' = [j EXCEPT ![self] = Head(stack[self]).j]
-                        /\ qsg' = [qsg EXCEPT ![self] = Head(stack[self]).qsg]
-                        /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
-                        /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
-                        /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
-                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                        /\ IF wk[self] /\ ~MutNoPassOn
+                              THEN /\ fw' = [fw EXCEPT ![self] = {c \in Chans : aq[c] # <<>>}]
+                                   /\ pc' = [pc EXCEPT ![self] = "SLq"]
+                                   /\ UNCHANGED << stack, j, qsg, ready, regd, 
+                                                   wk >>
+                              ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                   /\ j' = [j EXCEPT ![self] = Head(stack[self]).j]
+                                   /\ qsg' = [qsg EXCEPT ![self] = Head(stack[self]).qsg]
+                                   /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
+                                   /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
+                                   /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
+                                   /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
+                                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ said' = said
                    ELSE /\ IF j[self] < NC
                               THEN /\ j' = [j EXCEPT ![self] = j[self] + 1]
                                    /\ pc' = [pc EXCEPT ![self] = "SLx"]
                                    /\ UNCHANGED << said, stack, qsg, ready, 
-                                                   regd, fw >>
+                                                   regd, fw, wk >>
                               ELSE /\ said' = (said \cup Say("select_disconnected"))
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                    /\ j' = [j EXCEPT ![self] = Head(stack[self]).j]
@@ -4982,22 +5482,25 @@ SLy(self) == /\ pc[self] = "SLy"
                                    /\ ready' = [ready EXCEPT ![self] = Head(stack[self]).ready]
                                    /\ regd' = [regd EXCEPT ![self] = Head(stack[self]).regd]
                                    /\ fw' = [fw EXCEPT ![self] = Head(stack[self]).fw]
+                                   /\ wk' = [wk EXCEPT ![self] = Head(stack[self]).wk]
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ stake' = stake
              /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                              freed, holders, busy, aq, links, len, scount, 
-                             disc, rcount, rgone, wl, nsig, sst, skind, sown, 
-                             aws, cell, incell, owed, token, woken, late, 
-                             created, drops, took, dropped, errs, bound, rv, 
-                             final, popd, ns, nstore, wk, rs, ws, dws, nside, 
-                             nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
-                             lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, 
-                             sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                             zsg, dc, dsg, yc, ysg, yq, dj, i, rdone, dc_, cur >>
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, created, drops, 
+                             took, dropped, errs, bound, rv, final, popd, ns, 
+                             nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                             bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, dj, i, rdone, dch, dc_, cur >>
 
 Select(self) == SL1(self) \/ SL2(self) \/ SLd(self) \/ SL3(self)
                    \/ SL4(self) \/ SL5(self) \/ SL6(self) \/ SL7(self)
-                   \/ SLa(self) \/ SLf(self) \/ SLx(self) \/ SLy(self)
+                   \/ SLa(self) \/ SLb(self) \/ SLf(self) \/ SLw(self)
+                   \/ SLc(self) \/ SLq(self) \/ SLx(self) \/ SLy(self)
 
 SD_1(self) == /\ pc[self] = "SD_1"
               /\ IF Stepped
@@ -5055,14 +5558,15 @@ SD_1(self) == /\ pc[self] = "SD_1"
                                     /\ UNCHANGED << stack, rlc >>
                          /\ UNCHANGED << rc, lh, lt, ln >>
               /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                              rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                              cell, incell, owed, token, woken, late, stake, 
-                              created, dropped, bound, popd, ns, nstore, wk, 
-                              rs, ws, dws, nside, nc, bside, bch, bsig, aside, 
-                              ac, apop, ec, eh, et, ene, elinks, sc, sv, st, 
-                              sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, 
-                              zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, 
-                              regd, fw, dj, i, rdone, dc_, cur >>
+                              rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, stake, created, 
+                              dropped, bound, popd, ns, nstore, wk_, rs, ws, 
+                              dws, nside, nc, bside, bch, bsig, aside, ac, 
+                              apop, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                              bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                              zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                              fw, wk, dj, i, rdone, dch, dc_, cur >>
 
 SD_2(self) == /\ pc[self] = "SD_2"
               /\ IF rv[self] # 0 /\ ~MutNoBreak
@@ -5151,14 +5655,15 @@ SD_2(self) == /\ pc[self] = "SD_2"
                                                     took, errs, rv, final, rlc, 
                                                     rc, lh, lt, ln >>
               /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
-                              rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                              cell, incell, owed, token, woken, late, created, 
-                              dropped, bound, popd, ns, nstore, wk, rs, ws, 
+                              rcount, rgone, drained, rsent, rtaken, btk, 
+                              acking, wl, nsig, sst, skind, sown, aws, cell, 
+                              incell, owed, token, woken, late, created, 
+                              dropped, bound, popd, ns, nstore, wk_, rs, ws, 
                               dws, nside, nc, bside, bch, bsig, aside, ac, 
                               apop, ec, eh, et, ene, elinks, sc, sv, st, sn, 
                               bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
                               zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
-                              fw, i, rdone, dc_, cur >>
+                              fw, wk, i, rdone, dch, dc_, cur >>
 
 SelectD(self) == SD_1(self) \/ SD_2(self)
 
@@ -5183,22 +5688,14 @@ T1(self) == /\ pc[self] = "T1"
                                              /\ pc' = [pc EXCEPT ![self] = "BS0"]
                                              /\ UNCHANGED << tail, nnext, 
                                                              ndata, allocated, 
-                                                             aq, links, errs, 
-                                                             nside, nc, sc, sv, 
-                                                             st, sn >>
-                                        ELSE /\ IF Stepped \/ MutWakeEarly
-                                                   THEN /\ /\ sc' = [sc EXCEPT ![self] = Prog[self][i'[self] - 1].c]
-                                                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "USend",
-                                                                                                    pc        |->  "T1",
-                                                                                                    st        |->  st[self],
-                                                                                                    sn        |->  sn[self],
-                                                                                                    sc        |->  sc[self],
-                                                                                                    sv        |->  sv[self] ] >>
-                                                                                                \o stack[self]]
-                                                           /\ sv' = [sv EXCEPT ![self] = Val(self, i'[self] - 1)]
-                                                        /\ st' = [st EXCEPT ![self] = 0]
-                                                        /\ sn' = [sn EXCEPT ![self] = 0]
-                                                        /\ pc' = [pc EXCEPT ![self] = "SE1"]
+                                                             aq, links, drops, 
+                                                             said, errs, nside, 
+                                                             nc, sc, sv, st, 
+                                                             sn >>
+                                        ELSE /\ IF rgone[Prog[self][i'[self] - 1].c] /\ ~MutNoURcount
+                                                   THEN /\ /\ drops' = [drops EXCEPT ![Val(self, i'[self] - 1)] = drops[Val(self, i'[self] - 1)] + 1]
+                                                           /\ said' = (said \cup Say("rx_gone"))
+                                                        /\ pc' = [pc EXCEPT ![self] = "T1"]
                                                         /\ UNCHANGED << tail, 
                                                                         nnext, 
                                                                         ndata, 
@@ -5206,40 +5703,68 @@ T1(self) == /\ pc[self] = "T1"
                                                                         aq, 
                                                                         links, 
                                                                         errs, 
+                                                                        stack, 
                                                                         nside, 
-                                                                        nc >>
-                                                   ELSE /\ LET last == LastOf((Prog[self][i'[self] - 1].c)) IN
-                                                             /\ allocated' = (allocated \cup {(Val(self, i'[self] - 1))})
-                                                             /\ aq' = [aq EXCEPT ![(Prog[self][i'[self] - 1].c)] = Append(aq[(Prog[self][i'[self] - 1].c)], (Val(self, i'[self] - 1)))]
-                                                             /\ errs' = (errs \cup Touch(last))
-                                                             /\ links' = [links EXCEPT ![(Prog[self][i'[self] - 1].c)] = links[(Prog[self][i'[self] - 1].c)] + 1]
-                                                             /\ ndata' = [ndata EXCEPT ![(Val(self, i'[self] - 1))] = Val(self, i'[self] - 1)]
-                                                             /\ nnext' = [nnext EXCEPT ![last] = Val(self, i'[self] - 1)]
-                                                             /\ tail' = [tail EXCEPT ![(Prog[self][i'[self] - 1].c)] = Val(self, i'[self] - 1)]
-                                                        /\ IF RWaiters
-                                                              THEN /\ /\ nc' = [nc EXCEPT ![self] = Prog[self][i'[self] - 1].c]
-                                                                      /\ nside' = [nside EXCEPT ![self] = "R"]
-                                                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyOne",
+                                                                        nc, sc, 
+                                                                        sv, st, 
+                                                                        sn >>
+                                                   ELSE /\ IF Stepped \/ MutWakeEarly
+                                                              THEN /\ /\ sc' = [sc EXCEPT ![self] = Prog[self][i'[self] - 1].c]
+                                                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "USend",
                                                                                                                pc        |->  "T1",
-                                                                                                               nside     |->  nside[self],
-                                                                                                               nc        |->  nc[self] ] >>
+                                                                                                               st        |->  st[self],
+                                                                                                               sn        |->  sn[self],
+                                                                                                               sc        |->  sc[self],
+                                                                                                               sv        |->  sv[self] ] >>
                                                                                                            \o stack[self]]
-                                                                   /\ pc' = [pc EXCEPT ![self] = "NO1"]
-                                                              ELSE /\ pc' = [pc EXCEPT ![self] = "T1"]
-                                                                   /\ UNCHANGED << stack, 
+                                                                      /\ sv' = [sv EXCEPT ![self] = Val(self, i'[self] - 1)]
+                                                                   /\ st' = [st EXCEPT ![self] = 0]
+                                                                   /\ sn' = [sn EXCEPT ![self] = 0]
+                                                                   /\ pc' = [pc EXCEPT ![self] = "SE1"]
+                                                                   /\ UNCHANGED << tail, 
+                                                                                   nnext, 
+                                                                                   ndata, 
+                                                                                   allocated, 
+                                                                                   aq, 
+                                                                                   links, 
+                                                                                   errs, 
                                                                                    nside, 
                                                                                    nc >>
-                                                        /\ UNCHANGED << sc, sv, 
-                                                                        st, sn >>
+                                                              ELSE /\ LET last == LastOf((Prog[self][i'[self] - 1].c)) IN
+                                                                        /\ allocated' = (allocated \cup {(Val(self, i'[self] - 1))})
+                                                                        /\ aq' = [aq EXCEPT ![(Prog[self][i'[self] - 1].c)] = Append(aq[(Prog[self][i'[self] - 1].c)], (Val(self, i'[self] - 1)))]
+                                                                        /\ errs' = (errs \cup Touch(last))
+                                                                        /\ links' = [links EXCEPT ![(Prog[self][i'[self] - 1].c)] = links[(Prog[self][i'[self] - 1].c)] + 1]
+                                                                        /\ ndata' = [ndata EXCEPT ![(Val(self, i'[self] - 1))] = Val(self, i'[self] - 1)]
+                                                                        /\ nnext' = [nnext EXCEPT ![last] = Val(self, i'[self] - 1)]
+                                                                        /\ tail' = [tail EXCEPT ![(Prog[self][i'[self] - 1].c)] = Val(self, i'[self] - 1)]
+                                                                   /\ IF RWaiters
+                                                                         THEN /\ /\ nc' = [nc EXCEPT ![self] = Prog[self][i'[self] - 1].c]
+                                                                                 /\ nside' = [nside EXCEPT ![self] = "R"]
+                                                                                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyOne",
+                                                                                                                          pc        |->  "T1",
+                                                                                                                          nside     |->  nside[self],
+                                                                                                                          nc        |->  nc[self] ] >>
+                                                                                                                      \o stack[self]]
+                                                                              /\ pc' = [pc EXCEPT ![self] = "NO1"]
+                                                                         ELSE /\ pc' = [pc EXCEPT ![self] = "T1"]
+                                                                              /\ UNCHANGED << stack, 
+                                                                                              nside, 
+                                                                                              nc >>
+                                                                   /\ UNCHANGED << sc, 
+                                                                                   sv, 
+                                                                                   st, 
+                                                                                   sn >>
+                                                        /\ UNCHANGED << drops, 
+                                                                        said >>
                                              /\ UNCHANGED << bc, bv, bl, bsg >>
                                   /\ UNCHANGED << head, retired, freed, 
                                                   holders, scount, late, stake, 
-                                                  drops, took, said, final, 
-                                                  rlc, rc, lh, lt, ln, ec, eh, 
-                                                  et, ene, elinks, xc, xv, xl, 
-                                                  xsg, xq, dpc, zc, zsg, dc, 
-                                                  dsg, yc, ysg, yq, j, qsg, 
-                                                  ready, regd, fw, dj >>
+                                                  took, final, rlc, rc, lh, lt, 
+                                                  ln, ec, eh, et, ene, elinks, 
+                                                  xc, xv, xl, xsg, xq, dpc, zc, 
+                                                  zsg, dc, dsg, yc, ysg, yq, j, 
+                                                  qsg, ready, regd, fw, wk, dj >>
                              ELSE /\ IF Prog[self][i'[self] - 1].op = "asend"
                                         THEN /\ /\ created' = (created \cup {Val(self, i'[self] - 1)})
                                                 /\ rv' = [rv EXCEPT ![self] = 0]
@@ -5270,7 +5795,7 @@ T1(self) == /\ pc[self] = "T1"
                                                              zsg, dc, dsg, yc, 
                                                              ysg, yq, j, qsg, 
                                                              ready, regd, fw, 
-                                                             dj >>
+                                                             wk, dj >>
                                         ELSE /\ IF Prog[self][i'[self] - 1].op = "sdrop"
                                                    THEN /\ /\ rv' = [rv EXCEPT ![self] = 0]
                                                            /\ scount' = [scount EXCEPT ![Prog[self][i'[self] - 1].c] = scount[Prog[self][i'[self] - 1].c] - 1]
@@ -5315,7 +5840,8 @@ T1(self) == /\ pc[self] = "T1"
                                                                         qsg, 
                                                                         ready, 
                                                                         regd, 
-                                                                        fw, dj >>
+                                                                        fw, wk, 
+                                                                        dj >>
                                                    ELSE /\ IF Prog[self][i'[self] - 1].op = "try"
                                                               THEN /\ IF Stepped
                                                                          THEN /\ /\ rc' = [rc EXCEPT ![self] = Prog[self][i'[self] - 1].c]
@@ -5412,6 +5938,7 @@ T1(self) == /\ pc[self] = "T1"
                                                                                    ready, 
                                                                                    regd, 
                                                                                    fw, 
+                                                                                   wk, 
                                                                                    dj >>
                                                               ELSE /\ IF Prog[self][i'[self] - 1].op = "empty"
                                                                          THEN /\ IF Stepped
@@ -5454,6 +5981,7 @@ T1(self) == /\ pc[self] = "T1"
                                                                                               ready, 
                                                                                               regd, 
                                                                                               fw, 
+                                                                                              wk, 
                                                                                               dj >>
                                                                          ELSE /\ IF Prog[self][i'[self] - 1].op = "recv"
                                                                                     THEN /\ rv' = [rv EXCEPT ![self] = 0]
@@ -5477,6 +6005,7 @@ T1(self) == /\ pc[self] = "T1"
                                                                                                          ready, 
                                                                                                          regd, 
                                                                                                          fw, 
+                                                                                                         wk, 
                                                                                                          dj >>
                                                                                     ELSE /\ IF Prog[self][i'[self] - 1].op = "deadline"
                                                                                                THEN /\ /\ late' = [late EXCEPT ![self] = FALSE]
@@ -5498,6 +6027,7 @@ T1(self) == /\ pc[self] = "T1"
                                                                                                                     ready, 
                                                                                                                     regd, 
                                                                                                                     fw, 
+                                                                                                                    wk, 
                                                                                                                     dj >>
                                                                                                ELSE /\ IF Prog[self][i'[self] - 1].op = "arecv"
                                                                                                           THEN /\ rv' = [rv EXCEPT ![self] = 0]
@@ -5517,6 +6047,7 @@ T1(self) == /\ pc[self] = "T1"
                                                                                                                                ready, 
                                                                                                                                regd, 
                                                                                                                                fw, 
+                                                                                                                               wk, 
                                                                                                                                dj >>
                                                                                                           ELSE /\ IF Prog[self][i'[self] - 1].op = "select"
                                                                                                                      THEN /\ /\ rv' = [rv EXCEPT ![self] = 0]
@@ -5527,13 +6058,15 @@ T1(self) == /\ pc[self] = "T1"
                                                                                                                                                                    qsg       |->  qsg[self],
                                                                                                                                                                    ready     |->  ready[self],
                                                                                                                                                                    regd      |->  regd[self],
-                                                                                                                                                                   fw        |->  fw[self] ] >>
+                                                                                                                                                                   fw        |->  fw[self],
+                                                                                                                                                                   wk        |->  wk[self] ] >>
                                                                                                                                                                \o stack[self]]
                                                                                                                           /\ j' = [j EXCEPT ![self] = 1]
                                                                                                                           /\ qsg' = [qsg EXCEPT ![self] = 0]
                                                                                                                           /\ ready' = [ready EXCEPT ![self] = FALSE]
                                                                                                                           /\ regd' = [regd EXCEPT ![self] = {}]
                                                                                                                           /\ fw' = [fw EXCEPT ![self] = {}]
+                                                                                                                          /\ wk' = [wk EXCEPT ![self] = FALSE]
                                                                                                                           /\ pc' = [pc EXCEPT ![self] = "SL1"]
                                                                                                                           /\ dj' = dj
                                                                                                                      ELSE /\ IF Prog[self][i'[self] - 1].op = "selectd"
@@ -5554,7 +6087,8 @@ T1(self) == /\ pc[self] = "T1"
                                                                                                                                           qsg, 
                                                                                                                                           ready, 
                                                                                                                                           regd, 
-                                                                                                                                          fw >>
+                                                                                                                                          fw, 
+                                                                                                                                          wk >>
                                                                                                                /\ UNCHANGED << yc, 
                                                                                                                                ysg, 
                                                                                                                                yq >>
@@ -5603,65 +6137,199 @@ T1(self) == /\ pc[self] = "T1"
                                        lh, lt, ln, ec, eh, et, ene, elinks, sc, 
                                        sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, 
                                        xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, 
-                                       yq, j, qsg, ready, regd, fw, dj, i >>
-            /\ UNCHANGED << busy, len, disc, rcount, rgone, wl, nsig, sst, 
-                            skind, sown, aws, cell, incell, owed, token, woken, 
-                            dropped, bound, popd, ns, nstore, wk, rs, ws, dws, 
-                            bside, bch, bsig, aside, ac, apop, rdone, dc_, cur >>
+                                       yq, j, qsg, ready, regd, fw, wk, dj, i >>
+            /\ UNCHANGED << busy, len, disc, rcount, rgone, drained, rsent, 
+                            rtaken, btk, acking, wl, nsig, sst, skind, sown, 
+                            aws, cell, incell, owed, token, woken, dropped, 
+                            bound, popd, ns, nstore, wk_, rs, ws, dws, bside, 
+                            bch, bsig, aside, ac, apop, rdone, dch, dc_, cur >>
 
 TX(self) == /\ pc[self] = "TX"
-            /\ IF Cap > 0 /\ \E c \in Chans : self \in ReceiversOf(c) /\ rcount[c] > 0 /\ ~(c \in rdone[self])
+            /\ IF \E c \in Chans : self \in ReceiversOf(c) /\ rcount[c] > 0 /\ ~(c \in rdone[self])
                   THEN /\ \E c \in {x \in Chans : self \in ReceiversOf(x) /\ rcount[x] > 0 /\ ~(x \in rdone[self])}:
-                            /\ /\ rcount' = [rcount EXCEPT ![c] = rcount[c] - 1]
+                            /\ /\ dch' = [dch EXCEPT ![self] = c]
+                               /\ rcount' = [rcount EXCEPT ![c] = rcount[c] - 1]
                                /\ rdone' = [rdone EXCEPT ![self] = rdone[self] \cup {c}]
                             /\ IF rcount'[c] = 0
-                                  THEN /\ rgone' = [rgone EXCEPT ![c] = TRUE]
-                                       /\ IF SWaiters
+                                  THEN /\ rgone' = [rgone EXCEPT ![c] = Cap > 0 \/ ~MutNoURcount]
+                                       /\ IF Cap > 0 /\ SWaiters
                                              THEN /\ /\ ac' = [ac EXCEPT ![self] = c]
                                                      /\ aside' = [aside EXCEPT ![self] = "S"]
                                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyAll",
-                                                                                              pc        |->  "TX",
+                                                                                              pc        |->  "TXa",
                                                                                               apop      |->  apop[self],
                                                                                               aside     |->  aside[self],
                                                                                               ac        |->  ac[self] ] >>
                                                                                           \o stack[self]]
                                                   /\ apop' = [apop EXCEPT ![self] = 0]
                                                   /\ pc' = [pc EXCEPT ![self] = "NA1"]
-                                             ELSE /\ pc' = [pc EXCEPT ![self] = "TX"]
+                                             ELSE /\ pc' = [pc EXCEPT ![self] = "TXa"]
                                                   /\ UNCHANGED << stack, aside, 
                                                                   ac, apop >>
-                                  ELSE /\ pc' = [pc EXCEPT ![self] = "TX"]
+                                  ELSE /\ pc' = [pc EXCEPT ![self] = "TXa"]
                                        /\ UNCHANGED << rgone, stack, aside, ac, 
                                                        apop >>
                   ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                        /\ UNCHANGED << rcount, rgone, stack, aside, ac, apop, 
-                                       rdone >>
+                                       rdone, dch >>
             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
                             freed, holders, busy, aq, links, len, scount, disc, 
-                            wl, nsig, sst, skind, sown, aws, cell, incell, 
-                            owed, token, woken, late, stake, created, drops, 
-                            took, dropped, said, errs, bound, rv, final, popd, 
-                            ns, nstore, wk, rs, ws, dws, nside, nc, bside, bch, 
-                            bsig, rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, 
-                            sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, 
-                            xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                            ready, regd, fw, dj, i, dc_, cur >>
+                            drained, rsent, rtaken, btk, acking, wl, nsig, sst, 
+                            skind, sown, aws, cell, incell, owed, token, woken, 
+                            late, stake, created, drops, took, dropped, said, 
+                            errs, bound, rv, final, popd, ns, nstore, wk_, rs, 
+                            ws, dws, nside, nc, bside, bch, bsig, rlc, rc, lh, 
+                            lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                            bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, 
+                            dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, 
+                            dj, i, dc_, cur >>
 
-Thread(self) == T1(self) \/ TX(self)
+TXa(self) == /\ pc[self] = "TXa"
+             /\ IF Rdv /\ rcount[dch[self]] = 0
+                   THEN /\ /\ ac' = [ac EXCEPT ![self] = dch[self]]
+                           /\ aside' = [aside EXCEPT ![self] = "A"]
+                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "NotifyAll",
+                                                                    pc        |->  "TXd",
+                                                                    apop      |->  apop[self],
+                                                                    aside     |->  aside[self],
+                                                                    ac        |->  ac[self] ] >>
+                                                                \o stack[self]]
+                        /\ apop' = [apop EXCEPT ![self] = 0]
+                        /\ pc' = [pc EXCEPT ![self] = "NA1"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "TXd"]
+                        /\ UNCHANGED << stack, aside, ac, apop >>
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, drained, rsent, rtaken, btk, 
+                             acking, wl, nsig, sst, skind, sown, aws, cell, 
+                             incell, owed, token, woken, late, stake, created, 
+                             drops, took, dropped, said, errs, bound, rv, 
+                             final, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, bside, bch, bsig, rlc, rc, lh, lt, ln, ec, eh, 
+                             et, ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, 
+                             xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, 
+                             ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
+
+TXd(self) == /\ pc[self] = "TXd"
+             /\ IF Cap = 0 /\ rcount[dch[self]] = 0 /\ dch[self] \notin drained
+                   THEN /\ IF MutNoURcount
+                              THEN /\ drained' = (drained \cup {dch[self]})
+                                   /\ pc' = [pc EXCEPT ![self] = "TXe"]
+                                   /\ UNCHANGED << head, tail, ndata, retired, 
+                                                   freed, holders, aq, drops, 
+                                                   took, said, errs, rv, final, 
+                                                   stack, rc, lh, lt, ln >>
+                              ELSE /\ IF Stepped
+                                         THEN /\ /\ rc' = [rc EXCEPT ![self] = dch[self]]
+                                                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TryRecv",
+                                                                                          pc        |->  "TXe",
+                                                                                          lh        |->  lh[self],
+                                                                                          lt        |->  lt[self],
+                                                                                          ln        |->  ln[self],
+                                                                                          rc        |->  rc[self] ] >>
+                                                                                      \o stack[self]]
+                                              /\ lh' = [lh EXCEPT ![self] = 0]
+                                              /\ lt' = [lt EXCEPT ![self] = 0]
+                                              /\ ln' = [ln EXCEPT ![self] = 0]
+                                              /\ pc' = [pc EXCEPT ![self] = "TR1"]
+                                              /\ UNCHANGED << head, tail, 
+                                                              ndata, retired, 
+                                                              freed, holders, 
+                                                              aq, drops, took, 
+                                                              said, errs, rv, 
+                                                              final >>
+                                         ELSE /\ IF nnext[head[dch[self]]] = NULL
+                                                    THEN /\ /\ errs' = (       errs \cup Touch(head[dch[self]]) \cup EmptyCheck(dch[self])
+                                                                        \cup (IF final[self] THEN NoneCheck(dch[self]) ELSE {}))
+                                                            /\ final' = [final EXCEPT ![self] = FALSE]
+                                                            /\ rv' = [rv EXCEPT ![self] = 0]
+                                                         /\ UNCHANGED << head, 
+                                                                         tail, 
+                                                                         ndata, 
+                                                                         retired, 
+                                                                         freed, 
+                                                                         holders, 
+                                                                         aq, 
+                                                                         drops, 
+                                                                         took, 
+                                                                         said >>
+                                                    ELSE /\ LET h == head[dch[self]] IN
+                                                              LET nx == nnext[head[dch[self]]] IN
+                                                                LET r == IF MutRetireNext THEN nx ELSE h IN
+                                                                  LET ret == retired \cup {r} IN
+                                                                    LET hold == [holders EXCEPT ![r] = Holders] IN
+                                                                      LET nd == [ndata EXCEPT ![nx] = IF MutRead THEN ndata[nx] ELSE 0] IN
+                                                                        LET F == Unheld(ret, hold) IN
+                                                                          /\ aq' = [aq EXCEPT ![dch[self]] = Remove(aq[dch[self]], ndata[nx])]
+                                                                          /\ drops' = Dropped(Consume(ndata[nx]), nd, F)
+                                                                          /\ errs' = (errs \cup Touch(h) \cup Touch(nx) \cup TakeCheck(dch[self], ndata[nx]))
+                                                                          /\ final' = [final EXCEPT ![self] = FALSE]
+                                                                          /\ freed' = (freed \cup F)
+                                                                          /\ head' = [head EXCEPT ![dch[self]] = nx]
+                                                                          /\ holders' = hold
+                                                                          /\ ndata' = Wiped(nd, F)
+                                                                          /\ retired' = ret
+                                                                          /\ rv' = [rv EXCEPT ![self] = ndata[nx]]
+                                                                          /\ said' = (said \cup Drained(self, ndata[nx]) \cup NodeDrops(nd, F))
+                                                                          /\ tail' = [tail EXCEPT ![dch[self]] = IF tail[dch[self]] = h THEN nx ELSE tail[dch[self]]]
+                                                                          /\ took' = (took \cup {ndata[nx]})
+                                              /\ pc' = [pc EXCEPT ![self] = "TXe"]
+                                              /\ UNCHANGED << stack, rc, lh, 
+                                                              lt, ln >>
+                                   /\ UNCHANGED drained
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "TX"]
+                        /\ UNCHANGED << head, tail, ndata, retired, freed, 
+                                        holders, aq, drained, drops, took, 
+                                        said, errs, rv, final, stack, rc, lh, 
+                                        lt, ln >>
+             /\ UNCHANGED << nnext, allocated, busy, links, len, scount, disc, 
+                             rcount, rgone, rsent, rtaken, btk, acking, wl, 
+                             nsig, sst, skind, sown, aws, cell, incell, owed, 
+                             token, woken, late, stake, created, dropped, 
+                             bound, popd, ns, nstore, wk_, rs, ws, dws, nside, 
+                             nc, bside, bch, bsig, aside, ac, apop, rlc, ec, 
+                             eh, et, ene, elinks, sc, sv, st, sn, bc, bv, bl, 
+                             bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                             yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                             rdone, dch, dc_, cur >>
+
+TXe(self) == /\ pc[self] = "TXe"
+             /\ IF rv[self] # 0
+                   THEN /\ pc' = [pc EXCEPT ![self] = "TXd"]
+                        /\ UNCHANGED << drained, rv >>
+                   ELSE /\ /\ drained' = (drained \cup {dch[self]})
+                           /\ rv' = [rv EXCEPT ![self] = 0]
+                        /\ pc' = [pc EXCEPT ![self] = "TX"]
+             /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, 
+                             freed, holders, busy, aq, links, len, scount, 
+                             disc, rcount, rgone, rsent, rtaken, btk, acking, 
+                             wl, nsig, sst, skind, sown, aws, cell, incell, 
+                             owed, token, woken, late, stake, created, drops, 
+                             took, dropped, said, errs, bound, final, popd, 
+                             stack, ns, nstore, wk_, rs, ws, dws, nside, nc, 
+                             bside, bch, bsig, aside, ac, apop, rlc, rc, lh, 
+                             lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                             bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
+                             zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, 
+                             fw, wk, dj, i, rdone, dch, dc_, cur >>
+
+Thread(self) == T1(self) \/ TX(self) \/ TXa(self) \/ TXd(self) \/ TXe(self)
 
 TD1 == /\ pc[Teardown] = "TD1"
        /\ AllDone
        /\ pc' = [pc EXCEPT ![Teardown] = "TD2"]
        /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, freed, 
                        holders, busy, aq, links, len, scount, disc, rcount, 
-                       rgone, wl, nsig, sst, skind, sown, aws, cell, incell, 
-                       owed, token, woken, late, stake, created, drops, took, 
-                       dropped, said, errs, bound, rv, final, popd, stack, ns, 
-                       nstore, wk, rs, ws, dws, nside, nc, bside, bch, bsig, 
-                       aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                       elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, 
-                       xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                       ready, regd, fw, dj, i, rdone, dc_, cur >>
+                       rgone, drained, rsent, rtaken, btk, acking, wl, nsig, 
+                       sst, skind, sown, aws, cell, incell, owed, token, woken, 
+                       late, stake, created, drops, took, dropped, said, errs, 
+                       bound, rv, final, popd, stack, ns, nstore, wk_, rs, ws, 
+                       dws, nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                       rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                       bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                       dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                       rdone, dch, dc_, cur >>
 
 TD2 == /\ pc[Teardown] = "TD2"
        /\ IF dc_ <= NC
@@ -5676,58 +6344,75 @@ TD2 == /\ pc[Teardown] = "TD2"
                   /\ UNCHANGED << busy, dropped, cur >>
        /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, freed, 
                        holders, aq, links, len, scount, disc, rcount, rgone, 
-                       wl, nsig, sst, skind, sown, aws, cell, incell, owed, 
-                       token, woken, late, stake, created, drops, took, said, 
-                       errs, bound, rv, final, popd, stack, ns, nstore, wk, rs, 
-                       ws, dws, nside, nc, bside, bch, bsig, aside, ac, apop, 
-                       rlc, rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, 
-                       st, sn, bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, 
-                       zsg, dc, dsg, yc, ysg, yq, j, qsg, ready, regd, fw, dj, 
-                       i, rdone, dc_ >>
+                       drained, rsent, rtaken, btk, acking, wl, nsig, sst, 
+                       skind, sown, aws, cell, incell, owed, token, woken, 
+                       late, stake, created, drops, took, said, errs, bound, 
+                       rv, final, popd, stack, ns, nstore, wk_, rs, ws, dws, 
+                       nside, nc, bside, bch, bsig, aside, ac, apop, rlc, rc, 
+                       lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, bc, 
+                       bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, dsg, 
+                       yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, rdone, 
+                       dch, dc_ >>
 
 TD4 == /\ pc[Teardown] = "TD4"
        /\ dc_' = dc_ + 1
        /\ pc' = [pc EXCEPT ![Teardown] = "TD2"]
        /\ UNCHANGED << head, tail, nnext, ndata, allocated, retired, freed, 
                        holders, busy, aq, links, len, scount, disc, rcount, 
-                       rgone, wl, nsig, sst, skind, sown, aws, cell, incell, 
-                       owed, token, woken, late, stake, created, drops, took, 
-                       dropped, said, errs, bound, rv, final, popd, stack, ns, 
-                       nstore, wk, rs, ws, dws, nside, nc, bside, bch, bsig, 
-                       aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
-                       elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, 
-                       xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                       ready, regd, fw, dj, i, rdone, cur >>
+                       rgone, drained, rsent, rtaken, btk, acking, wl, nsig, 
+                       sst, skind, sown, aws, cell, incell, owed, token, woken, 
+                       late, stake, created, drops, took, dropped, said, errs, 
+                       bound, rv, final, popd, stack, ns, nstore, wk_, rs, ws, 
+                       dws, nside, nc, bside, bch, bsig, aside, ac, apop, rlc, 
+                       rc, lh, lt, ln, ec, eh, et, ene, elinks, sc, sv, st, sn, 
+                       bc, bv, bl, bsg, xc, xv, xl, xsg, xq, dpc, zc, zsg, dc, 
+                       dsg, yc, ysg, yq, j, qsg, ready, regd, fw, wk, dj, i, 
+                       rdone, dch, cur >>
 
 TD3 == /\ pc[Teardown] = "TD3"
        /\ IF cur # NULL
              THEN /\ /\ cur' = IF MutNoDrain THEN NULL ELSE nnext[cur]
+                     /\ drops' = Dropped(drops, ndata, {cur})
                      /\ errs' = (errs \cup Touch(cur) \cup (IF cur \in retired THEN {"uaf"} ELSE {}))
-                     /\ holders' = [holders EXCEPT ![cur] = Holders]
-                     /\ retired' = (retired \cup {cur})
+                     /\ freed' = (freed \cup {cur})
+                     /\ ndata' = Wiped(ndata, {cur})
+                     /\ said' = (said \cup NodeDrops(ndata, {cur}))
                   /\ pc' = [pc EXCEPT ![Teardown] = "TD3"]
-                  /\ UNCHANGED << ndata, freed, busy, drops, said >>
-             ELSE /\ LET hold == LetGo(Teardown, holders) IN
-                       LET F == Unheld(retired, hold) IN
-                         /\ busy' = [busy EXCEPT ![Teardown] = FALSE]
-                         /\ drops' = Dropped(drops, ndata, F)
-                         /\ freed' = (freed \cup F)
-                         /\ holders' = hold
-                         /\ ndata' = Wiped(ndata, F)
-                         /\ said' = (said \cup NodeDrops(ndata, F))
-                  /\ pc' = [pc EXCEPT ![Teardown] = "TD4"]
-                  /\ UNCHANGED << retired, errs, cur >>
-       /\ UNCHANGED << head, tail, nnext, allocated, aq, links, len, scount, 
-                       disc, rcount, rgone, wl, nsig, sst, skind, sown, aws, 
-                       cell, incell, owed, token, woken, late, stake, created, 
-                       took, dropped, bound, rv, final, popd, stack, ns, 
-                       nstore, wk, rs, ws, dws, nside, nc, bside, bch, bsig, 
+             ELSE /\ pc' = [pc EXCEPT ![Teardown] = "TD5"]
+                  /\ UNCHANGED << ndata, freed, drops, said, errs, cur >>
+       /\ UNCHANGED << head, tail, nnext, allocated, retired, holders, busy, 
+                       aq, links, len, scount, disc, rcount, rgone, drained, 
+                       rsent, rtaken, btk, acking, wl, nsig, sst, skind, sown, 
+                       aws, cell, incell, owed, token, woken, late, stake, 
+                       created, took, dropped, bound, rv, final, popd, stack, 
+                       ns, nstore, wk_, rs, ws, dws, nside, nc, bside, bch, 
+                       bsig, aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, 
+                       ene, elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, 
+                       xl, xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
+                       ready, regd, fw, wk, dj, i, rdone, dch, dc_ >>
+
+TD5 == /\ pc[Teardown] = "TD5"
+       /\ LET hold == LetGo(Teardown, holders) IN
+            LET F == Unheld(retired, hold) IN
+              /\ busy' = [busy EXCEPT ![Teardown] = FALSE]
+              /\ drops' = Dropped(drops, ndata, F)
+              /\ freed' = (freed \cup F)
+              /\ holders' = hold
+              /\ ndata' = Wiped(ndata, F)
+              /\ said' = (said \cup NodeDrops(ndata, F))
+       /\ pc' = [pc EXCEPT ![Teardown] = "TD4"]
+       /\ UNCHANGED << head, tail, nnext, allocated, retired, aq, links, len, 
+                       scount, disc, rcount, rgone, drained, rsent, rtaken, 
+                       btk, acking, wl, nsig, sst, skind, sown, aws, cell, 
+                       incell, owed, token, woken, late, stake, created, took, 
+                       dropped, errs, bound, rv, final, popd, stack, ns, 
+                       nstore, wk_, rs, ws, dws, nside, nc, bside, bch, bsig, 
                        aside, ac, apop, rlc, rc, lh, lt, ln, ec, eh, et, ene, 
                        elinks, sc, sv, st, sn, bc, bv, bl, bsg, xc, xv, xl, 
                        xsg, xq, dpc, zc, zsg, dc, dsg, yc, ysg, yq, j, qsg, 
-                       ready, regd, fw, dj, i, rdone, dc_ >>
+                       ready, regd, fw, wk, dj, i, rdone, dch, dc_, cur >>
 
-TheDrop == TD1 \/ TD2 \/ TD4 \/ TD3
+TheDrop == TD1 \/ TD2 \/ TD4 \/ TD3 \/ TD5
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"

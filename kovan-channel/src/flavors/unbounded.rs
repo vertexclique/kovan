@@ -2,7 +2,6 @@ use kovan::{Atomic, RetiredNode, Shared, alloc_node, pin, retire_node};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 // Shuttle-instrumented so `sender_count`/`disconnected` -- raced by a
@@ -47,6 +46,11 @@ pub(crate) struct Channel<T: 'static> {
     sender_count: AtomicUsize,
     /// Set to true when all senders have been dropped.
     disconnected: AtomicBool,
+    /// Number of live Receiver handles.
+    receiver_count: AtomicUsize,
+    /// Set when every Receiver is dropped: nothing sent can be received, so a
+    /// send drops its value.
+    receivers_gone: AtomicBool,
 }
 
 impl<T: 'static> Channel<T> {
@@ -58,6 +62,8 @@ impl<T: 'static> Channel<T> {
             receivers: WaitList::new(),
             sender_count: AtomicUsize::new(1), // Starts at 1 for the initial Sender
             disconnected: AtomicBool::new(false),
+            receiver_count: AtomicUsize::new(1),
+            receivers_gone: AtomicBool::new(false),
         }
     }
 
@@ -72,34 +78,34 @@ impl<T: 'static> Channel<T> {
 
 impl<T: 'static> Drop for Channel<T> {
     fn drop(&mut self) {
-        // Sentinel node retirement logic
-        //
         // At creation time `head == tail == sentinel` (a dummy `Node` with
-        // `data: None`).  As messages are dequeued, `try_recv()` advances `head`
-        // and calls `retire(old_head)` on each node that leaves the list.  The
-        // *new* head is never retired by `try_recv`; only its predecessor is.
+        // `data: None`). As messages are dequeued, `try_recv()` advances
+        // `head` and retires the old head, whose value it moved out; the new
+        // head is never retired by `try_recv`. So at `Drop` time every node
+        // from `head` on is linked and never retired: the sentinel or the
+        // last node a dequeue moved the head to, and the nodes of the
+        // messages still pending.
         //
-        // Therefore at `Drop` time, `self.head` is always an un-retired node:
-        //   - the original sentinel, if nothing was ever sent+received,
-        //   - the last node that became head after a dequeue, or
-        //   - a data node if messages are still pending.
-        //
-        // The loop walks head->tail and retires each node exactly once.
-        // Empty-channel path: `head == tail == sentinel`, next is null;
-        // we retire the sentinel and the loop exits cleanly with no double-free.
+        // The channel drops with its last handle, and every operation
+        // borrows a handle, so no thread is inside one and none reaches
+        // these nodes: each is dropped and freed here, the values still
+        // inside on this thread (retiring them would run a value's
+        // destructor on whichever thread kovan frees it on, which needs
+        // `T: Send`).
         let guard = pin();
         let mut curr = self.head.load(Ordering::Relaxed, &guard);
 
         while !curr.is_null() {
             let next = unsafe { curr.deref().next.load(Ordering::Relaxed, &guard) };
-            unsafe { retire_node(curr.as_raw()) };
+            // SAFETY: linked, never retired, and unreachable by any other thread (see above).
+            unsafe { kovan::drop_node(curr.as_raw()) };
             curr = next;
         }
 
-        // Force-flush retired nodes on this thread to prevent use-after-free
-        // during process teardown when kovan's global state is being destroyed.
+        // Submit the old heads this thread retired, so they do not wait for
+        // its next batch.
         drop(guard);
-        kovan::flush();
+        kovan::flush_pending();
     }
 }
 
@@ -137,8 +143,22 @@ pub struct Receiver<T: 'static> {
 
 impl<T: 'static> Clone for Receiver<T> {
     fn clone(&self) -> Self {
+        self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: 'static> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        if self.inner.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Nothing sent can be received any more: a send drops its value
+            // from now on, and what is queued is dropped here, not kept until
+            // the last sender goes. A send that read the flag before this
+            // store may still link one value; the channel's drop drops it.
+            self.inner.receivers_gone.store(true, Ordering::Release);
+            while self.try_recv().is_some() {}
         }
     }
 }
@@ -169,7 +189,14 @@ pub fn channel<T: 'static>() -> (Sender<T>, Receiver<T>) {
 
 impl<T: 'static> Sender<T> {
     /// Sends a message into the channel.
+    ///
+    /// Once every receiver is gone the value is dropped and `send` returns at
+    /// once: no receiver can ever take it ([`is_disconnected`](Self::is_disconnected)).
     pub fn send(&self, t: T) {
+        if self.inner.receivers_gone.load(Ordering::Acquire) {
+            drop(t);
+            return;
+        }
         let node = Node::new(Some(t));
         let guard = pin();
 
@@ -219,6 +246,14 @@ impl<T: 'static> Sender<T> {
                 );
             }
         }
+    }
+}
+
+impl<T: 'static> Sender<T> {
+    /// Returns `true` if every receiver has been dropped: a send then drops
+    /// its value and returns at once.
+    pub fn is_disconnected(&self) -> bool {
+        self.inner.receivers_gone.load(Ordering::Acquire)
     }
 }
 
@@ -308,19 +343,19 @@ impl<T: 'static> Receiver<T> {
             // Register unconditionally, then recheck -- the loss-free
             // wakeup protocol documented in `crate::waitlist`.
             let signal = Arc::new(Signal::new());
-            self.inner.receivers.register(signal.clone());
+            let slot = self.inner.receivers.register(signal.clone());
             wakeup_fence();
 
             if let Some(msg) = self.try_recv() {
                 // We registered but found a message already: not going to
                 // wait, so abandon our own entry (see `waitlist` docs).
-                self.inner.receivers.abandon(&*signal);
+                self.inner.receivers.abandon(slot, &*signal);
                 return Some(msg);
             }
 
             // Check disconnection after registering signal but before parking
             if self.is_disconnected() {
-                self.inner.receivers.abandon(&*signal);
+                self.inner.receivers.abandon(slot, &*signal);
                 return self.try_recv(); // Drain remaining
             }
 
@@ -376,18 +411,18 @@ impl<T: 'static> Receiver<T> {
             // Register unconditionally, then recheck -- the loss-free
             // wakeup protocol documented in `crate::waitlist`.
             let signal = Arc::new(Signal::new());
-            self.inner.receivers.register(signal.clone());
+            let slot = self.inner.receivers.register(signal.clone());
             wakeup_fence();
 
             if let Some(msg) = self.try_recv() {
                 // We registered but found a message already: not going to
                 // wait, so abandon our own entry (see `waitlist` docs).
-                self.inner.receivers.abandon(&*signal);
+                self.inner.receivers.abandon(slot, &*signal);
                 return RecvDeadline::Msg(msg);
             }
 
             if self.is_disconnected() {
-                self.inner.receivers.abandon(&*signal);
+                self.inner.receivers.abandon(slot, &*signal);
                 return match self.try_recv() {
                     Some(msg) => RecvDeadline::Msg(msg),
                     None => RecvDeadline::Disconnected,
@@ -398,7 +433,7 @@ impl<T: 'static> Receiver<T> {
                 // Timed out: mark our own entry stale (see `waitlist`
                 // docs) and do one last recheck -- a message or disconnect
                 // may have landed in the instant the deadline passed.
-                self.inner.receivers.abandon(&*signal);
+                self.inner.receivers.abandon(slot, &*signal);
                 if let Some(msg) = self.try_recv() {
                     return RecvDeadline::Msg(msg);
                 }
@@ -444,6 +479,14 @@ impl<T: 'static> Receiver<T> {
         head == tail && next.is_null()
     }
 
+    /// When this channel's next message is due by the clock: always `None`,
+    /// as only the channels of [`after`](crate::after) and
+    /// [`tick`](crate::tick) deliver by the clock. `select!` waits until
+    /// the earliest due time of its channels.
+    pub fn next_due(&self) -> Option<Instant> {
+        None
+    }
+
     /// Registers a signal for notification when a message arrives.
     ///
     /// This is the primitive `select!` builds on to wait across multiple
@@ -461,13 +504,24 @@ impl<T: 'static> Receiver<T> {
     /// A signal another channel already notified may be registered (the
     /// one `Signal` of a `select!` is registered on its channels one after
     /// another): its entry is stale and skipped, and the caller's wait
-    /// returns at once. A caller that stops waiting without being woken must
-    /// withdraw the signal ([`Signal::cancel`](crate::signal::Signal::cancel))
-    /// and, when that answers `false`, pass the wakeup it took on with
+    /// returns at once. A caller that stops waiting takes the signal back
+    /// from every channel it registered on
+    /// ([`unregister_signal`](Self::unregister_signal)); one that was not
+    /// woken also withdraws the signal
+    /// ([`Signal::cancel`](crate::signal::Signal::cancel)) and, when that
+    /// answers `false`, passes the wakeup it took on with
     /// [`wake_one_waiter`](Self::wake_one_waiter) on every channel it
     /// registered on.
     pub fn register_signal(&self, signal: Arc<dyn Notifier>) {
         self.inner.receivers.register(signal);
+    }
+
+    /// Withdraws `signal` from this channel's wait list: a caller of
+    /// [`register_signal`](Self::register_signal) does this when it stops
+    /// waiting, woken or not, so its registration holds nothing once the
+    /// wait is over.
+    pub fn unregister_signal(&self, signal: &dyn Notifier) {
+        self.inner.receivers.unregister(signal);
     }
 
     /// Wakes one receiver waiting on this channel, if any: how a caller of

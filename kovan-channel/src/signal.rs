@@ -5,7 +5,7 @@
 //! below), not a `Mutex<Option<Waker>>`.
 //!
 //! Both types implement `Notifier` so a single `Arc<dyn Notifier>`
-//! registration queue (see the crate's `waitlist` module) can hold a mix
+//! registration list (see the crate's `waitlist` module) can hold a mix
 //! of blocking and async waiters.
 
 use core::sync::atomic::Ordering;
@@ -38,9 +38,9 @@ pub trait Notifier: Send + Sync {
 
     /// Returns `true` if this waiter has already been notified.
     ///
-    /// The crate's `WaitList` uses this to skip stale queue entries
-    /// (registrations that were abandoned, or already delivered) instead of
-    /// wasting a wakeup on them. The default is conservative: an
+    /// The crate's `WaitList` uses this to take over the slot of an entry
+    /// that no longer waits (a signal another list delivered to) instead of
+    /// keeping it. The default is conservative: an
     /// implementation that doesn't override it is never treated as stale,
     /// so it is always notified when reached (matching this trait's
     /// pre-existing behavior for anyone implementing it outside this
