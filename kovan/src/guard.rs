@@ -62,6 +62,16 @@ const MAX_LOAD_ATTEMPTS: usize = 16;
 /// [`flush()`](crate::flush) before going idle: called with no guard live,
 /// it frees what the slot holds and leaves it holding nothing back until
 /// the thread pins again.
+///
+/// # A pin after the thread's exit
+///
+/// A thread-local destructor that runs after kovan's own (the thread's exit
+/// is over) may still pin: its guard protects what it loads as any other
+/// does. Such a critical section claims a thread ID and a reservation for
+/// itself, and when its last guard drops it leaves the protocol as an exit
+/// does (submits what it retired, releases the ID). A guard of such a
+/// section that is never dropped (`mem::forget`) keeps the reservation and
+/// the ID for the rest of the process, since no exit runs to end it.
 pub struct Guard {
     _private: (),
     // Psy szczekają, a karawana jedzie dalej.
@@ -79,11 +89,12 @@ impl Drop for Guard {
         }
         #[cfg(not(feature = "nightly"))]
         {
-            // Use try_with to handle process teardown gracefully.
-            // During static destructor execution, TLS may already be destroyed.
-            // Panicking in a destructor during cleanup causes SIGABRT.
-            if HANDLE.try_with(Handle::unpin).is_err() {
-                on_exiting_handle(Handle::unpin);
+            // Through the handle; through the exiting handle while the exit
+            // runs (a destructor it runs); after the exit, through the late
+            // handle the pin made (see `late_pin`).
+            if HANDLE.try_with(Handle::unpin).is_err() && on_exiting_handle(Handle::unpin).is_none()
+            {
+                late_unpin();
             }
         }
     }
@@ -157,6 +168,14 @@ struct Handle {
     /// to nodes being freed by the outer `free_batch_list`), causing
     /// use-after-free, double-free, and heap corruption.
     in_reclaim: Cell<bool>,
+    /// The handle runs a critical section that began after this thread's
+    /// exit was over (a thread-local destructor that runs after kovan's):
+    /// the section holds a reservation under an ID of its own, and its end
+    /// leaves the protocol as an exit does, since no exit runs for the
+    /// thread any more. On nightly the end is the outermost drop's escalated
+    /// path (`transition`, `unpin_outermost`); elsewhere the section's handle
+    /// is a box of its own, whose drop is that exit (`late::late_unpin`).
+    late: Cell<bool>,
 }
 
 impl Handle {
@@ -175,6 +194,7 @@ impl Handle {
             drained_epoch: Cell::new(0),
             cached_birth_epoch: Cell::new(0),
             in_reclaim: Cell::new(false),
+            late: Cell::new(false),
         }
     }
 
@@ -219,9 +239,11 @@ impl Handle {
                 let tid = self.claim_tid();
                 // On nightly, #[thread_local] doesn't run Drop.
                 // Register a sentinel that calls cleanup() on thread exit.
+                // Once the sentinel is gone the exit is over and runs no
+                // more: the ID is the late section's, which releases it.
                 #[cfg(feature = "nightly")]
-                {
-                    HANDLE_CLEANUP_SENTINEL.with(|_| {});
+                if HANDLE_CLEANUP_SENTINEL.try_with(|_| {}).is_err() {
+                    self.late.set(true);
                 }
                 tid
             }
@@ -369,9 +391,9 @@ impl Handle {
     ///
     /// The outermost drop (count 1) is the common case and is tested first:
     /// it stores 0 and, only if the section escalated, transitions. A nested
-    /// drop decrements, saturating: a dummy Guard (created when TLS was
-    /// unavailable in `pin()`) was never pinned, and decrementing past 0
-    /// would wrap.
+    /// drop decrements, saturating: a guard that outlived its handle (kept
+    /// by a thread-local destructor that runs after the exit) drops through
+    /// another handle, whose count must not wrap.
     #[inline]
     fn unpin(&self) {
         let count = self.pin_count.get();
@@ -403,8 +425,19 @@ impl Handle {
     /// outermost and run a second transition inside this one: the inner
     /// transition stores the batches it freed in the free-list cache, and
     /// this one then overwrites the cache with its own list, losing them.
+    ///
+    /// A late section (see `late`) leaves the protocol here as an exit
+    /// does when its drop takes this path (always on nightly, where it
+    /// escalated; elsewhere when a protected load in it escalated): no exit
+    /// runs for its thread any more to submit what it retired and release
+    /// its ID.
     #[cold]
     fn unpin_outermost(&self) {
+        if self.late.get() {
+            self.late.set(false);
+            self.cleanup();
+            return;
+        }
         let tid = self.tid();
         self.pin_count.set(1);
         self.do_update(slot::epoch(), 0, tid);
@@ -544,8 +577,25 @@ impl Handle {
     /// Transition this thread's reservation slot at an outermost `pin()`:
     /// traverse the slot list and publish the current epoch, retrying until
     /// the epoch is stable (at most 16 times), then the helping slow path.
+    ///
+    /// On nightly a late section (see `late`) then takes the unconditional
+    /// reservation, so that its outermost drop, `HANDLE.unpin()` with no
+    /// other cold branch, takes the escalated path and leaves the protocol
+    /// there (`unpin_outermost`); every other guard drop stays as it is.
+    /// Elsewhere the late section's drops already run on a path of their
+    /// own (`late::late_unpin`) and its reservation is the epoch a pin
+    /// publishes.
     #[cold]
-    fn transition(&self, mut curr_epoch: u64) {
+    fn transition(&self, curr_epoch: u64) {
+        self.transition_to_stable(curr_epoch);
+        #[cfg(feature = "nightly")]
+        if self.late.get() {
+            self.escalate();
+        }
+    }
+
+    /// The traversal and publication of `transition`.
+    fn transition_to_stable(&self, mut curr_epoch: u64) {
         let tid = self.tid();
         let index = 0; // kovan uses only slot index 0
         let mut attempts = 16usize;
@@ -1809,6 +1859,11 @@ impl Parked {
     }
 }
 
+#[cfg(not(feature = "nightly"))]
+mod late;
+#[cfg(not(feature = "nightly"))]
+use late::{late_pin, late_unpin, on_late_handle};
+
 #[cfg(test)]
 mod tests;
 
@@ -1896,7 +1951,9 @@ pub(crate) fn current_birth_epoch() -> u64 {
         HANDLE
             .try_with(|handle| handle.current_birth_epoch())
             .unwrap_or_else(|_| {
-                on_exiting_handle(Handle::current_birth_epoch).unwrap_or_else(slot::epoch)
+                on_exiting_handle(Handle::current_birth_epoch)
+                    .or_else(|| on_late_handle(Handle::current_birth_epoch))
+                    .unwrap_or_else(slot::epoch)
             })
     }
 }
@@ -1912,12 +1969,15 @@ pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. Fall back to the
-        // exiting handle (a destructor the exit runs), else to a raw load.
+        // After `HANDLE` is destroyed: the exiting handle (a destructor the
+        // exit runs), else the late section's (a destructor that runs after
+        // the exit). With neither, no guard is live on this thread, which
+        // the caller's contract rules out: a plain load.
         HANDLE
             .try_with(|handle| handle.protect_load(data, order))
             .unwrap_or_else(|_| {
                 on_exiting_handle(|handle| handle.protect_load(data, order))
+                    .or_else(|| on_late_handle(|handle| handle.protect_load(data, order)))
                     .unwrap_or_else(|| data.load(order))
             })
     }
@@ -1936,21 +1996,15 @@ pub fn pin() -> Guard {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. Pin the exiting
-        // handle (a destructor the exit runs), else return a dummy guard
-        // whose drop is also a no-op (try_with in Guard::drop handles this).
+        // After `HANDLE` is destroyed: pin the exiting handle (a destructor
+        // the exit runs), else start a late section (a destructor that runs
+        // after the exit), which protects its loads as any section does.
         //
         // unwrap_or_else (lazy), NOT unwrap_or: unwrap_or evaluates its
-        // argument eagerly, constructing a dummy Guard on every successful
-        // call whose immediate Drop decremented pin_count right back -
-        // silently cancelling the pin and disabling nested-pin /
-        // critical-section tracking on stable builds.
-        HANDLE.try_with(|handle| handle.pin()).unwrap_or_else(|_| {
-            on_exiting_handle(Handle::pin).unwrap_or_else(|| Guard {
-                _private: (),
-                marker,
-            })
-        })
+        // argument eagerly, running the fallback on every successful call.
+        HANDLE
+            .try_with(|handle| handle.pin())
+            .unwrap_or_else(|_| on_exiting_handle(Handle::pin).unwrap_or_else(late_pin))
     }
 }
 
@@ -2094,7 +2148,9 @@ pub(crate) unsafe fn retire_with(node_ptr: *mut RetiredNode, destructor: Destruc
         // and takes the retires of the destructors that exit runs. Once the
         // exit is over, a retire (from a thread-local destructor that runs
         // after it) would fill a batch no exit submits any more.
-        if exit_pending() || HANDLE.in_reclaim.get() {
+        // A late section's retires go to its handle, whose exit (the
+        // section's end) submits them.
+        if exit_pending() || HANDLE.in_reclaim.get() || HANDLE.late.get() {
             // SAFETY: Caller upholds the safety contract.
             unsafe { HANDLE.retire_with(node_ptr, destructor) }
         } else {
@@ -2107,11 +2163,14 @@ pub(crate) unsafe fn retire_with(node_ptr: *mut RetiredNode, destructor: Destruc
         // SAFETY: Caller upholds the safety contract.
         // Through the handle; through the exiting handle while the exit runs
         // (a destructor it runs); after the exit (a thread-local destructor
-        // that runs after the handle's), through a handle of its own.
+        // that runs after the handle's), through the late section's handle
+        // if one is live, else through a handle of its own.
         if HANDLE
             .try_with(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
             .is_err()
             && on_exiting_handle(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
+                .is_none()
+            && on_late_handle(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
                 .is_none()
         {
             unsafe { retire_after_exit(node_ptr, destructor) };
@@ -2159,10 +2218,12 @@ pub fn flush() {
     }
     #[cfg(not(feature = "nightly"))]
     {
-        // During process teardown TLS may be destroyed. Flush the exiting
-        // handle (a no-op: its exit is reclaiming), else nothing.
-        if HANDLE.try_with(|handle| handle.flush()).is_err() {
-            on_exiting_handle(Handle::flush);
+        // After `HANDLE` is destroyed: the exiting handle (a no-op: its exit
+        // is reclaiming), else a live late section's, else nothing.
+        if HANDLE.try_with(|handle| handle.flush()).is_err()
+            && on_exiting_handle(Handle::flush).is_none()
+        {
+            on_late_handle(Handle::flush);
         }
     }
 }

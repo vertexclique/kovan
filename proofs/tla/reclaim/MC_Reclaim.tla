@@ -132,6 +132,26 @@ P_late_retire_dropped == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, Rt>>
 \* Thread 1 as in P_late_retire; thread 2 waits until thread 1 has ended, then flushes and lives on.
 P_late_retire_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, Rt, Ex>>
                                                ELSE <<Join(1), Fl>>]
+\* A pin after a thread's exit (a thread-local destructor that runs after the handle's), as the
+\* code makes it: a critical section of a handle of its own, which claims a tid and a reservation
+\* and whose end runs the exit any thread runs (the thread's ops after its first exit are that
+\* handle's). Thread 1 pins, replaces cell 1's value, unpins and exits, then pins, loads cell 1,
+\* unpins and exits again. Thread 2 replaces cell 1's value, retiring what thread 1 may hold, and
+\* flushes.
+P_late_pin == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, P, Ld(1), U, Ex>>
+                                       ELSE <<P, Wr(1), U, Fl, Ex>>]
+\* The same load as the code made it before: the pin returned a guard that reserved nothing, so
+\* the load is a raw one, held with no reservation behind it.
+P_late_pin_unreserved == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, Lu(1)>>
+                                                  ELSE <<P, Wr(1), U, Fl, Ex>>]
+\* A section after the exit that replaces cell 1's value (retiring what it read) and never ends:
+\* no exit submits what it retired. Thread 2 waits until thread 1 has ended, then flushes.
+P_late_pin_kept == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, P, Ld(1), Wr(1), U>>
+                                            ELSE <<Join(1), Fl>>]
+\* A section after the exit that replaces cell 1's value and ends; thread 2 waits until thread 1
+\* has ended, then flushes and lives on.
+P_late_pin_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, P, Ld(1), Wr(1), U, Ex>>
+                                            ELSE <<Join(1), Fl>>]
 \* Values retired by threads that never pin (README.md tells the story). With a batch of two
 \* (RetireFreq 2), one retire does not submit: the value waits in the thread's own batch, and the
 \* thread has no tid (a pin claims one, as do a flush or an exit that needs one and the epoch

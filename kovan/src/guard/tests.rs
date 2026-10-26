@@ -913,6 +913,7 @@ fn flush_without_a_tid_or_orphans_claims_none() {
     );
 }
 
+mod late;
 mod progress;
 
 /// A thread-local destructor that runs after the thread's exit retires a

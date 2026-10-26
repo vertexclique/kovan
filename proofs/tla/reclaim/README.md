@@ -597,6 +597,7 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_flush_orphan` | A thread that never pinned flushes twice at any moment while another exits with a batch it cannot place (parked on its tid); a flush after the park claims a tid and adopts it. | threads 3, tids 3, nodes 2, steps counted yes | pass |
 | `RC_unpinned_retire` | Threads that never pin retire one value each; one flushes and exits, the other just exits, while a third holds a reservation: each claims a tid and submits. | threads 3, tids 3, nodes 3, RF 2 | pass |
 | `RC_late_retire` | A thread exits, then retires a value (a thread-local destructor that runs after the handle's) through a handle of its own and exits again, that handle's exit; another pins, loads and exits at any moment. | nodes 3, RF 2, EF 4, steps counted yes | pass |
+| `RC_late_pin` | A thread exits, then pins, loads and unpins (a thread-local destructor that runs after the handle's) in a section of a handle of its own, and exits again, that section's end; another replaces the value and flushes at any moment. | nodes 3, RF 2, EF 4, steps counted yes | pass |
 | `RC_help_dtor` | A retire on a batch and epoch boundary helps a slow path; the help's drain runs a drop that retires. | nodes 6, EF 1, cache 0, pin attempts 1 | pass |
 | `RC_reenter` | A cached drop that retires, freed by a transition while another thread's pin, its epoch moved by retires, takes the slow path. | nodes 9, EF 1, cache 0 | pass |
 | `RC_reenter_rt` | The same, the cache freed by a retire's help of the slow path. | nodes 9, EF 1, cache 0 | pass |
@@ -610,6 +611,7 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_live_orphan` | Weak fairness for every thread; a thread that never pinned flushes once after another exited with a batch it could not place: every parked batch is eventually adopted. | threads 3, tids 3, nodes 2 | pass |
 | `RC_live_unpinned_flush` | Weak fairness; one thread retires a value without pinning, flushes, then keeps pinning and unpinning without exiting: the value is eventually freed. | threads 1, tids 1, nodes 2, RF 2 | pass |
 | `RC_live_late_retire` | Weak fairness; a thread exits, retires a value through a handle of its own and exits again; another waits until it ended and flushes: the value is eventually freed. | nodes 3, RF 2, EF 4 | pass |
+| `RC_live_late_pin` | Weak fairness; a thread exits, replaces a value in a section of a handle of its own and ends it; another waits until it ended and flushes: the value is eventually freed. | nodes 3, RF 2, EF 4 | pass |
 | `RC_wf_pin` | Step counts: pins with one fast attempt against a thread that helps and advances the epoch at every flush. | nodes 1, pin attempts 1, epochs 8, steps counted yes | pass |
 | `RC_wf_load` | Step counts: loads against a writer that advances the epoch at every retire. | nodes 4, EF 1, load attempts 3, epochs 8, steps counted yes | pass |
 | `RC_wf_mix` | Step counts of every operation in the slow-path scenario. | nodes 3, EF 1, pin attempts 1, steps counted yes | pass |
@@ -639,6 +641,8 @@ step counts, no recycling. RF, EF, cache and epochs abbreviate `RetireFreq`, `Ep
 | `RC_mut_flush_skips_batch` | flush_skips_batch: flush on a thread with no tid ignores its own batch while nothing is parked, so a thread that flushes and lives on never frees what it retired without pinning. | threads 1, tids 1, nodes 2, RF 2 | `RetiredFreed` broken |
 | `RC_mut_exit_skips_batch` | exit_skips_batch: the exit of a thread with no tid does nothing, so what a thread retired without pinning and never flushed is never submitted. | nodes 2, RF 2 | `NoLoss` broken |
 | `RC_mut_late_retire_dropped` | (a program) the retire after the exit as the code made it before: into a handle whose exit already ran, so nothing submits it. | nodes 3, RF 2, EF 4 | `NoLoss` broken |
+| `RC_mut_late_pin_unreserved` | (a program) the pin after the exit as the code made it before: a guard that reserved nothing, so the load is a raw one. | nodes 3, RF 2, EF 4 | `NoUseAfterFree` broken |
+| `RC_mut_late_pin_kept` | (a program) weak fairness; a section after the exit that never ends, so nothing submits what it retired; another waits until it ended and flushes. | nodes 3, RF 2, EF 4 | `RetiredFreed` broken |
 | `RC_mut_load_traverses` | load_traverses: a protected load that sees the epoch move traverses the slot list instead of only raising the reservation, releasing what the section loaded first. | nodes 5, cache 0 | `NoUseAfterFree` broken |
 | `RC_mut_no_era_check` | no_era_check: a protected load does not compare the global epoch. | nodes 7, EF 1 | `NoUseAfterFree` broken |
 | `RC_mut_no_help` | no_help: an epoch advance helps no slow path first. | nodes 1, pin attempts 1, epochs 8, steps counted yes | `LoopBounds` broken |
@@ -875,8 +879,9 @@ The configurations, and what each one catches:
   `EXPECTED.txt`), since a parked batch counts as kept.
 
 What these checks do not cover: TLC checks these scenarios (three threads, one cell, one value
-retired) exhaustively, not every program; and no operation runs after a thread's exit in the
-model, so a flush made by a thread-local destructor after the exit (`exit_pending`) is not checked.
+retired) exhaustively, not every program; and a flush made by a thread-local destructor after
+the exit (`exit_pending`) is not checked (the late retire and late pin configurations run a retire
+and a section after the exit, not a flush).
 
 ## Values retired by a thread that never pinned
 
@@ -1009,6 +1014,38 @@ batch), so the fix is the program "exit, retire, exit" and the old code "exit, r
 The model counts a thread's retires across its exit, which a fresh handle would not: the epoch
 advance every fourth retire keeps both retires below it, as a fresh handle's first retire is.
 
+## A pin after the thread's exit
+
+The story: a thread-local destructor that runs after this thread's handle pins and loads. Before
+the fix the stable build returned a guard that reserved nothing (the load was a raw one: a value
+another thread retired could be freed under it), and the nightly build panicked claiming a tid in
+a thread-local destructor, which aborts the process.
+
+The fix: such a pin starts a critical section of a handle of its own (`late_pin` in
+`guard/late.rs`; on nightly the handle itself, marked `late`). The section claims a tid and a
+reservation, and when its last guard drops it leaves the protocol as an exit does: it submits what
+it retired, parks what it cannot place and releases the tid. In the model that handle is the
+thread's own variables after its exit, so the fix is the program "exit, pin, load, unpin, exit"
+and the old code "exit, raw load". On stable the section publishes the epoch any pin publishes,
+as the model's section does, and its end is the drop of its handle (`late_unpin`). On nightly the
+guard's drop has no cold branch of its own, so the section takes the unconditional reservation
+and its outermost drop takes the escalated path, where it leaves the protocol
+(`unpin_outermost`); the escalated reservation is the stronger of the two, and it is checked by
+`RC_esc`, `RC_esc_drop` and the flush configurations, not by these.
+
+- `RC_late_pin` (must pass). Thread 1 pins, replaces cell 1's value, unpins and exits, then pins,
+  loads cell 1, unpins and exits again; thread 2 replaces cell 1's value and flushes at any
+  moment. Every safety invariant, `NoLoss` and the step counts included.
+- `RC_mut_late_pin_unreserved` (must be broken). Thread 1's late section as the code made it
+  before: a raw load with no reservation behind it. Thread 2 retires the value thread 1 holds and
+  frees it: `NoUseAfterFree` broken.
+- `RC_mut_late_pin_kept` (must be broken). A late section that replaces cell 1's value and never
+  ends; thread 2 waits until thread 1 ended and flushes. The value it retired stays in its batch,
+  never submitted: `RetiredFreed` broken. (`NoLoss` cannot see this one: it judges once every
+  thread has left the protocol, and a section that never ends keeps its tid.)
+- `RC_live_late_pin` (must pass). A late section that replaces cell 1's value and ends; thread 2
+  waits until thread 1 ended and flushes. `RetiredFreed` on every fair schedule.
+
 ## TLC results
 
 The run recorded in `tlc-run.txt` (12 workers for a passing configuration, one for a
@@ -1016,7 +1053,10 @@ violation, on a 36-core machine shared with other heavy work, other TLC runs amo
 configurations match `EXPECTED.txt`, in 2518 s of wall time. The three configurations of a value
 retired after the thread's exit came after that run and were checked on their own: all three
 match (`RC_late_retire` 52,070 distinct states, 25 s; `RC_live_late_retire` 174; the mutation
-broken in 6,631 states). The largest passing ones are
+broken in 6,631 states). The four configurations of a pin after the thread's exit came later
+still and were checked on their own, with four workers: all four match (`RC_late_pin` 543,171
+distinct states, 21 s; `RC_live_late_pin` 198; `RC_mut_late_pin_unreserved` broken in 15,771
+states, `RC_mut_late_pin_kept` in 142). The largest passing ones are
 `RC_recycle_dtor` (10,055,217 distinct states, 177 s), `RC_recycle_dtor_stale` (9,977,235
 distinct states, 217 s), `RC_wf_mix` (8,363,530 distinct states, 143 s), `RC_unpinned_retire`
 (8,173,791 distinct states, 152 s), `RC_hand_over` (5,601,019 distinct states, 112 s),

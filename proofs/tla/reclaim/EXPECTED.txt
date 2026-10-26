@@ -29,6 +29,8 @@ RC_live_stall                      MC_Reclaim         pass
 RC_live_orphan                     MC_Reclaim         pass
 RC_late_retire                     MC_Reclaim         pass
 RC_live_late_retire                MC_Reclaim         pass
+RC_late_pin                        MC_Reclaim         pass
+RC_live_late_pin                   MC_Reclaim         pass
 RC_live_unpinned_flush             MC_Reclaim         pass
 RC_wf_pin                          MC_Reclaim         pass
 RC_wf_load                         MC_Reclaim         pass
@@ -105,3 +107,5 @@ RC_mut_early_free                  MC_Reclaim         violated:ListsHoldNoFreed
 RC_mut_help_hands_pointer          MC_Reclaim         violated:WellFormed
 RC_mut_drain_published_term        MC_Reclaim         violated:Termination
 RC_mut_late_retire_dropped         MC_Reclaim         violated:NoLoss
+RC_mut_late_pin_unreserved         MC_Reclaim         violated:NoUseAfterFree
+RC_mut_late_pin_kept               MC_Reclaim         violated:RetiredFreed
