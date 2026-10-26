@@ -81,8 +81,18 @@ pub struct SingleProducerSequencer {
 // AtomicI64/usize are Send+Sync, Arc<dyn WaitStrategy> is Send+Sync.
 // All fields' auto-trait impls make these bounds satisfied without unsafe overrides.
 
+/// The capacity a ring of `size` slots has: rounded up to a power of two,
+/// at least one, as [`RingBuffer::new`] rounds it, so the sequencer and the
+/// ring agree on every slot.
+fn ring_capacity(size: usize) -> usize {
+    size.max(1).next_power_of_two()
+}
+
 impl SingleProducerSequencer {
+    /// A sequencer for a ring of `buffer_size` slots (rounded up as the
+    /// ring rounds them, see [`RingBuffer::new`]).
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+        let buffer_size = ring_capacity(buffer_size);
         Self {
             cursor: Arc::new(Sequence::new(-1)),
             next_sequence: Sequence::new(-1),
@@ -164,7 +174,11 @@ pub struct MultiProducerSequencer {
 // Box<[AtomicI64]> is Send+Sync, Arc<dyn WaitStrategy> is Send+Sync.
 
 impl MultiProducerSequencer {
+    /// A sequencer for a ring of `buffer_size` slots (rounded up as the
+    /// ring rounds them, see [`RingBuffer::new`]): its availability record
+    /// has one entry per slot, indexed by the same mask.
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+        let buffer_size = ring_capacity(buffer_size);
         let mut available_buffer = Vec::with_capacity(buffer_size);
         for _ in 0..buffer_size {
             available_buffer.push(AtomicI64::new(-1));
@@ -487,11 +501,14 @@ unsafe impl<T: Send + Sync> Sync for RingBuffer<T> {}
 
 impl<T> RingBuffer<T> {
     /// Creates a new ring buffer with the given factory, size, and sequencer.
+    /// The size is rounded up to a power of two, at least one; the sequencer
+    /// must be made for the same size (both sequencers round it the same
+    /// way).
     pub fn new<F>(factory: F, size: usize, sequencer: Arc<dyn Sequencer>) -> Self
     where
         F: Fn() -> T,
     {
-        let capacity = size.next_power_of_two();
+        let capacity = ring_capacity(size);
         let mut buffer = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             buffer.push(UnsafeCell::new(factory()));
@@ -584,16 +601,37 @@ pub struct Producer<T> {
 }
 
 impl<T> Producer<T> {
-    /// Publishes an event to the ring buffer.
+    /// Publishes an event to the ring buffer: claims the next slot, lets
+    /// `update` write it, and publishes it.
+    ///
+    /// If `update` panics, the slot is still published, as `update` left it,
+    /// and the panic goes on: the consumers read every sequence in order, so
+    /// one claimed and never published would stop them, and once the ring
+    /// wrapped, every producer.
     pub fn publish<F>(&mut self, update: F)
     where
         F: FnOnce(&mut T),
     {
+        /// Publishes its sequence when dropped, after `update` returns or
+        /// while its panic unwinds.
+        struct Publish<'a, T> {
+            ring: &'a RingBuffer<T>,
+            sequence: i64,
+        }
+        impl<T> Drop for Publish<'_, T> {
+            fn drop(&mut self) {
+                self.ring.publish(self.sequence);
+            }
+        }
         let sequence = self.ring_buffer.next();
+        let publish = Publish {
+            ring: &self.ring_buffer,
+            sequence,
+        };
         // SAFETY: We have claimed the sequence, so we have exclusive access to this slot.
         let event = unsafe { self.ring_buffer.get_unchecked_mut(sequence) };
         update(event);
-        self.ring_buffer.publish(sequence);
+        drop(publish);
     }
 }
 
@@ -716,7 +754,7 @@ where
         }
     }
 
-    /// Sets the buffer size.
+    /// Sets the buffer size, rounded up to a power of two (at least one).
     pub fn buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = size;
         self

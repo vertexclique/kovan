@@ -1,5 +1,5 @@
 //! Shuttle model-checked tests for `SegQueue`, the unbounded segment-based
-//! MPMC queue `kovan-channel`'s `WaitList` is built on.
+//! MPMC queue.
 //!
 //! # Why shuttle needs the `shuttle` feature
 //!
@@ -117,11 +117,9 @@ fn shuttle_seg_queue_mpmc_no_loss_no_duplication() {
 
 /// (b) The F-16 linearizability probe: a push that COMPLETES (returns,
 /// joined) strictly before a pop begins must never see that pop return
-/// `None`. This is the exact property `WaitList::notify_one` leans on when
-/// it calls `SegQueue::pop` after its own `wakeup_fence`: a registration
-/// whose `push` has already returned must be visible to a `pop` that
-/// starts afterward, or a real wakeup can be lost the same way F-16 lost
-/// one. Two producers race each other for segment slots (genuine
+/// `None`: a value whose `push` has already returned must be visible to a
+/// `pop` that starts afterward (a consumer that waits on the queue after a
+/// `pop` answered empty would otherwise miss a wakeup, as F-16 did). Two producers race each other for segment slots (genuine
 /// contention on the left-to-right slot-claim order, not a single thread
 /// filling it deterministically) before both are joined; the popping
 /// thread then runs with no synchronization beyond that join.
