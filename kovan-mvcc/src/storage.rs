@@ -22,7 +22,7 @@ pub struct WriteInfo {
 /// The Value type for our storage (`Arc<Vec<u8>>` for efficient cloning)
 pub type Value = Arc<Vec<u8>>;
 
-use kovan_map::HashMap;
+use kovan_map::HopscotchMap;
 use parking_lot::Mutex;
 
 /// Storage Trait
@@ -87,21 +87,21 @@ fn remove_below<V>(map: &mut BTreeMap<u64, V>, ts: u64) -> usize {
 /// Uses HashMap for concurrent access.
 pub struct InMemoryStorage {
     /// CF_LOCK: Key -> LockInfo
-    locks: HashMap<Vec<u8>, LockInfo>,
+    locks: HopscotchMap<Vec<u8>, LockInfo>,
 
     /// CF_WRITE: Key -> CommitTS -> WriteInfo
-    writes: HashMap<Vec<u8>, Arc<Mutex<BTreeMap<u64, WriteInfo>>>>,
+    writes: HopscotchMap<Vec<u8>, Arc<Mutex<BTreeMap<u64, WriteInfo>>>>,
 
     /// CF_DATA: Key -> StartTS -> Value
-    data: HashMap<Vec<u8>, Arc<Mutex<BTreeMap<u64, Value>>>>,
+    data: HopscotchMap<Vec<u8>, Arc<Mutex<BTreeMap<u64, Value>>>>,
 }
 
 impl InMemoryStorage {
     pub fn new() -> Self {
         Self {
-            locks: HashMap::new(),
-            writes: HashMap::new(),
-            data: HashMap::new(),
+            locks: HopscotchMap::new(),
+            writes: HopscotchMap::new(),
+            data: HopscotchMap::new(),
         }
     }
 }

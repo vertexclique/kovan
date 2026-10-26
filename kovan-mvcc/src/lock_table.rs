@@ -23,18 +23,18 @@ pub enum LockType {
 }
 
 use crate::error::MvccError;
-use kovan_map::HashMap;
+use kovan_map::HopscotchMap;
 
 /// Lock Table
 /// Manages active locks for transactions.
 pub struct LockTable {
-    locks: HashMap<Vec<u8>, LockInfo>,
+    locks: HopscotchMap<Vec<u8>, LockInfo>,
 }
 
 impl LockTable {
     pub fn new() -> Self {
         Self {
-            locks: HashMap::new(),
+            locks: HopscotchMap::new(),
         }
     }
 }

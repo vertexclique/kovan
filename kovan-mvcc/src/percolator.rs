@@ -17,13 +17,13 @@ fn take_timestamp(oracle: &dyn TimestampOracle, issued: &AtomicU64) -> u64 {
 
 /// Registry of active transactions, used for GC watermark computation.
 pub struct ActiveTxnRegistry {
-    txns: kovan_map::HashMap<u128, u64>, // txn_id -> start_ts
+    txns: HopscotchMap<u128, u64>, // txn_id -> start_ts
 }
 
 impl ActiveTxnRegistry {
     pub fn new() -> Self {
         Self {
-            txns: kovan_map::HashMap::new(),
+            txns: HopscotchMap::new(),
         }
     }
 
