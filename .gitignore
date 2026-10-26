@@ -5,3 +5,5 @@ kovan-map/bench_show.py
 debug_mvcc.sh
 stress_bank.log
 .vscode/
+# TLC run metadata, wherever a run left it
+proofs/tla/**/states/
