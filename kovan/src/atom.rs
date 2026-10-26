@@ -622,7 +622,7 @@ impl<T: Send + Sync + 'static> Drop for Atom<T> {
         }
         // Submit this thread's batch of retired nodes (other threads' nodes
         // wait for their own threads' submissions).
-        crate::flush();
+        crate::flush_pending();
     }
 }
 
@@ -788,7 +788,7 @@ impl<T: Send + Sync + 'static> Drop for AtomOption<T> {
         }
         // Submit this thread's batch of retired nodes (other threads' nodes
         // wait for their own threads' submissions).
-        crate::flush();
+        crate::flush_pending();
     }
 }
 

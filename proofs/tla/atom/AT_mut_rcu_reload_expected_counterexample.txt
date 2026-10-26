@@ -60,7 +60,7 @@ State 1: <Initial predicate>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 1
 
-State 2: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 2: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -120,7 +120,7 @@ State 2: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 1
 
-State 3: <RU2 line 1284, col 14 to line 1293, col 68 of module Atom>
+State 3: <RU2 line 1291, col 14 to line 1300, col 68 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -180,7 +180,7 @@ State 3: <RU2 line 1284, col 14 to line 1293, col 68 of module Atom>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 1
 
-State 4: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 4: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -240,7 +240,7 @@ State 4: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 1
 
-State 5: <ST2 line 1113, col 14 to line 1122, col 68 of module Atom>
+State 5: <ST2 line 1120, col 14 to line 1129, col 68 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -300,7 +300,7 @@ State 5: <ST2 line 1113, col 14 to line 1122, col 68 of module Atom>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 2
 
-State 6: <RU2b line 1295, col 15 to line 1301, col 37 of module Atom>
+State 6: <RU2b line 1302, col 15 to line 1308, col 37 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -360,7 +360,7 @@ State 6: <RU2b line 1295, col 15 to line 1301, col 37 of module Atom>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 2
 
-State 7: <RU3 line 1303, col 14 to line 1332, col 39 of module Atom>
+State 7: <RU3 line 1310, col 14 to line 1339, col 39 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,

@@ -64,7 +64,7 @@ State 1: <Initial predicate>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 0
 
-State 2: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 2: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "free",
      ver |-> -1,
      own |-> FALSE,
@@ -128,7 +128,7 @@ State 2: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{}, {-1}, {}>>
 /\ cell = 0
 
-State 3: <LD2 line 1073, col 14 to line 1092, col 47 of module Atom>
+State 3: <LD2 line 1080, col 14 to line 1099, col 47 of module Atom>
 /\ node = << [ st |-> "free",
      ver |-> -1,
      own |-> FALSE,

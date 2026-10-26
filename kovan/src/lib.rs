@@ -178,7 +178,7 @@ mod stall;
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};
 pub use cache_padded::CachePadded;
-pub use guard::{Guard, flush, pin};
+pub use guard::{Guard, flush, flush_pending, pin};
 pub use reclaim::Reclaimable;
 pub use retired::RetiredNode;
 

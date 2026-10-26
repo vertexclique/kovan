@@ -1568,6 +1568,13 @@ impl Handle {
     /// own batch holds values it retired without pinning.
     fn flush(&self) {
         // A thread that has never claimed an ID has no slot to drain, but it
+    /// Runs `flush` when this thread's batch holds a retired node.
+    fn flush_pending(&self) {
+        if self.batch_count.get() > 0 {
+            self.flush();
+        }
+    }
+
         // must still submit what it retired (unpinned retires fill its batch
         // without an ID) and adopt: a thread that only ever flushes would
         // otherwise leave its batch, and what exited threads parked, for
@@ -2224,6 +2231,28 @@ pub fn flush() {
             && on_exiting_handle(Handle::flush).is_none()
         {
             on_late_handle(Handle::flush);
+        }
+    }
+}
+
+/// Submits this thread's batch of retired nodes to reclamation now, as
+/// [`flush`] does, when it holds one; with nothing retired on this thread
+/// since its batch was last submitted it does nothing. A structure's drop
+/// calls it: what its thread retired goes to reclamation without waiting for
+/// the batch to fill, and a drop that retired nothing costs no epoch advance
+/// ([`flush`] makes one, which sends every other thread's next pin down its
+/// slow path).
+pub fn flush_pending() {
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.flush_pending()
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        if HANDLE.try_with(|handle| handle.flush_pending()).is_err()
+            && on_exiting_handle(Handle::flush_pending).is_none()
+        {
+            on_late_handle(Handle::flush_pending);
         }
     }
 }

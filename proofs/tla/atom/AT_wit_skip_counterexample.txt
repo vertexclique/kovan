@@ -67,7 +67,7 @@ State 1: <Initial predicate>
 /\ seen = <<{}, {}, {}>>
 /\ cell = 1
 
-State 2: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 2: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -134,7 +134,7 @@ State 2: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{0}, {}, {}>>
 /\ cell = 1
 
-State 3: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 3: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -201,7 +201,7 @@ State 3: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{0}, {}, {}>>
 /\ cell = 1
 
-State 4: <ST2 line 1113, col 14 to line 1122, col 68 of module Atom>
+State 4: <ST2 line 1120, col 14 to line 1129, col 68 of module Atom>
 /\ node = << [ st |-> "live",
      ver |-> 0,
      own |-> TRUE,
@@ -268,7 +268,7 @@ State 4: <ST2 line 1113, col 14 to line 1122, col 68 of module Atom>
 /\ seen = <<{0, 21}, {}, {}>>
 /\ cell = 2
 
-State 5: <ST3 line 1139, col 14 to line 1160, col 39 of module Atom>
+State 5: <ST3 line 1146, col 14 to line 1167, col 39 of module Atom>
 /\ node = << [ st |-> "retired",
      ver |-> 0,
      own |-> TRUE,
@@ -335,7 +335,7 @@ State 5: <ST3 line 1139, col 14 to line 1160, col 39 of module Atom>
 /\ seen = <<{0, 21}, {}, {}>>
 /\ cell = 2
 
-State 6: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 6: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "retired",
      ver |-> 0,
      own |-> TRUE,
@@ -402,7 +402,7 @@ State 6: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{0, 21}, {}, {}>>
 /\ cell = 2
 
-State 7: <OP line 738, col 13 to line 1071, col 51 of module Atom>
+State 7: <OP line 743, col 13 to line 1078, col 51 of module Atom>
 /\ node = << [ st |-> "retired",
      ver |-> 0,
      own |-> TRUE,
@@ -469,7 +469,7 @@ State 7: <OP line 738, col 13 to line 1071, col 51 of module Atom>
 /\ seen = <<{0, 21}, {}, {21}>>
 /\ cell = 2
 
-State 8: <SW2 line 1162, col 14 to line 1169, col 68 of module Atom>
+State 8: <SW2 line 1169, col 14 to line 1176, col 68 of module Atom>
 /\ node = << [ st |-> "retired",
      ver |-> 0,
      own |-> TRUE,
@@ -536,7 +536,7 @@ State 8: <SW2 line 1162, col 14 to line 1169, col 68 of module Atom>
 /\ seen = <<{0, 21, 31}, {}, {21, 31}>>
 /\ cell = 4
 
-State 9: <ST2 line 1113, col 14 to line 1122, col 68 of module Atom>
+State 9: <ST2 line 1120, col 14 to line 1129, col 68 of module Atom>
 /\ node = << [ st |-> "retired",
      ver |-> 0,
      own |-> TRUE,
@@ -603,7 +603,7 @@ State 9: <ST2 line 1113, col 14 to line 1122, col 68 of module Atom>
 /\ seen = <<{0, 21, 22, 31}, {}, {21, 22, 31}>>
 /\ cell = 3
 
-State 10: <ST3 line 1139, col 14 to line 1160, col 39 of module Atom>
+State 10: <ST3 line 1146, col 14 to line 1167, col 39 of module Atom>
 /\ node = << [ st |-> "retired",
      ver |-> 0,
      own |-> TRUE,

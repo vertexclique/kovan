@@ -389,7 +389,8 @@ OP: \* the first step of the thread's next operation
         end if;
     elsif Op(self) = "dropatom" then
         \* Drop for Atom, AtomOption (atom.rs:614-626, 782-792): load_raw, drop_node on the last
-        \* node, crate::flush(), whose increment_era advances the epoch
+        \* node, crate::flush_pending(): a flush, whose increment_era advances the epoch, when this
+        \* thread's batch holds a node, else nothing; either may happen here
         await Exclusive(self);
         if cell # NULL /\ ~MutDropSkips then
             errs := errs \cup DropErr(node[cell].ver)
@@ -397,8 +398,12 @@ OP: \* the first step of the thread's next operation
             vst[node[cell].ver] := "dropped";
             node := FreeN(node, cell);
         end if;
-        E := IF E < MaxEpoch THEN E + 1 ELSE E
-            || cbirth[self] := IF E < MaxEpoch THEN E + 1 ELSE Birth(self);
+        either
+            E := IF E < MaxEpoch THEN E + 1 ELSE E
+                || cbirth[self] := IF E < MaxEpoch THEN E + 1 ELSE Birth(self);
+        or
+            skip;
+        end either;
         alive := FALSE || ix[self] := ix[self] + 1;
         goto OP;
     elsif Op(self) = "send" then
@@ -635,7 +640,7 @@ RC1:
     end while;
 end process;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "f9ff819f" /\ chksum(tla) = "284d8639")
+\* BEGIN TRANSLATION (chksum(pcal) = "f7394bbe" /\ chksum(tla) = "78685a49")
 VARIABLES cell, alive, node, vst, E, pinc, era, cbirth, ix, ag, cg, lp, ep, 
           nw, rem, seen, wsince, mailbox, errs, said, pc
 
@@ -1023,8 +1028,10 @@ OP(self) == /\ pc[self] = "OP"
                                                                                                                                                                                  /\ UNCHANGED << node, 
                                                                                                                                                                                                  vst, 
                                                                                                                                                                                                  errs >>
-                                                                                                                                                                      /\ /\ E' = (IF E < MaxEpoch THEN E + 1 ELSE E)
-                                                                                                                                                                         /\ cbirth' = [cbirth EXCEPT ![self] = IF E < MaxEpoch THEN E + 1 ELSE Birth(self)]
+                                                                                                                                                                      /\ \/ /\ /\ E' = (IF E < MaxEpoch THEN E + 1 ELSE E)
+                                                                                                                                                                               /\ cbirth' = [cbirth EXCEPT ![self] = IF E < MaxEpoch THEN E + 1 ELSE Birth(self)]
+                                                                                                                                                                         \/ /\ TRUE
+                                                                                                                                                                            /\ UNCHANGED <<E, cbirth>>
                                                                                                                                                                       /\ /\ alive' = FALSE
                                                                                                                                                                          /\ ix' = [ix EXCEPT ![self] = ix[self] + 1]
                                                                                                                                                                       /\ pc' = [pc EXCEPT ![self] = "OP"]
@@ -1033,7 +1040,7 @@ OP(self) == /\ pc[self] = "OP"
                                                                                                                                                                                       mailbox >>
                                                                                                                                                                  ELSE /\ IF Op(self) = "send"
                                                                                                                                                                             THEN /\ Assert(MutGuardSend, 
-                                                                                                                                                                                           "Failure of assertion at line 406, column 9.")
+                                                                                                                                                                                           "Failure of assertion at line 411, column 9.")
                                                                                                                                                                                  /\ /\ ag' = [ag EXCEPT ![self] = NOP]
                                                                                                                                                                                     /\ ix' = [ix EXCEPT ![self] = ix[self] + 1]
                                                                                                                                                                                     /\ mailbox' = ag[self]
@@ -1042,7 +1049,7 @@ OP(self) == /\ pc[self] = "OP"
                                                                                                                                                                                                  pinc >>
                                                                                                                                                                             ELSE /\ IF Op(self) = "recv"
                                                                                                                                                                                        THEN /\ Assert(MutGuardSend, 
-                                                                                                                                                                                                      "Failure of assertion at line 412, column 9.")
+                                                                                                                                                                                                      "Failure of assertion at line 417, column 9.")
                                                                                                                                                                                             /\ mailbox # NOP
                                                                                                                                                                                             /\ node' = UnpinN(node, self)
                                                                                                                                                                                             /\ /\ ix' = [ix EXCEPT ![self] = ix[self] + 1]
@@ -1050,7 +1057,7 @@ OP(self) == /\ pc[self] = "OP"
                                                                                                                                                                                                /\ pinc' = [pinc EXCEPT ![self] = Dec(pinc[self])]
                                                                                                                                                                                             /\ pc' = [pc EXCEPT ![self] = "OP"]
                                                                                                                                                                                        ELSE /\ Assert(FALSE, 
-                                                                                                                                                                                                      "Failure of assertion at line 418, column 9.")
+                                                                                                                                                                                                      "Failure of assertion at line 423, column 9.")
                                                                                                                                                                                             /\ pc' = [pc EXCEPT ![self] = "LD2"]
                                                                                                                                                                                             /\ UNCHANGED << node, 
                                                                                                                                                                                                             pinc, 

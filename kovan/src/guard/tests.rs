@@ -970,3 +970,35 @@ fn a_retire_after_the_exit_is_freed() {
         "a value retired after its thread's exit was never freed"
     );
 }
+
+/// A structure's drop that retired nothing leaves the global epoch where it
+/// was: `flush_pending` submits a batch only when this thread holds one, so
+/// it does not send every other thread's next pin down its slow path. Each
+/// drop ran `flush`, which always advanced the epoch. Other tests of this
+/// binary may advance it meanwhile, so one quiet attempt in many is enough;
+/// the old drop advanced it every time.
+#[test]
+fn a_drop_that_retired_nothing_leaves_the_epoch() {
+    let _l = lock();
+    // A thread with no ID (it never pinned) skips the whole of a flush, the
+    // epoch's advance too: this one has an ID, as a thread that used kovan has.
+    own_tid();
+    flush();
+    // With `recycle`, nodes come from the slab: a value this size puts them
+    // in the 192-byte class, which no slab or magazine test reads the
+    // live-chunk count of.
+    type Value = [u8; 140];
+    let quiet = (0..1_000).any(|_| {
+        let before = crate::slot::epoch();
+        drop(crate::Atom::new([1u8; 140] as Value));
+        drop(crate::AtomOption::some([2u8; 140] as Value));
+        crate::slot::epoch() == before
+    });
+    assert!(quiet, "a drop that retired nothing advanced the epoch");
+    // A drop whose thread retired something still submits it at once.
+    let atom = crate::Atom::new([3u8; 140] as Value);
+    atom.store([4u8; 140]);
+    assert!(with_handle(|h| h.batch_count.get()) > 0);
+    drop(atom);
+    assert_eq!(with_handle(|h| h.batch_count.get()), 0);
+}
