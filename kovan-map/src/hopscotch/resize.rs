@@ -13,11 +13,12 @@ use kovan::{Shared, alloc_node, drop_node, pin, retire_node};
 
 #[cfg(test)]
 use super::pause;
+use crate::MaybeSend;
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     /// Take every home bucket's writer guard of `table`, waiting out each

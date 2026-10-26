@@ -19,6 +19,7 @@ use super::node::{HELD, MARK, Node, with, word};
 use super::table::TableRef;
 use super::walk::Found;
 use super::{Backoff, HashMap, Pending};
+use crate::MaybeSend;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
@@ -26,8 +27,8 @@ use kovan::{Atomic, Guard, pin};
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     /// Removes the key's entry if `pred` holds for its value, returning the value removed.

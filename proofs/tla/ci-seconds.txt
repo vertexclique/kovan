@@ -318,6 +318,7 @@ RC_era 2
 RC_esc 25
 RC_esc_drop 3
 RC_exit_chain 2
+RC_exit_chain_rf2 2
 RC_exit_dtor 20
 RC_exit_raw 5
 RC_exit_tid 96

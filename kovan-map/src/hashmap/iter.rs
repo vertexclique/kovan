@@ -17,6 +17,7 @@ use super::node::{Node, is_marked, ptr};
 use super::table::TableRef;
 use super::walk::still_links;
 use super::{HashMap, MIN_CAPACITY};
+use crate::MaybeSend;
 use alloc::vec::Vec;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
@@ -314,8 +315,8 @@ where
 // another thread.
 impl<K, V, S> core::iter::FromIterator<(K, V)> for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher + Default,
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {

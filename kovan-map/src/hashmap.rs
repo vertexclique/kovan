@@ -44,6 +44,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+use crate::MaybeSend;
 use crate::sync::AtomicBool;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
@@ -238,8 +239,8 @@ impl<K: 'static, V: 'static> HashMap<K, V, FixedState> {
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     /// Returns the value of `key`. Never blocks: reads the current table

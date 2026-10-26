@@ -6,6 +6,7 @@ extern crate alloc;
 
 use super::table::{Entry, Table, Walk, Word};
 use super::{HopscotchMap, NEIGHBORHOOD_SIZE};
+use crate::MaybeSend;
 use core::hash::{BuildHasher, Hash};
 use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
@@ -357,8 +358,8 @@ where
 // another thread.
 impl<K, V, S> core::iter::FromIterator<(K, V)> for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher + Default,
 {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {

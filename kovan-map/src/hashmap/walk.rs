@@ -14,6 +14,7 @@
 use super::node::{Node, is_frozen, is_marked, ptr, word};
 use super::table::TableRef;
 use super::{Backoff, HashMap};
+use crate::MaybeSend;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
@@ -49,8 +50,8 @@ impl<K: 'static, V: 'static, S> HashMap<K, V, S> {
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     /// The writers' walk of the chain of `hash` in the current table: snips every deleted node

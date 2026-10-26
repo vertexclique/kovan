@@ -3,7 +3,8 @@
 //! give them, built entirely on `HopscotchMap`'s public API (`iter`, `get`, `len`,
 //! `with_capacity_and_hasher`, `insert`). None of it touches a write path's own body.
 //!
-//! `Clone` and `Extend<(K, V)>` also ask `K: Send, V: Send`, as `FromIterator` does: an entry
+//! `Clone` and `Extend<(K, V)>` also ask `K: MaybeSend, V: MaybeSend` (`Send` where threads share
+//! memory, see [`MaybeSend`]), as `FromIterator` does: an entry
 //! their inserts replace is retired, and kovan may run a retired entry's destructor on another
 //! thread (the contract of `kovan::retire`), which a `!Send` key or value must never meet.
 //! `Extend<(&K, &V)>` needs no `Send`: its `Copy` keys and values have no destructor.
@@ -13,6 +14,7 @@
 //! reason about.
 
 use super::HopscotchMap;
+use crate::MaybeSend;
 use core::fmt;
 use core::hash::{BuildHasher, Hash};
 
@@ -45,8 +47,8 @@ where
 /// concurrent write to `self` during the clone may or may not be reflected in the result.
 impl<K, V, S> Clone for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher + Clone,
 {
     fn clone(&self) -> Self {
@@ -63,8 +65,8 @@ where
 /// the map's own writers.
 impl<K, V, S> Extend<(K, V)> for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
@@ -76,8 +78,8 @@ where
 /// pairs, then inserted the same way as the owned-pair impl above.
 impl<'a, K, V, S> Extend<(&'a K, &'a V)> for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Copy + Send + 'static,
-    V: Copy + Send + 'static,
+    K: Hash + Eq + Copy + MaybeSend + 'static,
+    V: Copy + MaybeSend + 'static,
     S: BuildHasher,
 {
     fn extend<I: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: I) {
@@ -92,8 +94,8 @@ where
 /// exclusively-borrowed `std::collections::HashMap` can.
 impl<K, V, S> PartialEq for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + PartialEq + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + PartialEq + MaybeSend + 'static,
     S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -108,8 +110,8 @@ where
 /// quiescence, as `std::collections::HashMap`'s `Eq` is.
 impl<K, V, S> Eq for HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Eq + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + Eq + MaybeSend + 'static,
     S: BuildHasher,
 {
 }

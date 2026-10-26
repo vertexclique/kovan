@@ -16,6 +16,7 @@
 use super::node::{FROZEN, Node, is_frozen, is_held, is_marked, ptr, with, word};
 use super::table::TableRef;
 use super::{HashMap, MIN_CAPACITY};
+use crate::MaybeSend;
 use crate::sync::spin_hint;
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::Ordering;
@@ -25,8 +26,8 @@ extern crate alloc;
 
 impl<K, V, S> HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     /// Spin until the resize or clear in flight has published its table (a writer that met a

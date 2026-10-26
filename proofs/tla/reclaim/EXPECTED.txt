@@ -13,6 +13,7 @@ RC_exit_dtor                       MC_Reclaim         pass
 RC_exit_raw                        MC_Reclaim         pass
 RC_exit_tid                        MC_Reclaim         pass
 RC_exit_chain                      MC_Reclaim         pass
+RC_exit_chain_rf2                  MC_Reclaim         pass
 RC_orphan                          MC_Reclaim         pass
 RC_flush_orphan                    MC_Reclaim         pass
 RC_unpinned_retire                 MC_Reclaim         pass
