@@ -256,3 +256,18 @@ fn test_insert_remove_reinsert() {
         assert_eq!(map.get(&i), Some(i + 1000));
     }
 }
+
+// wasm32 without atomics has one thread, so a map may hold keys and values that are not `Send`.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+#[test]
+fn rc_keys_and_values_on_one_thread() {
+    use std::rc::Rc;
+
+    let map = HopscotchMap::new();
+    let one = Rc::new("one");
+    map.insert(Rc::new(1), Rc::clone(&one));
+    assert_eq!(map.get(&Rc::new(1)), Some(one));
+    map.insert(Rc::new(1), Rc::new("uno"));
+    assert_eq!(map.remove(&Rc::new(1)).as_deref(), Some(&"uno"));
+    assert!(map.is_empty());
+}

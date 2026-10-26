@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+use crate::MaybeSend;
 use crate::sync::spin_hint;
 use crate::sync::{AtomicBool, AtomicUsize};
 use core::borrow::Borrow;
@@ -188,8 +189,8 @@ impl<K: 'static, V: 'static> HopscotchMap<K, V, FixedState> {
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     #[inline]

@@ -25,11 +25,12 @@ use kovan::{NodeBox, pin, retire_node};
 
 #[cfg(test)]
 use super::pause;
+use crate::MaybeSend;
 
 impl<K, V, S> HopscotchMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Send + 'static,
-    V: Clone + Send + 'static,
+    K: Hash + Eq + Clone + MaybeSend + 'static,
+    V: Clone + MaybeSend + 'static,
     S: BuildHasher,
 {
     /// Removes the key's entry if `pred` holds for its value, returning the value removed.

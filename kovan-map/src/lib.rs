@@ -18,12 +18,14 @@
 //!
 //! # Keys and values
 //!
-//! Keys are `Hash + Eq + Clone` and values `Clone` (a read hands out a clone), both `Send +
-//! 'static`: a replaced or removed entry is freed by kovan once no reader can reach it, on
-//! whichever thread frees it, so its destructor may run on another thread.
+//! Keys are `Hash + Eq + Clone` and values `Clone` (a read hands out a clone), both
+//! [`MaybeSend`] and `'static`: a replaced or removed entry is freed by kovan once no reader can
+//! reach it, on whichever thread frees it, so its destructor may run on another thread. Wherever
+//! threads can share memory that means `Send`; on wasm32 without the `atomics` feature, which has
+//! one thread, it asks nothing.
 //!
 //! ```compile_fail
-//! // `Rc` is not `Send`: a map of them does not compile.
+//! // `Rc` is not `Send`: where threads share memory, a map of them does not compile.
 //! let map = kovan_map::HashMap::with_capacity(8);
 //! map.insert(1, std::rc::Rc::new(1));
 //! ```
@@ -79,9 +81,11 @@ extern crate std;
 
 mod hashmap;
 mod hopscotch;
+mod maybe_send;
 mod sync;
 #[cfg(test)]
 mod test_support;
 
 pub use hashmap::*;
 pub use hopscotch::*;
+pub use maybe_send::MaybeSend;

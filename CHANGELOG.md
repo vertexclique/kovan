@@ -4,7 +4,21 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
-## 0.2.1 (not published yet)
+## 0.2.2 (not published yet)
+
+Every crate goes to 0.2.2.
+
+### Changed
+
+- kovan-map: the `K: Send` and `V: Send` that 0.2.1 put on both maps' methods hold only where
+  threads can share memory. The methods ask `kovan_map::MaybeSend`, which is `Send` on every
+  target but wasm32 without the `atomics` feature; there the program has one thread, every entry
+  is freed on it, and a map may hold keys and values that are not `Send`, as before 0.2.1. Native
+  targets and wasm with threads are unchanged. Tests: `rc_keys_and_values_on_one_thread` in
+  `kovan-map/tests/wasm/hashmap_test.rs` and `kovan-map/tests/wasm/hopscotch_test.rs`; the
+  `compile_fail` example in the crate docs still rejects an `Rc` on native.
+
+## 0.2.1
 
 Every crate goes to 0.2.1.
 
