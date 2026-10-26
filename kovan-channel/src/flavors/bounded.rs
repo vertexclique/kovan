@@ -161,6 +161,7 @@ impl<T: 'static> Channel<T> {
 /// and `tick`. It has no sender and never disconnects (`Channel::new`
 /// counts one sender, and none is ever dropped), and holds no thread: the
 /// receiving thread reads the clock.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // no `after` or `tick` there
 pub(crate) fn clock_receiver(clock: Clock) -> Receiver<Instant> {
     let mut channel = Channel::new(1);
     channel.clock = Some((clock, |at| at));
