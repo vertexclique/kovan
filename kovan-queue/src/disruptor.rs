@@ -261,6 +261,20 @@ pub trait WaitStrategy: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub struct AlertException;
 
+/// What a waiter for `sequence` answers once its barrier is alerted: the
+/// events published before the alert, if any is left, else the alert. A
+/// producer publishes and then alerts (its drop), so the cursor read after
+/// the alert holds every event it published, and a consumer stops only once
+/// it has handed all of them to its handler.
+fn after_alert(sequence: i64, dependent: &Arc<dyn Sequencer>) -> Result<i64, AlertException> {
+    let available = dependent.get_cursor();
+    if available >= sequence {
+        Ok(available)
+    } else {
+        Err(AlertException)
+    }
+}
+
 /// Busy Spin Wait Strategy.
 ///
 /// Low latency but high CPU usage.
@@ -277,7 +291,7 @@ impl WaitStrategy for BusySpinWaitStrategy {
         let mut available_sequence;
         loop {
             if barrier.is_alerted() {
-                return Err(AlertException);
+                return after_alert(sequence, dependent);
             }
             available_sequence = dependent.get_cursor();
             if available_sequence >= sequence {
@@ -307,7 +321,7 @@ impl WaitStrategy for YieldingWaitStrategy {
         let mut available_sequence;
         loop {
             if barrier.is_alerted() {
-                return Err(AlertException);
+                return after_alert(sequence, dependent);
             }
             available_sequence = dependent.get_cursor();
             if available_sequence >= sequence {
@@ -364,7 +378,7 @@ impl WaitStrategy for BlockingWaitStrategy {
             let mut guard = self.mutex.lock().unwrap();
             while dependent.get_cursor() < sequence {
                 if barrier.is_alerted() {
-                    return Err(AlertException);
+                    return after_alert(sequence, dependent);
                 }
                 guard = self.condvar.wait(guard).unwrap();
                 // Re-acquire guard is automatic
@@ -375,7 +389,7 @@ impl WaitStrategy for BlockingWaitStrategy {
 
         while available_sequence < sequence {
             if barrier.is_alerted() {
-                return Err(AlertException);
+                return after_alert(sequence, dependent);
             }
             available_sequence = dependent.get_cursor();
             // Busy spin fallback or check again
