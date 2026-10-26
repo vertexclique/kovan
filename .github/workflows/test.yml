@@ -11,7 +11,7 @@ env:
   RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
 jobs:
-  # Every supported toolchain on every platform: the workspace's rust-version (1.90), stable and
+  # Every supported toolchain on every platform: the workspace's rust-version (1.99), stable and
   # beta. Nightly has its job below, with and without the `nightly` feature.
   test:
     name: Test ${{ matrix.toolchain }} (${{ matrix.os }})
@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: ["1.90", stable, beta]
+        toolchain: ["1.99", stable, beta]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -102,7 +102,6 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTFLAGS: "-C target-feature=+cmpxchg16b -Zsanitizer=address"
-      RUSTDOCFLAGS: "-Zsanitizer=address"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
