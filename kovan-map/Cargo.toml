@@ -12,7 +12,7 @@ categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
 # Shares kovan's test harnesses by path (kovan/tests/support), which a
 # published package of this crate does not hold.
-exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs"]
+exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs"]
 
 [lib]
 name = "kovan_map"

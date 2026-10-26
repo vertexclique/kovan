@@ -113,6 +113,7 @@ pub fn lock() -> MutexGuard<'static, ()> {
 static ALIVE: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static DEAD_READS: AtomicUsize = AtomicUsize::new(0);
+static DOUBLE_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether the value of `id` is alive.
 pub fn alive(id: u64) -> bool {
@@ -130,6 +131,11 @@ pub fn live() -> usize {
 /// Clones made of a value already dropped since the last `take_dead_reads`.
 pub fn take_dead_reads() -> usize {
     DEAD_READS.swap(0, Ordering::SeqCst)
+}
+
+/// Values dropped a second time since the last `take_double_drops`.
+pub fn take_double_drops() -> usize {
+    DOUBLE_DROPS.swap(0, Ordering::SeqCst)
 }
 
 /// A value that records whether it is alive, by a unique id, outside its own
@@ -223,10 +229,13 @@ pub fn held_across_retire(
 
 impl Drop for Val {
     fn drop(&mut self) {
-        ALIVE
+        let removed = ALIVE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.id);
+        if !removed {
+            DOUBLE_DROPS.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -236,4 +245,16 @@ pub fn freed_down_to(expected: usize) -> bool {
         kovan::flush();
         live() == expected
     })
+}
+
+/// Fails unless every value made since `base` values were alive is dropped
+/// (after flushes), and none was dropped twice since the last
+/// `take_double_drops`.
+pub fn balanced(base: usize, what: &str) {
+    assert!(
+        freed_down_to(base),
+        "{what}: {} values never dropped",
+        live().saturating_sub(base)
+    );
+    assert_eq!(take_double_drops(), 0, "{what}: a value was dropped twice");
 }

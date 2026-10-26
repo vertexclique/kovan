@@ -105,7 +105,7 @@ pub fn assert_flat(name: &str, warm: usize, rounds: usize, slack: isize, mut rou
     let after = quiesce();
     assert!(
         after - high <= slack,
-        "{name}: {} bytes more held after {rounds} more rounds than at the warm-up's highest          ({high} -> {after}): memory grows over the run",
+        "{name}: {} bytes more held after {rounds} more rounds than at the warm-up's highest ({high} -> {after}): memory grows over the run",
         after - high
     );
     println!("{name}: at most {high} bytes over the warm-up, {after} after {rounds} more rounds");
