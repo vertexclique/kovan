@@ -442,4 +442,18 @@ fn test_many_threads_beyond_old_limit() {
     for h in handles {
         h.join().unwrap();
     }
+    // The last node is still published: a raw `Atomic` never frees it.
+    let guard = pin();
+    let last = shared
+        .swap(
+            unsafe { kovan::Shared::from_raw(std::ptr::null_mut()) },
+            Ordering::AcqRel,
+            &guard,
+        )
+        .as_raw();
+    drop(guard);
+    if !last.is_null() {
+        unsafe { retire(last) };
+    }
+    kovan::flush();
 }

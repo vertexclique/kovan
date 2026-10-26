@@ -57,6 +57,24 @@ impl DummyNode {
     }
 }
 
+/// Takes the node `shared` still holds and retires it, so that the test
+/// frees everything it allocated: a raw `Atomic` never frees its pointee.
+fn retire_last<T: 'static>(shared: &Atomic<T>) {
+    let guard = pin();
+    let last = shared
+        .swap(
+            unsafe { kovan::Shared::from_raw(core::ptr::null_mut()) },
+            Ordering::AcqRel,
+            &guard,
+        )
+        .as_raw();
+    drop(guard);
+    if !last.is_null() {
+        unsafe { retire(last) };
+    }
+    kovan::flush();
+}
+
 /// Advance the global epoch by retiring many dummy nodes across threads.
 fn advance_epoch_by(n: usize) {
     // Each retire increments alloc_counter; every EPOCH_FREQ (128) retires
@@ -155,6 +173,8 @@ fn test_protect_prevents_uaf_across_epochs() {
     writer_done.store(true, Ordering::Release);
 
     reader.join().unwrap();
+    drop(swap_guard);
+    retire_last(&shared);
 }
 
 #[test]
@@ -224,6 +244,7 @@ fn test_era_updates_across_many_loads() {
 
     writer.join().unwrap();
     let total_loads: u64 = readers.into_iter().map(|h| h.join().unwrap()).sum();
+    retire_last(&shared);
     assert!(total_loads > 0, "readers should have done some loads");
     assert!(
         drops.load(Ordering::SeqCst) > 0,

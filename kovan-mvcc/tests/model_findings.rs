@@ -182,6 +182,9 @@ fn a_gc_watermark_taken_while_a_transaction_begins_stays_below_it() {
         seen[0],
         txn.start_ts()
     );
+    // The hook's transaction holds the database, which holds the oracle,
+    // which holds the hook: the test breaks that cycle so all of it drops.
+    drop(later.lock().unwrap().take());
 }
 
 /// A storage that runs a hook as a prewrite writes its data: a GC that runs

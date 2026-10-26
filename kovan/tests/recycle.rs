@@ -41,6 +41,14 @@ fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Gives back what a test leaked for `'static`, once every thread that used
+/// it is joined and every node that points at it is freed: LeakSanitizer
+/// checks the suite.
+fn unleak<T>(leaked: &'static T) {
+    // SAFETY: made by `Box::leak` in this test, and nothing uses it any more.
+    drop(unsafe { Box::from_raw(leaked as *const T as *mut T) });
+}
+
 /// Counts its own drops, so a missed or doubled in-place drop shows up.
 struct Tracked(&'static Pool);
 
@@ -297,6 +305,7 @@ fn retired_nodes_return_to_the_pool_and_are_reused() {
     );
 
     drain_and_audit(pool, &slot);
+    unleak(pool);
 }
 
 /// A type that keeps the default `dealloc` frees its `Box`, as `retire` does.
@@ -345,6 +354,7 @@ fn default_dealloc_frees_the_box() {
         thread::yield_now();
     }
     assert_eq!(drops.load(Ordering::Relaxed), NODES);
+    unleak(drops);
 }
 
 #[test]
@@ -430,4 +440,9 @@ fn concurrent_recycling_never_exposes_a_recycled_value() {
     assert!(reuses as u64 + allocs as u64 > published);
 
     drain_and_audit(pool, slot);
+    unleak(slot);
+    unleak(next_seq);
+    unleak(stop);
+    unleak(observed);
+    unleak(pool);
 }
