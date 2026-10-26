@@ -58,6 +58,12 @@ impl Stm {
     /// DANGER AHEAD: Don't use IO bound operations inside the closure. It will block the entire STM.
     /// They might be retried multiple times, which is not what you may want for IO bound operations.
     ///
+    /// # Panics
+    ///
+    /// If the closure returns an error other than [`StmError::Retry`] (a
+    /// [`StmError::User`]): [`try_atomically`](Self::try_atomically) answers it
+    /// instead.
+    ///
     /// # Example
     ///
     /// ```
@@ -71,48 +77,71 @@ impl Stm {
     ///     Ok(())
     /// });
     /// ```
-    pub fn atomically<F, T>(&self, mut f: F) -> T
+    pub fn atomically<F, T>(&self, f: F) -> T
     where
         F: FnMut(&mut Transaction) -> Result<T, StmError>,
     {
+        match self.try_atomically(f) {
+            Ok(result) => result,
+            Err(e) => panic!("Transaction failed with error: {:?}", e),
+        }
+    }
+
+    /// Execute a closure atomically, answering the error it returns.
+    ///
+    /// As [`atomically`](Self::atomically): a conflict or an
+    /// [`StmError::Retry`] runs the closure again; any other error (a
+    /// [`StmError::User`]) rolls the transaction back (its rollback hooks run,
+    /// nothing it stored is published) and is returned.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use kovan_stm::{Stm, StmError};
+    /// let stm = Stm::new();
+    /// let balance = stm.tvar(5);
+    ///
+    /// let withdrawn = stm.try_atomically(|tx| {
+    ///     let b = tx.load(&balance)?;
+    ///     if b < 10 {
+    ///         return Err(StmError::User("insufficient funds".into()));
+    ///     }
+    ///     tx.store(&balance, b - 10)?;
+    ///     Ok(b - 10)
+    /// });
+    /// assert!(matches!(withdrawn, Err(StmError::User(_))));
+    /// assert_eq!(stm.atomically(|tx| tx.load(&balance)), 5);
+    /// ```
+    pub fn try_atomically<F, T>(&self, mut f: F) -> Result<T, StmError>
+    where
+        F: FnMut(&mut Transaction) -> Result<T, StmError>,
+    {
+        // Commits that failed in a row: each waits a little longer before the
+        // next attempt, so transactions that keep meeting on a hot variable
+        // stop aborting each other at full speed.
+        #[cfg(not(feature = "shuttle"))]
+        let mut conflicts = 0u32;
         loop {
-            // 1. Enter Kovan critical section
-            // This ensures any pointer we read from Kovan Atomics remains valid
-            // throughout the transaction attempt.
-            let guard = pin();
+            let committed = {
+                // 1. Enter Kovan critical section
+                // This ensures any pointer we read from Kovan Atomics remains valid
+                // throughout the transaction attempt.
+                let guard = pin();
 
-            // 2. Create transaction context
-            let mut tx = Transaction::new(self, &guard);
+                // 2. Create transaction context
+                let mut tx = Transaction::new(self, &guard);
 
-            // 3. Run user logic
-            match f(&mut tx) {
-                Ok(result) => {
+                // 3. Run user logic
+                match f(&mut tx) {
                     // 4. Attempt to commit
-                    if tx.commit() {
-                        return result;
-                    }
-                    // Commit failed (conflict): retry loop.
-                    //
-                    // vertexia: under shuttle, an explicit yield here (not
-                    // just the instrumented `version_lock` reads/CASes the
-                    // next attempt performs) is required for the scheduler
-                    // to guarantee the *other* side of the conflict a turn.
-                    // Without it, PCT/random can keep re-selecting this
-                    // thread's retries indefinitely under an unlucky
-                    // priority draw -- both sides livelocking each other
-                    // out until shuttle's step budget is exhausted
-                    // ("exceeded max_steps bound", an unfair schedule, not
-                    // a real bug -- see `kovan-map`'s `resize_spin_hint` for
-                    // the identical failure mode and full reasoning).
-                    #[cfg(feature = "shuttle")]
-                    shuttle::hint::spin_loop();
-                }
-                Err(e) => {
-                    // User explicitly aborted or raised error
-                    if let StmError::Retry = e {
+                    Ok(result) => tx.commit().then_some(result),
+                    // User explicitly asked to retry
+                    Err(StmError::Retry) => {
+                        drop(tx);
+                        drop(guard);
                         // In a real scheduler, we might backoff/park here.
                         // Under shuttle this yield must be the scheduler's
-                        // own (see the fairness note above); a real
+                        // own (see the fairness note below); a real
                         // `std::thread::yield_now()` is a no-op for
                         // shuttle's cooperative scheduler (every other task
                         // is genuinely parked, not merely de-prioritized).
@@ -122,9 +151,31 @@ impl Stm {
                         std::thread::yield_now();
                         continue;
                     }
-                    panic!("Transaction failed with error: {:?}", e);
+                    // A user error: rolled back (the transaction's drop runs
+                    // its rollback hooks), and answered.
+                    Err(e) => return Err(e),
                 }
+            };
+            if let Some(result) = committed {
+                return Ok(result);
             }
+            // Commit failed (conflict): retry, the guard already dropped.
+            //
+            // vertexia: under shuttle, an explicit yield here (not
+            // just the instrumented `version_lock` reads/CASes the
+            // next attempt performs) is required for the scheduler
+            // to guarantee the *other* side of the conflict a turn.
+            // Without it, PCT/random can keep re-selecting this
+            // thread's retries indefinitely under an unlucky
+            // priority draw -- both sides livelocking each other
+            // out until shuttle's step budget is exhausted
+            // ("exceeded max_steps bound", an unfair schedule, not
+            // a real bug -- see `kovan-map`'s `resize_spin_hint` for
+            // the identical failure mode and full reasoning).
+            #[cfg(feature = "shuttle")]
+            shuttle::hint::spin_loop();
+            #[cfg(not(feature = "shuttle"))]
+            back_off(&mut conflicts);
         }
     }
 
@@ -143,4 +194,26 @@ where
     F: FnMut(&mut Transaction) -> Result<T, StmError>,
 {
     STM.atomically(f)
+}
+
+/// [`Stm::try_atomically`] on the global STM instance.
+pub fn try_atomically<F, T>(f: F) -> Result<T, StmError>
+where
+    F: FnMut(&mut Transaction) -> Result<T, StmError>,
+{
+    STM.try_atomically(f)
+}
+
+/// The wait after the `conflicts`-th failed commit in a row: spins that
+/// double up to 64, then a yield of the thread.
+#[cfg(not(feature = "shuttle"))]
+fn back_off(conflicts: &mut u32) {
+    if *conflicts < 6 {
+        for _ in 0..1u32 << *conflicts {
+            core::hint::spin_loop();
+        }
+        *conflicts += 1;
+    } else {
+        std::thread::yield_now();
+    }
 }
