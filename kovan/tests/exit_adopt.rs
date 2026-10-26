@@ -47,10 +47,15 @@ fn exits_adopt_what_earlier_exits_parked() {
         .unwrap();
     }
     // No flush anywhere. The exits placed what they retired in the readers'
-    // slots, which free it as they pin again; at most the last exits' batch
-    // stays parked. Each exit kept its own batch of three for good.
+    // slots, which free it as they pin again; at most the last exit's batch
+    // stays parked. Each exit kept its own batch of three for good. Once the
+    // exits are over, what is left does not grow with their number: each
+    // reader's free-list cache, which keeps the batches of up to MAX_CACHE
+    // (12) traversals until its next traversal frees them (a traversal
+    // takes one exit's batch of three, as every exit that places one
+    // advances the epoch), at most one parked batch, and the live value.
     let end = Instant::now() + Duration::from_secs(60);
-    let bound = 64;
+    let bound = 4 * (12 + 1) * 3 + 3 + 1;
     while live() - base > bound && Instant::now() < end {
         thread::yield_now();
     }
