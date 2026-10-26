@@ -154,15 +154,24 @@ fn a_tick_skips_the_ticks_nobody_received() {
 }
 
 /// A receive with a deadline before the message is due times out at the
-/// deadline; one with a deadline after it gets the message.
+/// deadline; one with a deadline after it gets the message. Neither answers
+/// early: a thread the system wakes late, past the due time too, takes the
+/// message then, which is due.
 #[test]
 #[cfg_attr(miri, ignore)] // clocks
 fn a_clock_receive_waits_for_the_earlier_of_its_deadline_and_the_message() {
     let start = Instant::now();
     let r = after(Duration::from_millis(60));
     let deadline = start + Duration::from_millis(10);
-    assert_eq!(r.recv_deadline(deadline), RecvDeadline::Timeout);
-    assert!(Instant::now() >= deadline);
+    match r.recv_deadline(deadline) {
+        RecvDeadline::Timeout => assert!(Instant::now() >= deadline),
+        RecvDeadline::Msg(at) => {
+            assert!(at >= start + Duration::from_millis(60));
+            assert!(Instant::now() >= at, "a message taken before its due time");
+            return;
+        }
+        other => panic!("an after before its due time gave {other:?}"),
+    }
     match r.recv_deadline(Instant::now() + Duration::from_secs(60)) {
         RecvDeadline::Msg(at) => assert!(at >= start + Duration::from_millis(60)),
         other => panic!("an after past its due time gave {other:?}"),
