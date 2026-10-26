@@ -146,6 +146,16 @@ impl<T: 'static> Clone for Receiver<T> {
 unsafe impl<T: 'static + Send> Send for Receiver<T> {}
 unsafe impl<T: 'static + Send> Sync for Receiver<T> {}
 
+/// A receiver whose channel has no sender and never disconnects, what
+/// [`never`](crate::never) hands out: `Channel::new` starts the count of
+/// senders at one, and with no `Sender` to drop it stays there. Only the
+/// receivers hold the channel, so the last one's drop frees it.
+pub(crate) fn receiver_without_sender<T: 'static>() -> Receiver<T> {
+    Receiver {
+        inner: Arc::new(Channel::new()),
+    }
+}
+
 /// Creates a channel of unbounded capacity.
 pub fn channel<T: 'static>() -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Channel::new());
@@ -535,5 +545,24 @@ impl<T: 'static> Receiver<T> {
             wait: AsyncWait::new(),
         }
         .await
+    }
+}
+
+#[cfg(test)]
+mod never_tests {
+    use std::sync::Arc;
+
+    /// A channel that never delivers is held by its receivers alone, so the
+    /// last receiver's drop frees it; it was leaked (the sender that
+    /// `never` made was forgotten, holding the channel for good).
+    #[test]
+    fn a_never_channel_is_held_only_by_its_receivers() {
+        let r = crate::never::<u32>();
+        assert_eq!(Arc::strong_count(&r.inner), 1);
+        let r2 = r.clone();
+        assert_eq!(Arc::strong_count(&r.inner), 2);
+        drop(r2);
+        assert_eq!(Arc::strong_count(&r.inner), 1);
+        assert_eq!(r.try_recv(), None);
     }
 }
