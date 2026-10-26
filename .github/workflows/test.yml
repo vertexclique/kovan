@@ -11,17 +11,24 @@ env:
   RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
 jobs:
+  # Every supported toolchain on every platform: the workspace's rust-version (1.90), stable and
+  # beta. Nightly has its job below, with and without the `nightly` feature.
   test:
-    name: Test stable (${{ matrix.os }})
+    name: Test ${{ matrix.toolchain }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        toolchain: ["1.90", stable, beta]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.toolchain }}
 
       - name: Build
         run: cargo build --workspace
@@ -39,6 +46,7 @@ jobs:
       # and no link. Build them for real so a bench that fails only there has
       # a job that catches it.
       - name: Build benches
+        if: matrix.toolchain == 'stable'
         run: cargo build --workspace --benches --release
 
   test-debug:
@@ -78,6 +86,36 @@ jobs:
 
       - name: Run tests (nightly)
         run: cargo test --workspace --release --features nightly
+
+      # The nightly toolchain with the default handle, not only the `nightly` one.
+      - name: Run tests (nightly toolchain, default features)
+        run: cargo test --workspace --release
+
+  # AddressSanitizer over the whole suite: a read of memory already freed or a value never freed
+  # fails the job with the access and the stacks, also where a test's own checks would pass. The
+  # thread-exit tests read the value they hold after another thread retired it, so a missing
+  # reservation is reported here every time. `--target` keeps build scripts and proc macros
+  # uninstrumented.
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: "-C target-feature=+cmpxchg16b -Zsanitizer=address"
+      RUSTDOCFLAGS: "-Zsanitizer=address"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests (AddressSanitizer)
+        run: cargo test --workspace --lib --tests --target x86_64-unknown-linux-gnu
+
+      - name: Run tests (AddressSanitizer, recycle)
+        run: cargo test --workspace --lib --tests --features recycle --target x86_64-unknown-linux-gnu
+
+      - name: Run tests (AddressSanitizer, nightly handle)
+        run: cargo test --workspace --lib --tests --features nightly --target x86_64-unknown-linux-gnu
 
   clippy:
     name: Clippy
