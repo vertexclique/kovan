@@ -12,7 +12,8 @@ categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
 # Shares kovan's test harnesses by path (kovan/tests/support), which a
 # published package of this crate does not hold.
-exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs"]
+exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs", "tests/retained_memory.rs",
+           "tests/runtime_workloads.rs", "benches/runtime_memory.rs"]
 
 [features]
 # Takes the memory of `SegQueue`'s segments from kovan's magazine cache
@@ -31,6 +32,9 @@ shuttle = { version = "0.9.1", optional = true }
 
 [dev-dependencies]
 shuttle = "0.9.1"
+# The runtime workloads (tests/support/runtime.rs) use the map and the channel beside the queue.
+kovan-map = { workspace = true }
+kovan-channel = { workspace = true }
 
 # `criterion` (via its default `rayon` feature) does not compile for
 # `wasm32-*`: native-only, as in kovan and kovan-channel.
@@ -47,4 +51,16 @@ harness = false
 
 [[bench]]
 name = "disruptor"
+harness = false
+
+[[bench]]
+name = "runtime_workloads"
+harness = false
+
+[[bench]]
+name = "runtime_latency"
+harness = false
+
+[[bench]]
+name = "runtime_memory"
 harness = false

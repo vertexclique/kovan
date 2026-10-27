@@ -589,6 +589,8 @@ dependencies = [
  "criterion",
  "crossbeam-utils",
  "kovan",
+ "kovan-channel",
+ "kovan-map",
  "shuttle",
 ]
 

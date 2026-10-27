@@ -12,7 +12,7 @@ categories = ["concurrency", "database-implementations"]
 readme.workspace = true
 # Shares kovan's test harnesses by path (kovan/tests/support), which a
 # published package of this crate does not hold.
-exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/construct_memory.rs"]
+exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/construct_memory.rs", "tests/retained_memory.rs"]
 
 [lib]
 name = "kovan_mvcc"
