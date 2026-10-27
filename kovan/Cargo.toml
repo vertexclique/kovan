@@ -72,6 +72,14 @@ harness = false
 name = "throughput"
 harness = false
 
+[[bench]]
+name = "atom"
+harness = false
+
+[[bench]]
+name = "reclaim"
+harness = false
+
 # Single-threaded adaptations of the tests/*.rs integration tests, kept
 # under tests/wasm/ so they also run on 32-bit wasm (wasm32-wasip1 has no
 # working std::thread::spawn). Cargo's autodiscovery only picks up
