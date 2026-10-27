@@ -572,6 +572,7 @@ dependencies = [
 name = "kovan-mvcc"
 version = "0.2.2"
 dependencies = [
+ "criterion",
  "kovan",
  "kovan-map",
  "parking_lot",
@@ -595,6 +596,7 @@ dependencies = [
 name = "kovan-stm"
 version = "0.2.2"
 dependencies = [
+ "criterion",
  "kovan",
  "kovan-map",
  "shuttle",

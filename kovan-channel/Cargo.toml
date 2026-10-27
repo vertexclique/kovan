@@ -67,6 +67,10 @@ harness = false
 name = "async_wake_latency"
 harness = false
 
+[[bench]]
+name = "channel_api"
+harness = false
+
 # Single-threaded, non-blocking-API-only adaptations of the tests/*.rs
 # integration tests, kept under tests/wasm/ so they also compile and run on
 # `wasm32-*`. Each file is whole-file-gated `#![cfg(target_arch = "wasm32")]`

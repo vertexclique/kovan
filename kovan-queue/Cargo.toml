@@ -40,3 +40,11 @@ criterion = { version = "0.5.1", features = ["html_reports"] }
 [[bench]]
 name = "seg_queue"
 harness = false
+
+[[bench]]
+name = "array_queue"
+harness = false
+
+[[bench]]
+name = "disruptor"
+harness = false

@@ -93,3 +93,8 @@ path = "tests/wasm/stress_test.rs"
 [[bench]]
 name = "hopscotch"
 harness = false
+
+
+[[bench]]
+name = "map_api"
+harness = false
