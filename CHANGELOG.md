@@ -14,7 +14,10 @@ Every crate goes to 0.2.3.
   (and `is_empty` a queue with a claimed next cell) from two loads and a compare, inlined into the
   caller. The guard and the loop moved into cold out-of-line functions (`is_empty_drained`,
   `try_pop_pinned`, `pop_pinned`), so the empty path no longer saves registers or computes the
-  guard's thread-local address. Behaviour is unchanged; the existing `SegQueue` tests cover it.
+  guard's thread-local address. Behaviour is unchanged. Tests: `kovan-queue/tests/seg_queue_empty.rs`
+  (the empty answers on a drained head segment with values in the next one, and a single consumer
+  whose `is_empty` saw a value always getting it) and
+  `shuttle_seg_queue_is_empty_consumer_with_a_producer_across_a_boundary`.
 
 ## 0.2.2
 
