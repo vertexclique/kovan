@@ -4,7 +4,19 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
-## 0.2.2 (not published yet)
+## 0.2.3
+
+Every crate goes to 0.2.3.
+
+### Changed
+
+- kovan-queue: `SegQueue::is_empty`, `SegQueue::try_pop` and `SegQueue::pop` answer an empty queue
+  (and `is_empty` a queue with a claimed next cell) from two loads and a compare, inlined into the
+  caller. The guard and the loop moved into cold out-of-line functions (`is_empty_drained`,
+  `try_pop_pinned`, `pop_pinned`), so the empty path no longer saves registers or computes the
+  guard's thread-local address. Behaviour is unchanged; the existing `SegQueue` tests cover it.
+
+## 0.2.2
 
 Every crate goes to 0.2.2.
 
