@@ -380,3 +380,50 @@ fn shuttle_seg_queue_try_pop_consumer_with_producers_across_a_boundary() {
         5,
     );
 }
+
+/// (f) A single consumer that polls `is_empty` while a producer crosses a segment boundary: an
+/// `is_empty` that answers `false` is never followed by a `try_pop` that finds nothing, and every
+/// value comes out once, in order.
+fn is_empty_consumer_with_a_producer_across_a_boundary() {
+    const N: u64 = SEGMENT_SIZE + 3;
+    let queue = Arc::new(SegQueue::<u64>::new());
+    let producer = {
+        let queue = Arc::clone(&queue);
+        shuttle::thread::spawn(move || {
+            for i in 0..N {
+                queue.push(i);
+            }
+        })
+    };
+    let mut next = 0;
+    while next < N {
+        if queue.is_empty() {
+            shuttle::hint::spin_loop();
+            continue;
+        }
+        loop {
+            match queue.try_pop() {
+                Ok(v) => {
+                    assert_eq!(v, next);
+                    next += 1;
+                    break;
+                }
+                Err(kovan_queue::seg_queue::TryPopError::Busy) => shuttle::hint::spin_loop(),
+                Err(kovan_queue::seg_queue::TryPopError::Empty) => {
+                    panic!("is_empty saw value {next}, try_pop found none")
+                }
+            }
+        }
+    }
+    producer.join().unwrap();
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn shuttle_seg_queue_is_empty_consumer_with_a_producer_across_a_boundary() {
+    shuttle::check_pct(
+        is_empty_consumer_with_a_producer_across_a_boundary,
+        100_000,
+        3,
+    );
+}

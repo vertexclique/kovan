@@ -653,6 +653,7 @@ impl<T> SegQueue<T> {
 
     /// The head word and what the two words say, read without a guard: the
     /// words are in the queue itself, never freed while it lives.
+    #[inline]
     fn view(&self) -> (u64, View) {
         let hw = self.head.word.load(SeqCst);
         let tw = self.tail.word.load(SeqCst);
@@ -735,10 +736,19 @@ impl<T> SegQueue<T> {
     /// Returns `None` when the queue held no value at some moment during the
     /// call. Never waits for a producer: a cell whose producer has claimed it
     /// but not written is taken out of play, and that producer pushes again.
+    #[inline]
     pub fn pop(&self) -> Option<T> {
         if let (_, View::Empty) = self.view() {
             return None;
         }
+        self.pop_pinned()
+    }
+
+    /// The part of [`pop`](Self::pop) that needs a guard, kept out of line so
+    /// the empty answer in front of it pays for no guard and no frame.
+    #[cold]
+    #[inline(never)]
+    fn pop_pinned(&self) -> Option<T> {
         let guard = pin();
         loop {
             // The pointer first, then the words: the walk to the head word's
@@ -804,10 +814,19 @@ impl<T> SegQueue<T> {
     /// q.push(7);
     /// assert_eq!(q.try_pop(), Ok(7));
     /// ```
+    #[inline]
     pub fn try_pop(&self) -> Result<T, TryPopError> {
         if let (_, View::Empty) = self.view() {
             return Err(TryPopError::Empty);
         }
+        self.try_pop_pinned()
+    }
+
+    /// The part of [`try_pop`](Self::try_pop) that needs a guard, kept out of
+    /// line so the empty answer in front of it pays for no guard and no frame.
+    #[cold]
+    #[inline(never)]
+    fn try_pop_pinned(&self) -> Result<T, TryPopError> {
         let guard = pin();
         loop {
             // The pointer first, then the words: the walk to the head word's
@@ -881,18 +900,31 @@ impl<T> SegQueue<T> {
     /// in progress counts, as it does for [`len`](Self::len)). An
     /// approximation in concurrent scenarios, exact with no operation in
     /// progress.
+    #[inline]
     pub fn is_empty(&self) -> bool {
+        match self.view() {
+            (_, View::Empty) => true,
+            (_, View::Claimed) => false,
+            (hw, View::Drained) => self.is_empty_drained(hw),
+        }
+    }
+
+    /// `is_empty` for a `Drained` view of the head word `hw`: the only answer
+    /// that needs a guard, kept out of line.
+    #[cold]
+    #[inline(never)]
+    fn is_empty_drained(&self, mut hw: u64) -> bool {
         loop {
+            let guard = pin();
+            let head = self.head.seg.load(SeqCst, &guard);
+            if self.drained(head, hw, &guard) {
+                return true;
+            }
+            drop(guard);
             match self.view() {
                 (_, View::Empty) => return true,
                 (_, View::Claimed) => return false,
-                (hw, View::Drained) => {
-                    let guard = pin();
-                    let head = self.head.seg.load(SeqCst, &guard);
-                    if self.drained(head, hw, &guard) {
-                        return true;
-                    }
-                }
+                (w, View::Drained) => hw = w,
             }
         }
     }

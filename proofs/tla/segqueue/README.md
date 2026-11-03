@@ -56,7 +56,7 @@ What is left out or folded, and why it changes nothing:
   apart. `try_pop`'s read of a `FULL` cell and its claim by the head word's compare-and-swap are
   one step: the cell stays `FULL` until its claimer takes it, and that claim moves the word.
 - `len` and `is_empty` are not operations of the model: `len` is two loads and the arithmetic
-  the Lean proof covers, and `is_empty` answers with the view and `drained` that `pop` uses.
+  the Lean proof covers, and `is_empty` answers with the view and `drained` that `pop` uses (`Drained` goes to `is_empty_drained`).
 
 ## Properties
 
@@ -157,21 +157,21 @@ Segments of two cells and room for five segments (six in `SQ_push3`) in every on
 | `PU6` | `push` | `seg_queue.rs:510-542` | the successor linked with the value in its first cell, or the one linked met |
 | `PU7` | `advance_tail_word` | `seg_queue.rs:576-588` | the tail word moved to the successor's second cell |
 | `PU8` | `advance_tail` | `seg_queue.rs:554-570` | the tail pointer's compare-and-swap, or `catch_up_tail`; a push that linked returns |
-| `PO1`, `PO2` | `pop`, `view` | `seg_queue.rs:739-741`, `seg_queue.rs:656-660` | the head word, then the tail word, classified |
-| `PO3`, `PO3w`, `PO3v` | `pop` | `seg_queue.rs:742-756` | the pin, the head pointer loaded, the two words again |
-| `PO7`, `PO8` | `pop`, `locate`, `take` | `seg_queue.rs:757-786` | the checked walk to the cell; the head word's compare-and-swap and the swap to `TAKEN` |
+| `PO1`, `PO2` | `pop`, `view` | `seg_queue.rs:741-743`, `seg_queue.rs:657-661` | the head word, then the tail word, classified |
+| `PO3`, `PO3w`, `PO3v` | `pop_pinned` | `seg_queue.rs:752-766` | the pin, the head pointer loaded, the two words again |
+| `PO7`, `PO8` | `pop_pinned`, `locate`, `take` | `seg_queue.rs:767-796` | the checked walk to the cell; the head word's compare-and-swap and the swap to `TAKEN` |
 | `PO4`, `PO5`, `PO5w` | (`claim_before_find`) | the code before the fix | the head word's fetch-add, then the walk to the cell and the swap |
-| `PO6` | `pop` | `seg_queue.rs:750-754` | after `drained`: empty, or look again |
-| `DR1` | `drained`, `locate` | `seg_queue.rs:668-675` | the checked walk to the head word's segment, its `next` loaded |
-| `DR2` | `drained` | `seg_queue.rs:676-690` | the head word moved to the successor's first cell |
-| `CH1`, `CH2` | `catch_up_head` | `seg_queue.rs:698-711` | the head pointer loaded, its id against the head word, its `next` loaded |
-| `CH3` | `catch_up_head` | `seg_queue.rs:712-717` | the tail pointer moved off the segment |
-| `CH4` | `catch_up_head` | `seg_queue.rs:718-729` | the head pointer's compare-and-swap; its winner retires the segment |
-| `TP1`, `TP2` | `try_pop`, `view` | `seg_queue.rs:807-810` | the first look at the two words |
-| `TP3`, `TP4`, `TP5` | `try_pop` | `seg_queue.rs:811-823` | the pin, the head pointer, the two words again |
-| `TP6` | `try_pop`, `locate` | `seg_queue.rs:824-842` | the checked walk, the cell read; `Busy`, or the head word's compare-and-swap |
-| `TP7` | `try_pop` | `seg_queue.rs:819-823` | after `drained` |
-| `TP8` | `try_pop`, `take` | `seg_queue.rs:843-845` | the swap to `TAKEN` |
+| `PO6` | `pop_pinned` | `seg_queue.rs:760-764` | after `drained`: empty, or look again |
+| `DR1` | `drained`, `locate` | `seg_queue.rs:669-676` | the checked walk to the head word's segment, its `next` loaded |
+| `DR2` | `drained` | `seg_queue.rs:677-691` | the head word moved to the successor's first cell |
+| `CH1`, `CH2` | `catch_up_head` | `seg_queue.rs:699-712` | the head pointer loaded, its id against the head word, its `next` loaded |
+| `CH3` | `catch_up_head` | `seg_queue.rs:713-718` | the tail pointer moved off the segment |
+| `CH4` | `catch_up_head` | `seg_queue.rs:719-730` | the head pointer's compare-and-swap; its winner retires the segment |
+| `TP1`, `TP2` | `try_pop`, `view` | `seg_queue.rs:819-822` | the first look at the two words |
+| `TP3`, `TP4`, `TP5` | `try_pop_pinned` | `seg_queue.rs:830-842` | the pin, the head pointer, the two words again |
+| `TP6` | `try_pop_pinned`, `locate` | `seg_queue.rs:843-861` | the checked walk, the cell read; `Busy`, or the head word's compare-and-swap |
+| `TP7` | `try_pop_pinned` | `seg_queue.rs:838-842` | after `drained` |
+| `TP8` | `try_pop_pinned`, `take` | `seg_queue.rs:862-864` | the swap to `TAKEN` |
 | `RC1` | kovan | `retire_reclaimable`, the guard's drop | a retired segment freed once the operations that held it ended |
 
 ## TLC results
