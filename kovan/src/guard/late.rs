@@ -47,11 +47,10 @@ pub(super) fn late_pin() -> Guard {
     unsafe { (*handle).pin() }
 }
 
-/// The drop of a guard `late_pin` made: the outermost one ends the section.
-/// The handle's drop is its exit (submits what the section retired, parks
-/// what cannot be placed, releases the ID), unless the drop's escalated
-/// path ran that exit already (`unpin_outermost`), and then finds nothing
-/// to do.
+/// The drop of a guard `late_pin` made: the outermost one ends the section,
+/// and its `leave` runs the exit (submits what the section retired,
+/// releases the ID), the handle being marked `late`. The box is then
+/// dropped, its exit already run, so that drop finds nothing to do.
 #[cold]
 pub(super) fn late_unpin() {
     let handle = LATE.try_with(Cell::get).unwrap_or(core::ptr::null());

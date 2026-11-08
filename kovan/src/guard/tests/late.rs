@@ -9,8 +9,6 @@
 use super::{Counted, DEADLINE, exit_over, join_within, lock};
 use crate::guard::{flush, pin, retire};
 use crate::retired::RetiredNode;
-#[cfg(feature = "nightly")]
-use crate::slot::EPOCH_UNCONDITIONAL;
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,9 +89,8 @@ fn after_exit<R: Send + 'static>(body: impl FnOnce() -> R + Send + 'static) -> R
 }
 
 /// A pin in a thread-local destructor that runs after the thread's exit
-/// holds a reservation under an ID of its own (on nightly the unconditional
-/// one) for as long as its guard lives, and gives the ID back when the guard
-/// drops.
+/// holds a reservation under an ID of its own for as long as its guard
+/// lives, and gives the ID back when the guard drops.
 ///
 /// Before the fix the pin returned a guard that reserved nothing (and on
 /// nightly it panicked claiming an ID), and this test failed.
@@ -109,11 +106,6 @@ fn a_pin_after_the_exit_reserves_until_its_guard_drops() {
     });
     let (_, epoch) = during.expect("the pin after the exit holds no reservation");
     assert_ne!(epoch, 0, "the section after the exit publishes no epoch");
-    #[cfg(feature = "nightly")]
-    assert_eq!(
-        epoch, EPOCH_UNCONDITIONAL,
-        "the section after the exit does not publish the unconditional reservation"
-    );
     assert!(
         after.is_none(),
         "the section after the exit outlived its guard"

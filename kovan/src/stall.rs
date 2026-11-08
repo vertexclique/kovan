@@ -17,11 +17,9 @@ use std::vec::Vec;
 /// The steps a test can hold a thread at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Step {
-    /// An exiting thread parking orphans has swapped its ID's orphan word to
-    /// null and not yet stored the joined chain.
-    OrphanPark,
-    /// A flushing thread has taken a chain of orphans and not yet merged it.
-    OrphanAdopt,
+    /// An outermost guard drop has exchanged its slot's list word to INVPTR
+    /// (the slot left) and not yet traversed what the exchange captured.
+    Left,
     /// A pin's slow path has published its help request (result pending)
     /// and not yet entered its loop.
     SlowPending,

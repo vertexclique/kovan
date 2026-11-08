@@ -1,9 +1,10 @@
 //! Regression tests for the reclamation core.
 //!
 //! Covers: batch accumulation when try_retire cannot place a batch (high
-//! thread counts), orphan adoption from exiting threads, protection across
-//! flush() under a live guard, re-entrant destructor chains, epoch-churn
-//! stress with payload validation, and liveness of pin() under a flush storm.
+//! thread counts), the padded placement of an exiting thread's partial
+//! batch, protection across flush() under a live guard, re-entrant
+//! destructor chains, epoch-churn stress with payload validation, and
+//! liveness of pin() under a flush storm.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -21,7 +22,7 @@ impl Drop for Counted {
 }
 
 /// Serialize ALL tests in this file: kovan's reclamation state (epoch,
-/// slots, orphans) is process-global, so concurrent tests would
+/// slots) is process-global, so concurrent tests would
 /// perturb each other's exact drop counts. Poison-resilient: a failed
 /// test must not cascade into the others.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -95,17 +96,18 @@ fn no_batch_leak_with_few_pinned_threads() {
     assert_eq!(drops, expected);
 }
 
-/// A thread that exits while its partial batch cannot be placed (many
-/// eligible slots) must park the batch as an orphan; a later flushing
-/// thread adopts and frees it. Nothing leaks across thread exit.
+/// A thread that exits with a partial batch of fewer nodes than there are
+/// eligible slots (many pinned readers) places it all the same, padded with
+/// fillers, one per eligible slot beyond its nodes; the readers' drops free
+/// it, with no flush anywhere. Nothing leaks across thread exit.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
-fn orphaned_partial_batch_is_adopted() {
+fn partial_batch_of_an_exiting_thread_is_placed_padded() {
     let _l = test_lock();
     DROPS.store(0, Ordering::SeqCst);
 
     const PINNED: usize = 80;
-    const ORPHAN_STORES: u64 = 10;
+    const EXIT_STORES: u64 = 10;
 
     let atom = Arc::new(kovan::Atom::new(Counted(0)));
     let start = Arc::new(Barrier::new(PINNED + 1));
@@ -121,33 +123,46 @@ fn orphaned_partial_batch_is_adopted() {
                 start.wait();
                 release.wait();
                 drop(g);
-                kovan::flush();
             })
         })
         .collect();
 
     start.wait();
 
-    // Short-lived thread: a few retires, then exit. Its cleanup try_retire
-    // fails (9 assignable nodes < ~81 eligible slots) -> orphan.
+    // Short-lived thread: a few retires, then exit. Its exit places the
+    // batch (9 assignable nodes, about 81 eligible slots: padded with
+    // fillers) into every pinned reader's slot.
     {
         let atom = Arc::clone(&atom);
         thread::spawn(move || {
-            for i in 1..=ORPHAN_STORES {
+            for i in 1..=EXIT_STORES {
                 atom.store(Counted(1000 + i));
             }
         })
         .join()
         .unwrap();
     }
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        0,
+        "values the pinned readers may hold were freed under them"
+    );
 
+    // The readers' drops traverse the batch and free it: no flush anywhere.
     release.wait();
     for h in pinned {
         h.join().unwrap();
     }
+    let end = Instant::now() + Duration::from_secs(60);
+    while DROPS.load(Ordering::SeqCst) < EXIT_STORES as usize && Instant::now() < end {
+        thread::yield_now();
+    }
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        EXIT_STORES as usize,
+        "the exiting thread's batch was not freed by the readers' drops"
+    );
 
-    // Adopter: retire a full batch on this thread, then flush(), which
-    // adopts the orphan and submits the merged batch.
     for i in 1..=64u64 {
         atom.store(Counted(2000 + i));
     }
@@ -155,12 +170,12 @@ fn orphaned_partial_batch_is_adopted() {
     drop(atom);
     kovan::flush();
 
-    // initial + ORPHAN_STORES + 64 stores = 1 + 10 + 64 = 75 values total.
-    let expected = 1 + ORPHAN_STORES as usize + 64;
+    // initial + EXIT_STORES + 64 stores = 1 + 10 + 64 = 75 values total.
+    let expected = 1 + EXIT_STORES as usize + 64;
     assert_eq!(
         DROPS.load(Ordering::SeqCst),
         expected,
-        "orphaned batch from exited thread must be adopted and freed"
+        "a value retired by the exited thread or after it was lost or freed twice"
     );
 }
 
@@ -352,8 +367,9 @@ fn pin_completes_under_flush_storm() {
 }
 
 /// Thread churn: many short-lived threads retire and exit concurrently with
-/// pinned readers. Exercises deactivate_slots' exchange-based deactivation and tid
-/// recycling; everything must be freed after the unwind.
+/// pinned readers. Exercises the exit's leave (the exchange that makes the
+/// slot inactive) and tid recycling; everything must be freed after the
+/// unwind.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
 fn thread_churn_frees_everything() {
@@ -401,7 +417,7 @@ fn thread_churn_frees_everything() {
         h.join().unwrap();
     }
 
-    // Drain: adopt any orphans and force full reclamation on this thread.
+    // Drain: force full reclamation on this thread.
     for i in 0..128u64 {
         atom.store(Counted(900_000 + i));
     }
