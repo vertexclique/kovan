@@ -1,9 +1,13 @@
 //! Guard and Handle for critical section management.
 //!
 //! Implements the ASMR read/reserve_slot/retire protocol:
-//! - Pin (fast path): check epoch, do_update if changed
+//! - Pin: an outermost pin enters the thread's slot (do_update: one exchange
+//!   of the list word, the epoch published), retried while the epoch moves
 //! - Pin (slow path): set up helping state, loop until stable epoch
-//! - Retire: batch construction, try_retire with epoch-based slot scanning
+//! - Guard drop: an outermost drop leaves the slot (one exchange of the list
+//!   word to INVPTR), traverses what it held and frees what that released
+//! - Retire: batch construction, try_retire with epoch-based slot scanning;
+//!   a flush or an exit pads its batch so it is always placed
 //! - Helping: help_read/help_thread for wait-free progress
 
 use crate::atomic::AtomicUsize;

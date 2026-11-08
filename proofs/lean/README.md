@@ -75,30 +75,66 @@ larger one). That last kind writes the threshold like any failed shrink but is n
 the bound: no threshold holds it back. The TLA+ model in `../tla/hopscotch` checks the per
 thread rule, as `ShrinkWorkBound`, in its configurations with several threads.
 
-### The second proof: flush and exit on a thread that never pinned
+### The second proof: flush and exit leave nothing behind
 
 A thread gets a thread ID (a tid) the first time it pins. Take thread B, which never pins: it
 only drops `Removed` values another thread handed it, and each such drop retires the value
-without a pin. B has no tid, and the values wait in its batch. Elsewhere, thread A exits with
-a batch it cannot place and parks it on its tid, as a chain for a later `flush()` to adopt.
+without a pin. B has no tid, and the values wait in its batch.
 
-1. What used to happen: B's `flush()` returned at once because B had no tid, and so did B's
-   exit. B's values were never submitted, so never freed, and A's chain was never adopted by B.
+1. What used to happen (before 0.2.1): B's `flush()` returned at once because B had no tid,
+   and so did B's exit. B's values were never submitted, so never freed. And before 0.2.4 a
+   flush whose batch had fewer nodes than there were eligible slots kept the batch, and an
+   exit parked it on its tid for a later flush to adopt.
 2. What happens now: B's `flush()` claims a tid, as a first pin does, when its own batch holds
-   a value or some tid holds a parked chain; then it adopts one chain and submits its batch.
-   With nothing to do it still returns at once and claims nothing. B's exit, finding no tid and
-   a value in its batch, claims a tid and runs the exit every thread runs: submit, park what
-   cannot be placed, release the tid.
-3. So, whatever B does (retire, flush, pin, then exit) and whatever happens to each
-   submission, every value B retired or adopted is submitted or parked once B has exited.
-4. And a B that keeps flushing adopts every chain parked on any of `maxThreads` tids within
-   `maxThreads` flushes, so within `maxThreads + 1`.
+   a value, and places the batch, padded with fillers so that it is always placed; with nothing
+   to do it still returns at once and claims nothing. B's exit, finding no tid and a value in
+   its batch, claims a tid and runs the exit every thread runs: leave the slot, place what it
+   holds, release the tid. Both place again while the destructors they ran retired.
+3. So, whatever B does (retire, flush, pin, then exit) and whatever happens to each retire's
+   submission, every value B retired is submitted once B has exited, and every flush B makes
+   before its exit, and its exit, leaves its batch empty.
 
-`Kovan/FlushExit.lean` proves steps 2 to 4 for the code as it is now, and shows step 1 for
-the old exit: with it, a thread that retires one value and exits keeps it nowhere. It models
-one thread doing one operation at a time; the TLA+ model in `../tla/reclaim` checks the same
-paths with several threads (`RC_unpinned_retire`, `RC_wf_unpinned_exit`,
-`RC_wf_unpinned_flush`, `RC_flush_orphan`, and the mutations that put the old returns back).
+`Kovan/FlushExit.lean` proves steps 2 and 3 for the code as it is now, and shows step 1 for
+the old rules: with the old exit, a thread that retires one value and exits keeps it nowhere;
+with the old placement, a flush returns holding its batch. It models one thread doing one
+operation at a time; the TLA+ model in `../tla/reclaim` checks the same paths with several
+threads (`RC_flush_chain`, `RC_exit_chain_leave`, `RC_flush_pad`, `RC_exit_pad`,
+`RC_wf_unpinned_exit`, `RC_wf_unpinned_flush`, and the mutations that put the old rules back).
+
+### The third proof: the leave at the outermost drop
+
+Each thread owns a reservation slot, a list word that holds INVPTR while the slot is inactive.
+The outermost `pin()` enters the slot (one exchange of the word to 0), and the drop of the
+outermost guard leaves it (one exchange of the word to INVPTR, which also takes the list of
+nodes that batches placed there). A retire that submits a batch skips an inactive slot before
+it reads anything else, and gives one node of the batch to each active slot whose epoch covers
+the batch; a batch with fewer nodes than such slots cannot be placed, so a flush or an exit
+pads it with fillers, bare nodes that are freed with the batch and run no user destructor.
+
+1. The padded scan assigns a node to every eligible slot and makes exactly as many fillers as
+   there are eligible slots beyond the batch's nodes, so the padded batch, its refs-node
+   counted, is always placeable. Without padding, a retire's scan fails exactly when the batch
+   has fewer nodes than eligible slots, and the retire keeps the batch for later.
+2. A batch's count on the 64-bit word: it starts at the bias 2^63, each traversal takes one
+   away, and the submission adds the inserts and takes the bias away in one addition. After the
+   submission the count is the inserts not yet traversed; the submission frees the batch at once
+   exactly when every insert was traversed already; and before the submission the count is
+   never zero. Over any sequence of inserts, traversals and the submission, the count is zero
+   exactly when the batch was submitted and every inserted node was traversed: never earlier,
+   never never.
+3. One thread's slot over any sequence of pins, nested pins, drops, enters, leaves and exits:
+   the slot is active only while the thread holds a guard, is entering, or is leaving; an idle
+   thread's slot is inactive.
+4. One slot, its owner and one insert, interleaved every way: an insert counts its node only
+   when the owner's enter or leave took the node (the owner then traverses it) or the node sits
+   in the word of a slot whose owner holds a guard or is leaving. So a thread with no live guard,
+   not mid-transition, is counted by no batch, and a left slot holds no node.
+
+`Kovan/Leave.lean` proves all four for every size: any number of slots and nodes, any count
+under 2^63, any sequence of steps. The TLA+ model in `../tla/reclaim` checks the same rules with
+several threads, several batches and the epoch at small sizes (`RC_park`, `RC_leave_race`,
+`RC_nested`, `RC_flush_pad`, and the mutations `no_leave`, `leave_store`, `leave_pinned`,
+`no_rollback`, `filler_kept`, `filler_freed_early`).
 
 ### The segment queue's words
 
@@ -218,24 +254,44 @@ for each statement. Every theorem rests only on Lean's own axioms (`propext`, `Q
 `Classical.choice`), or on none: `check.sh axioms` checks it for every theorem of the library.
 
 `Kovan/FlushExit.lean`, a model of `kovan/src/guard.rs` (`Handle::flush`, `Handle::cleanup`,
-`retire`, `pin`) and `kovan/src/slot.rs` (`adopt_orphans`, `orphans_parked`): the start of
-each of flush and exit is a function of what the handle tells it (a tid or not, an empty batch
-or not, a chain parked or not, the exit still to run or not, inside a reclamation or not); a
-run is one thread's retires, flushes, pins and exit, each submission placed or not as the run
-chooses, over the orphan words of every tid.
+`Handle::place_all`, `retire`, `pin`): the start of each of flush and exit is a function of what
+the handle tells it (a tid or not, an empty batch or not, the exit still to run or not, inside a
+reclamation or not); a run is one thread's retires, flushes, pins and exit, each retire's
+submission placed or not as the run chooses, each flush and the exit placing everything (the
+padded placement, `Kovan/Leave.lean`) together with what their destructors retire.
 
 | theorem | what it says |
 |---------|--------------|
-| `flush_returns_iff` | `flush()` returns at once exactly when the thread has no tid and either nothing to submit or adopt or its exit already ran, or when it runs inside a reclamation |
-| `flush_claims_iff` | `flush()` claims a tid exactly when the thread has none, runs outside any reclamation before its exit, and has a value in its batch or finds a chain parked |
+| `flush_returns_iff` | `flush()` returns at once exactly when the thread has no tid and either nothing to submit or its exit already ran, or when it runs inside a reclamation |
+| `flush_claims_iff` | `flush()` claims a tid exactly when the thread has none, runs outside any reclamation before its exit, and has a value in its batch |
 | `flush_runs_iff` | `flush()` runs with the tid it has exactly when the thread has one, outside any reclamation |
-| `flush_idle_claims_none` | a flush with no tid, an empty batch and nothing parked claims no tid |
+| `flush_idle_claims_none` | a flush with no tid and an empty batch claims no tid |
 | `exit_returns_iff`, `exit_claims_iff`, `exit_runs_iff` | the exit returns at once exactly with no tid and an empty batch, claims a tid exactly with no tid and a value in its batch, and runs exactly with a tid |
-| `leak_free` | once the thread has exited, every value it retired or adopted, over any run, is submitted or parked |
-| `retired_is_kept` | every value the thread retires before its exit is submitted or parked once it has exited |
-| `old_exit_loses` | with the exit as it was before the fix, a thread that retires one value and exits keeps it nowhere |
-| `adopted_within_max_threads` | a thread that has not exited, with a tid or not, empties every orphan word of `maxThreads` tids within `maxThreads` flushes |
-| `adopted_within` | the same within `maxThreads + 1` flushes |
+| `leak_free` | once the thread has exited, every value it retired, over any run, is submitted |
+| `retired_is_kept` | every value the thread retires before its exit is submitted once it has exited |
+| `flush_leaves_nothing` | a flush made before the exit leaves the batch empty, whatever the destructors it ran retired |
+| `exit_empties` | the exit leaves the batch empty, whatever the destructors it ran retired |
+| `old_exit_loses` | with the exit as it was before 0.2.1, a thread that retires one value and exits keeps it nowhere |
+| `old_flush_keeps` | with the placement as it was before 0.2.4, a flush whose batch could not be placed returned holding it |
+
+`Kovan/Leave.lean`, a model of `kovan/src/guard.rs` (`try_retire` with `pad`, `filler`,
+`drop_filler`, the insert phase's exchange, rollback and `fetch_add(adjs)`, `pin`, `do_update`,
+`unpin`, `leave`, `leave_slot`, `cleanup`) and `kovan/src/reclaim.rs` (`traverse`,
+`free_batch_list`): the scan over slots judged eligible or not, a batch's count on the 64-bit
+word, one thread's slot over its steps, and one slot with its owner and one insert interleaved
+every way.
+
+| theorem | what it says |
+|---------|--------------|
+| `eligible_cons`, `scanPad_eq` | the padded scan leaves the batch's nodes beyond the eligible slots unassigned and makes one filler per eligible slot beyond the nodes |
+| `padded_covers`, `padded_fillers`, `padded_places` | every eligible slot gets a node, the fillers are exactly the eligible slots beyond the batch's nodes, and the padded batch with its refs-node has at least one node per eligible slot plus one |
+| `unpadded_fails_iff` | a retire's scan, without padding, fails exactly when the batch has fewer nodes than eligible slots |
+| `fillers_run_no_destructor`, `padded_batch_freed_once` | freeing a padded batch runs exactly the user destructors of the batch's own nodes, and frees every node once, fillers included |
+| `count_after_submit`, `submit_frees_iff`, `count_before_submit_pos` | on the machine word, the count after the submission's `fetch_add(adjs)` is the inserts not yet traversed, the submission's `old == adjs.wrapping_neg()` holds exactly when every insert was traversed, and the count is positive before the submission |
+| `traversed_le_inserted`, `count_exact`, `count_zero_iff` | over any sequence of inserts, traversals and the submission, traversals never exceed inserts, the count's word is the bias less the traversals before the submission and the inserts not yet traversed after it, and it is zero exactly when the batch was submitted and every inserted node was traversed |
+| `threadStep_inv`, `threadReach_inv`, `active_only_pinned`, `idle_slot_inactive` | over any sequence of pins, nested pins, drops, enters, leaves and exits, a slot is active only while its thread holds a guard, is entering or is leaving, and an idle thread's slot is inactive |
+| `slotStep_inv`, `slotReach_inv`, `counted_only_if_owner_pinned` | one slot, its owner and one insert interleaved every way: an insert counts its node only when the owner's enter or leave took it or the node sits in the word of a slot whose owner holds a guard or is leaving |
+| `idle_never_counted`, `left_slot_holds_nothing` | a thread with no live guard, not mid-transition, is counted by no batch, and a left slot holds no node |
 
 All of them use only Lean's standard axioms (`propext`, `Classical.choice`, `Quot.sound`), or
 none; `#print axioms` lists them.

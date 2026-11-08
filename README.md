@@ -28,9 +28,11 @@ Kovan tracks this automatically with near-zero overhead on reads.
   and thread exit each complete in a bounded number of their own steps,
   whatever other threads do, stalled ones included (with native 128-bit
   atomics, see Supported Platforms).
-- **Bounded memory**: Never grows unbounded like epoch-based schemes. Batches
-  that cannot be placed are accumulated or adopted by other threads but never
-  dropped, even across thread exit.
+- **Bounded memory**: Never grows unbounded like epoch-based schemes. A thread's
+  reservation ends with the drop of its outermost guard, so a thread with no
+  live guard (idle, parked, between tasks) holds no retired value back; a
+  `flush()` or a thread exit places what the thread retired whatever other
+  threads reserve, never keeping a batch, even across thread exit.
 - **Simple API**: `Atom<T>` for safe usage, `pin()`/`load()`/`retire()` for low-level control
 
 ## Quick Start
@@ -122,7 +124,9 @@ docs give the contract and a complete example.
 2. **`load()`** - Read pointer with epoch tracking
 3. **`retire()`** - Schedule memory for safe reclamation
 
-The guard ensures any pointers you load stay valid. When all guards are dropped, retired memory is freed automatically.
+The guard ensures any pointers you load stay valid. The drop of a thread's
+outermost guard leaves its reservation and frees the retired memory that
+reservation held back; a thread with no live guard delays no reclamation.
 
 ## Examples
 

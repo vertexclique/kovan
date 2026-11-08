@@ -4,6 +4,68 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
+## 0.2.4
+
+Every crate goes to 0.2.4.
+
+### Fixed
+
+- kovan: a thread's reservation ends with the drop of its outermost `Guard`. The drop leaves the
+  thread's slot (one exchange of the slot's list word to the inactive marker), traverses what
+  retires placed in it and frees the batches that released, so a thread with no live guard is
+  counted by no batch. Before, the slot stayed active after the last guard dropped and was
+  refreshed only by the thread's next `pin()`, `flush()` or exit, so a thread that pinned once and
+  then idled (a parked pool thread, a receiver parked in `recv()`, a task runtime that pins per
+  turn) held back every batch holding a value born before its last reservation, without bound
+  (16 retired maps of 330 thousand entries live where one was needed, in one program). Tests:
+  `tests/leave.rs` (a parked thread holds nothing back; a held guard keeps its value and its drop
+  frees it; an inner drop keeps the outer section's protection; a partial batch of large values
+  freed after a flush and an exit), `kovan-channel/tests/parked_receivers.rs` (36 receivers
+  parked in `recv()`, one retire elsewhere, freed), `kovan-map/tests/parked_readers_resize.rs`
+  (16 resizes with parked readers: only the current table stays live), `tests/drain.rs`
+  (`unflushed_parked_thread_holds_nothing_back`), `tests/exit_adopt.rs`,
+  `guard::tests::an_idle_thread_holds_nothing_back`, `guard::tests::a_nested_drop_leaves_the_slot_active`,
+  `tests/shuttle_leave.rs` (the leave against an insert, under shuttle), the TLA+ configurations
+  `RC_park`, `RC_live_park`, `RC_nested`, `RC_leave_race` and the mutations `RC_mut_no_leave`,
+  `RC_mut_leave_store`, `RC_mut_leave_pinned`, `RC_mut_no_rollback` (`proofs/tla/reclaim`), and the
+  Lean proofs `Kovan.Leave` (`proofs/lean`).
+- kovan: `flush()` and a thread's exit place their partial batch whatever other threads reserve:
+  a batch with fewer nodes than there are eligible slots is padded with fillers (bare nodes freed
+  with the batch, one per eligible slot beyond the batch's nodes), so neither keeps a batch back
+  nor parks it. Before, a flush merged an unplaceable batch back into the thread's batch and an
+  exit parked it on its thread ID for a later flush or exit to adopt. Tests:
+  `guard::tests::a_flush_pads_a_partial_batch_while_a_reader_is_pinned`,
+  `guard::tests::an_exit_places_its_partial_batch_while_a_reader_is_pinned`,
+  `tests/reclaim_fixes.rs::partial_batch_of_an_exiting_thread_is_placed_padded`, the TLA+
+  configurations `RC_flush_pad`, `RC_exit_pad`, `RC_exit_pad2`, `RC_flush_chain`,
+  `RC_exit_chain_leave` and the mutations `RC_mut_filler_kept`, `RC_mut_filler_freed_early`, the
+  Lean proofs `padded_covers`, `padded_fillers`, `fillers_run_no_destructor` (`Kovan.Leave`) and
+  `flush_leaves_nothing`, `exit_empties` (`Kovan.FlushExit`).
+
+### Changed
+
+- kovan: every outermost `pin()` enters the slot (one exchange of the list word, one publication
+  of the current epoch, the stable-epoch attempts and the helping slow path as before); a pin
+  no longer skips when the global epoch is where the thread's last transition left it, since the
+  slot is inactive between sections. Test: `guard::tests::era::every_outermost_pin_enters`.
+- kovan: `flush()` advances the global epoch only when it placed a batch; with nothing retired it
+  returns at once, as `flush_pending` did. It no longer drains or deactivates the thread's own
+  slot, which the guard's drop now does. Test: `guard::tests::a_drop_that_retired_nothing_leaves_the_epoch`.
+- kovan: a thread's exit leaves its slot first and then places what it holds, padded, repeating
+  only for what the destructors it ran retired; its two fixed rounds and the batches it parked are
+  gone, since a left slot takes nothing from other threads. Test:
+  `guard::tests::exit_frees_a_chain_of_retiring_destructors`.
+- kovan: the destructors a drop, a flush or an exit runs run with the thread's slot inactive and
+  no guard live: a destructor's `pin()` is an outermost pin, which enters the slot for its own
+  section and leaves it at its end. Tests:
+  `guard::tests::exit_destructors_enter_the_slot_for_their_own_sections`,
+  `guard::tests::leave_keeps_the_batches_its_destructors_free`, the TLA+ mutation
+  `RC_mut_nested_destructors`.
+- kovan: no public item was removed or changed in signature (`cargo semver-checks` passes). The
+  crate documentation's "Quiescence" section and the `Guard` documentation describe the leave;
+  the advice to call `flush()` before idling is withdrawn, as a thread with no live guard holds
+  nothing back.
+
 ## 0.2.3
 
 Every crate goes to 0.2.3.

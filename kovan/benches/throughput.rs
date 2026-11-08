@@ -31,6 +31,92 @@ fn bench_pin_unpin(c: &mut Criterion) {
         });
     });
 
+    // A nested pin and its drop, inside an outer guard: counter updates only.
+    group.bench_function("nested", |b| {
+        let _outer = pin();
+        b.iter(|| {
+            let _guard = pin();
+            black_box(&_guard);
+        });
+    });
+
+    group.finish();
+}
+
+/// Threads that pinned once, dropped the guard and park for the whole
+/// measurement: slots that were active once and whose threads hold no guard.
+struct Parked {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl Parked {
+    fn spawn(n: usize) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready = Arc::new(std::sync::Barrier::new(n + 1));
+        let threads = (0..n)
+            .map(|_| {
+                let (stop, ready) = (Arc::clone(&stop), Arc::clone(&ready));
+                thread::spawn(move || {
+                    drop(pin());
+                    ready.wait();
+                    while !stop.load(Ordering::Relaxed) {
+                        thread::park_timeout(std::time::Duration::from_millis(50));
+                    }
+                })
+            })
+            .collect();
+        ready.wait();
+        Self { stop, threads }
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for t in self.threads.drain(..) {
+            t.thread().unpark();
+            t.join().unwrap();
+        }
+    }
+}
+
+/// Retire throughput with `active` threads each retiring 1000 values per
+/// iteration under a guard, beside `parked` threads that pinned once and
+/// park: the parked slots take a node of every batch while they stay active
+/// (0.2.3), or none (0.2.4).
+fn bench_retire_threads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("retire_threads");
+    group.sample_size(20);
+    for (active, parked) in [(1, 0), (4, 0), (16, 0), (1, 36), (4, 36), (16, 36)] {
+        let parked_threads = Parked::spawn(parked);
+        group.throughput(Throughput::Elements(1000 * active as u64));
+        group.bench_with_input(
+            BenchmarkId::new(format!("active_{active}"), format!("parked_{parked}")),
+            &active,
+            |b, &active| {
+                b.iter(|| {
+                    let handles: Vec<_> = (0..active)
+                        .map(|t| {
+                            thread::spawn(move || {
+                                let guard = pin();
+                                for i in 0..1000 {
+                                    let node = Node::new(t * 1000 + i);
+                                    unsafe { retire(node) };
+                                }
+                                drop(guard);
+                                kovan::flush();
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        h.join().unwrap();
+                    }
+                });
+            },
+        );
+        drop(parked_threads);
+    }
     group.finish();
 }
 
@@ -221,6 +307,7 @@ criterion_group!(
     benches,
     bench_pin_unpin,
     bench_retire,
+    bench_retire_threads,
     bench_atomic_load,
     bench_atomic_swap,
     bench_contention

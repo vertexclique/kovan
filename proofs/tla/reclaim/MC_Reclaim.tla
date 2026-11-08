@@ -6,7 +6,9 @@
 (* cell swapped to it, the old value retired), a retire of a node never    *)
 (* published (Rt), flush (Fl), the thread's exit (Ex), a wait for another  *)
 (* thread to end (Join, the thread being spawned after it) and Idle (pin   *)
-(* and unpin forever). Nodes are allocated in id order, cells 1 .. NCells  *)
+(* and unpin forever). A program that ends parks its thread for good: no   *)
+(* step of it is enabled, so no fairness makes it pin, flush or exit again.*)
+(* Nodes are allocated in id order, cells 1 .. NCells  *)
 (* holding nodes 1 .. NCells at first, so a configuration names the node   *)
 (* whose drop runs a program of its own (Dtor). With Recycle a node id     *)
 (* comes back from the pool, and its drop runs the same program in every   *)
@@ -103,35 +105,18 @@ P_exit_chain == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
 \* thread's last transition, and the pin publishes the epoch they made, so the nodes the drops
 \* retire (born at it) take an entry in the thread's slot and wait for the exit's next round.
 P_exit_chain1 == [t \in {1} |-> <<P, Wr(1), U, P, U, Ex>>]
-\* Thread 1 exits with a batch it cannot place (thread 2's slot is eligible): parked on its
-\* tid, adopted by thread 2's flush.
-P_orphan == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
-                                     ELSE <<P, Ld(1), U, Fl, Ex>>]
-\* A flush on a thread that never pinned (README.md tells the story).
-\* Thread 1 pins, replaces cell 1's value (retiring the old one, a batch of one node), unpins and
-\* exits. If thread 2 has pinned and not yet exited at that moment (its slot still reserves an
-\* epoch, so the slot is eligible), the batch cannot be placed (a batch needs more nodes than
-\* there are eligible slots) and the exit parks it on thread 1's tid.
-\* Thread 2 pins, loads cell 1, unpins and exits; it never flushes, so it never adopts.
-\* Thread 3 never pins: it flushes twice, at any moment (before the park, so with nothing to
-\* adopt, or after it, claiming a tid to adopt), then exits.
-P_flush_orphan == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
-                                        [] t = 2 -> <<P, Ld(1), U, Ex>>
-                                        [] t = 3 -> <<Fl, Fl, Ex>>]
-\* The same with one flush, at any moment: before the park in some schedules, after it in others.
-P_flush_orphan_one == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
-                                            [] t = 2 -> <<P, Ld(1), U, Ex>>
-                                            [] t = 3 -> <<Fl, Ex>>]
-\* The same threads 1 and 2; thread 3 waits until thread 1 has ended (so after any park), then
-\* flushes once and stops, without exiting (an exit could park the adopted batch again).
-P_flush_orphan_live == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
-                                             [] t = 2 -> <<P, Ld(1), U, Ex>>
-                                             [] t = 3 -> <<Join(1), Fl>>]
-\* Thread 1 exits with a batch it cannot place while thread 2's slot is eligible: parked. Thread 2
-\* never flushes and never exits. Thread 3 runs after thread 1 has ended, replaces the value and
-\* exits: its exit adopts the parked batch, and the two nodes, more than the one eligible slot,
-\* are placed (exit_no_adopt: nothing ever adopts it).
-P_exit_adopt == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
+\* Thread 1 exits with a batch of one node while thread 2's slot is eligible: the exit pads it
+\* (one filler for thread 2's slot) and places it; thread 2's drop traverses and frees it.
+P_exit_pad == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
+                                       ELSE <<P, Ld(1), U, Fl, Ex>>]
+\* The same, thread 2 parked after its drop (it never flushes, pins or exits again): the drop
+\* alone frees what the exit placed in its slot.
+P_exit_pad_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
+                                            ELSE <<P, Ld(1), U>>]
+\* Thread 1 exits with a batch of one node while thread 2 holds a reservation (padded, placed
+\* in thread 2's slot); thread 2 drops its guard and parks for good; thread 3, after thread 1
+\* ended, replaces the value and exits. Every retired node is released with no flush anywhere.
+P_exits_park == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
                                       [] t = 2 -> <<P, Ld(1), U>>
                                       [] t = 3 -> <<Join(1), P, Wr(1), U, Ex>>]
 \* A reader in one critical section for good (pinned at epoch 1, then nested pins); a thread that
@@ -212,6 +197,57 @@ P_unpinned_claims == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<Rt, E
 \* One thread that retires one value, flushes, then keeps pinning and unpinning forever without
 \* exiting: only its flush can submit the value while it lives.
 P_unpinned_flush_live == [t \in {1} |-> <<Rt, Fl, Idle>>]
+
+\* ------------------------------------------------------------ the leave
+
+\* A reader that pins, loads, drops its guard and parks for good; a writer that replaces the
+\* value (retiring the one the reader may hold) and flushes, then does it once more and exits.
+\* The reader's drop is the only traversal of its slot: what the writer places there while the
+\* reader holds its guard is freed by that drop, and what the writer retires after it skips the
+\* left slot (no_leave: the parked reader's slot stays active, and the batches it took wait for
+\* good).
+P_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U>>
+                                    ELSE <<P, Wr(1), U, Fl, P, Wr(1), U, Fl, Ex>>]
+\* The same with the writer retiring a fresh node beside its write, so its batch at the flush
+\* holds two nodes and the reader's slot one of them.
+P_park_two == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U>>
+                                        ELSE <<P, Wr(1), Rt, U, Fl, Ex>>]
+\* Nested guards: the reader loads under an outer guard, pins and drops a nested guard, loads
+\* again, then drops the outer one and parks; the writer replaces the value and flushes
+\* meanwhile (leave_pinned: the nested drop leaves the slot while the outer section holds the
+\* value).
+P_nested == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), P, U, Ld(1), U>>
+                                      ELSE <<P, Wr(1), U, Fl, P, Wr(1), U, Fl, Ex>>]
+\* The leave against an insert: thread 1 pins, drops and pins again, while thread 2 retires into
+\* its slot and flushes between: an insert whose scan found the slot active may find INVPTR
+\* behind its exchange (the rollback), or have its node taken by the next enter.
+P_leave_race == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, P, U, P, U, Ex>>
+                                          ELSE <<P, Rt, Rt, U, Fl, P, Rt, Rt, U, Fl, Ex>>]
+\* The same with one more thread so that the eligible slots change under every scan.
+P_leave_race3 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, U, P, U>>
+                                       [] t = 2 -> <<P, Rt, Rt, U, Fl, Ex>>
+                                       [] t = 3 -> <<P, U, P, U>>]
+\* The leave against an insert, once, with the reader parked for good after: thread 2 retires a
+\* node and flushes while thread 1 drops its guard, and exits. The insert that finds INVPTR must
+\* roll back, since no enter of thread 1 will ever take the word (no_rollback, as a lasso).
+P_leave_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, U>> ELSE <<P, Rt, U, Fl, Ex>>]
+\* A flush short of nodes: thread 1 holds a reservation while thread 2 retires one fresh node
+\* and flushes (one filler for thread 1's slot), then thread 1 drops its guard and parks.
+P_flush_pad == [t \in {1, 2} |-> IF t = 1 THEN <<P, After(2, 4), U>>
+                                         ELSE <<P, Rt, U, Fl>>]
+\* Two readers hold reservations while a thread retires one node and exits: two fillers.
+P_exit_pad2 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, After(3, 4), U>>
+                                     [] t = 2 -> <<P, After(3, 4), U>>
+                                     [] t = 3 -> <<P, Rt, U, Ex>>]
+\* A drop whose destructor retires: the batch a flush places is freed at once (no slot active)
+\* and its value's drop retires two more nodes and pins, so the flush places again (DtorRtRtPU).
+P_flush_chain == [t \in {1} |-> <<P, Wr(1), U, Fl>>]
+\* The same at the exit.
+P_exit_chain_leave == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
+\* A destructor that loads (DtorR2) while another thread replaces and retires what it loads, run
+\* by a flush (nested_destructors: its pin enters no slot, the loads unprotected).
+P_flush_dtor_load == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Fl, Ex>>
+                                               ELSE <<P, Wr(2), U, Fl, P, Wr(2), U, Fl, Ex>>]
 
 \* ------------------------------------------------------------ re-entrance with helping
 
@@ -353,26 +389,10 @@ Fair2 == SpecW /\ WF_allvars(StepW(2))
 Released(n) == LET r == IF nbl[n] < 0 THEN n ELSE nbl[n]
                IN r \in Nodes /\ nro[r] = 0 /\ nbl[r] < 0
 DrainLive == <>[](\A n \in Nodes : nst[n] = "retired" => Released(n))
-\* Every batch an exit parked is eventually adopted. In words: from some moment on ("<>[]",
-\* eventually and then for good), no tid's orphan word holds a chain ("orw[i] = NULL" for every
-\* tid i). The scenario that checks it runs a flush after any park, on a thread with no tid:
-\* that flush must take the chain; if it does not, the chain stays parked forever and the
-\* property breaks.
-OrphansAdopted == <>[](\A i \in Tids : orw[i] = NULL)
 \* The node the last thread retires (the highest id) is eventually released, though a reader
 \* stays in one critical section for good: born after the reader's reservation, its batch skips
 \* the reader's slot.
 LastReleased == <>[](nst[MaxNodes] = "retired" => Released(MaxNodes))
-\* The batches parked on tid i's orphan word: its chain, linked through next.
-RECURSIVE ChainLen(_, _)
-ChainLen(x, k) == IF x \notin Nodes \/ k > MaxNodes THEN 0 ELSE 1 + ChainLen(nnx[x], k + 1)
-RECURSIVE ParkedFrom(_)
-ParkedFrom(i) == IF i >= MaxTid THEN 0 ELSE ChainLen(orw[i], 0) + ParkedFrom(i + 1)
-\* Parked batches do not pile up, one per exit, while threads come and go and none flushes: once
-\* the exits are over, at most one batch stays parked (the last exit's, when it could not place
-\* what it adopted and retired), where without adoption every exit that cannot place its batch
-\* leaves one more.
-OrphansBounded == <>[](ParkedFrom(0) <= 1)
 \* Every retired value is eventually freed. In words: from some moment on ("<>[]", eventually and
 \* then for good), no node is in the state "retired" (each one retired has been freed). The
 \* scenario that checks it has one thread retire a value without pinning, flush, and then live on
