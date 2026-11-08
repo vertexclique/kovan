@@ -389,6 +389,8 @@ impl WaitStrategy for BlockingWaitStrategy {
     ) -> Result<i64, AlertException> {
         let mut available_sequence = dependent.get_cursor();
         if available_sequence < sequence {
+            // About to wait on the condvar for an unknown time.
+            kovan::quiesce();
             let mut guard = self.mutex.lock().unwrap();
             while dependent.get_cursor() < sequence {
                 if barrier.is_alerted() {

@@ -215,7 +215,7 @@ at once in it.
 | `RU3` | `Atom::rcu` | `atom.rs:552-562`, `571-574` | `AtomNode::boxed`, the compare-and-swap; on failure `drop_node` and the guard's drop |
 | `RU4` | `Atom::rcu` | `atom.rs:563-569` | the old node retired, the guard dropped |
 | `OP` (`into_inner`) | `Atom::into_inner`, `AtomNode::into_val` | `atom.rs:304-313`, `84-90` | pin, load, the node freed now, the value to the caller |
-| `OP` (`dropatom`) | `Drop for Atom`, `Drop for AtomOption`, `flush` | `atom.rs:614-626`, `782-792`; `guard.rs:1531-1637` | the last node's value dropped and the node freed, the epoch advanced |
+| `OP` (`dropatom`) | `Drop for Atom`, `Drop for AtomOption`, `flush` | `atom.rs:614-626`, `782-792`; `guard.rs:1531-1669` | the last node's value dropped and the node freed, the epoch advanced |
 | `OP` (`is_none`) | `AtomOption::is_none`, `is_some` | `atom.rs:724-733` | pin, load, the null check, the guard's drop |
 | `RC1` | kovan's reclamation | `guard.rs:1265-1345` (`try_retire`'s scan); `node.rs:167-171` (the destructors) | a retired node freed once its sections have ended; `drop_node` or `free_node` |
 | `ST2r`, `ST2w`, `RU2b`, `II2`; `OP` (`send`, `recv`) | (mutations) | | the steps a wrong rule adds |

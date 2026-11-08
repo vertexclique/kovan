@@ -1,4 +1,5 @@
-//! Unbounded MPMC (4 senders x 4 receivers) throughput.
+//! Unbounded MPMC (4 senders x 4 receivers) throughput, and blocking receives: a ping-pong
+//! whose receivers park between messages, and a burst received after the receiver parked.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use kovan_channel::unbounded;
@@ -57,5 +58,52 @@ fn bench_unbounded_mpmc(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_unbounded_mpmc);
+const ROUND_TRIPS: u64 = 1_000;
+const BURST: u64 = 1_000;
+
+/// One sender and one receiver whose `recv` parks: a ping-pong, each side blocked
+/// until the other answers, and a burst the sender makes once the receiver waits.
+fn bench_unbounded_blocking(c: &mut Criterion) {
+    let mut group = c.benchmark_group("unbounded_blocking");
+    group.sample_size(20);
+
+    group.throughput(Throughput::Elements(2 * ROUND_TRIPS));
+    group.bench_function("ping_pong", |b| {
+        b.iter(|| {
+            let (ping_tx, ping_rx) = unbounded::<u64>();
+            let (pong_tx, pong_rx) = unbounded::<u64>();
+            let echo = thread::spawn(move || {
+                while let Some(v) = ping_rx.recv() {
+                    pong_tx.send(v);
+                }
+            });
+            for i in 0..ROUND_TRIPS {
+                ping_tx.send(i);
+                assert_eq!(pong_rx.recv(), Some(i));
+            }
+            drop(ping_tx);
+            echo.join().unwrap();
+        });
+    });
+
+    group.throughput(Throughput::Elements(BURST));
+    group.bench_function("burst_recv", |b| {
+        b.iter(|| {
+            let (tx, rx) = unbounded::<u64>();
+            let sender = thread::spawn(move || {
+                for i in 0..BURST {
+                    tx.send(i);
+                }
+            });
+            for i in 0..BURST {
+                assert_eq!(rx.recv(), Some(i));
+            }
+            sender.join().unwrap();
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_unbounded_mpmc, bench_unbounded_blocking);
 criterion_main!(benches);

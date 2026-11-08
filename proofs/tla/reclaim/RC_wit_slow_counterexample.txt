@@ -1,6 +1,7 @@
 Error: Invariant NoSlowW is violated.
 Error: The behavior up to this point is:
 State 1: <Initial predicate>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -28,6 +29,7 @@ State 1: <Initial predicate>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -67,6 +69,7 @@ State 1: <Initial predicate>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -146,12 +149,14 @@ State 1: <Initial predicate>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = <<<<>>, <<>>>>
 /\ blst = <<0, 0>>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 2: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 2: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -179,6 +184,7 @@ State 2: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -218,6 +224,7 @@ State 2: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -297,12 +304,14 @@ State 2: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = <<<<[pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0]>>, <<>>>>
 /\ blst = <<0, 0>>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 3: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 3: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -330,6 +339,7 @@ State 3: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -369,6 +379,7 @@ State 3: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -448,6 +459,7 @@ State 3: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [pc |-> "PNU", procedure |-> "AllocTid", ah |-> 0, aseen |-> {}],
       [pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0] >>,
    <<>> >>
@@ -455,7 +467,8 @@ State 3: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 4: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 4: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -483,6 +496,7 @@ State 4: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -522,6 +536,7 @@ State 4: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -601,6 +616,7 @@ State 4: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [pc |-> "PNU", procedure |-> "AllocTid", ah |-> 0, aseen |-> {}],
       [pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0] >>,
    <<>> >>
@@ -608,7 +624,8 @@ State 4: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 5: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 5: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -636,6 +653,7 @@ State 5: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -675,6 +693,7 @@ State 5: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -754,6 +773,7 @@ State 5: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [pc |-> "PNU", procedure |-> "AllocTid", ah |-> 0, aseen |-> {}],
       [pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0] >>,
    <<>> >>
@@ -761,7 +781,8 @@ State 5: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 6: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 6: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -789,6 +810,7 @@ State 6: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -828,6 +850,7 @@ State 6: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -907,6 +930,7 @@ State 6: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [pc |-> "PNU", procedure |-> "AllocTid", ah |-> 0, aseen |-> {}],
       [pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0] >>,
    <<>> >>
@@ -914,7 +938,8 @@ State 6: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 7: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 7: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -942,6 +967,7 @@ State 7: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -981,6 +1007,7 @@ State 7: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1060,12 +1087,14 @@ State 7: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = <<<<[pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0]>>, <<>>>>
 /\ blst = <<0, 0>>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 8: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 8: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -1093,6 +1122,7 @@ State 8: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -1132,6 +1162,7 @@ State 8: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1211,6 +1242,7 @@ State 8: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [ pc |-> "PNC",
         procedure |-> "DoUpdate",
         ce |-> 0,
@@ -1223,7 +1255,8 @@ State 8: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 9: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 9: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -1251,6 +1284,7 @@ State 9: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -1290,6 +1324,7 @@ State 9: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1369,6 +1404,7 @@ State 9: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [ pc |-> "PNC",
         procedure |-> "DoUpdate",
         ce |-> 0,
@@ -1381,7 +1417,8 @@ State 9: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 10: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 10: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -1409,6 +1446,7 @@ State 10: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -1448,6 +1486,7 @@ State 10: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1527,6 +1566,7 @@ State 10: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [ pc |-> "PNC",
         procedure |-> "DoUpdate",
         ce |-> 0,
@@ -1539,7 +1579,8 @@ State 10: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 11: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 11: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<0, 0>>
@@ -1567,6 +1608,7 @@ State 11: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -1606,6 +1648,7 @@ State 11: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1685,6 +1728,7 @@ State 11: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [ pc |-> "PNC",
         procedure |-> "DoUpdate",
         ce |-> 0,
@@ -1697,7 +1741,8 @@ State 11: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 12: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 12: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<1, 0>>
@@ -1725,6 +1770,7 @@ State 12: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -1764,6 +1810,7 @@ State 12: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1843,12 +1890,14 @@ State 12: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = <<<<[pc |-> "TH2", procedure |-> "Pin", pce |-> 0, pa |-> 0]>>, <<>>>>
 /\ blst = <<0, 0>>
 /\ rprv = <<0, 0>>
 /\ trf = <<0, 0>>
 
-State 13: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
+State 13: <StepW line 7851, col 13 to line 7851, col 56 of module Reclaim>
+/\ fsub = <<FALSE, FALSE>>
 /\ tcache = <<0, 0>>
 /\ ac = <<0, 0>>
 /\ cbe = <<1, 0>>
@@ -1876,6 +1925,7 @@ State 13: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ sfi = <<0, 0>>
 /\ ff = <<0, 0>>
 /\ fl = <<0, 0>>
+/\ fq = <<FALSE, FALSE>>
 /\ fx = <<0, 0>>
 /\ detaching = (0 :> {} @@ 1 :> {})
 /\ fnx = <<0, 0>>
@@ -1915,6 +1965,7 @@ State 13: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ spr = <<FALSE, FALSE>>
 /\ sps = <<0, 0>>
 /\ pt = <<0, 0>>
+/\ plc = <<FALSE, FALSE>>
 /\ sre = <<0, 0>>
 /\ rf = <<0, 0>>
 /\ plk = 0
@@ -1994,6 +2045,7 @@ State 13: <StepW line 7426, col 13 to line 7426, col 56 of module Reclaim>
 /\ errs = {}
 /\ lpi = <<0, 0>>
 /\ xcap = <<<<>>, <<>>>>
+/\ advances = <<0, 0>>
 /\ stack = << << [ pc |-> "TH2",
         procedure |-> "SlowPath",
         swas |-> FALSE,

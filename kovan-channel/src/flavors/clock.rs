@@ -158,6 +158,8 @@ impl Clock {
                 (Some(due), Some(deadline)) => Some(due.min(deadline)),
                 (due, deadline) => due.or(deadline),
             };
+            // A sleep or park of unknown length: leave the reclamation protocol first.
+            kovan::quiesce();
             match until {
                 Some(until) => thread::sleep(until.saturating_duration_since(now)),
                 None => thread::park(),

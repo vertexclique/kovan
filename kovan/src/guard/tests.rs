@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
+thread_local! {
+    /// How many times this thread's `quiesce` ran past its fast path.
+    pub(super) static QUIESCE_BODIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn lock() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -1028,6 +1033,7 @@ fn flush_without_a_tid_or_orphans_claims_none() {
 mod era;
 mod late;
 mod progress;
+mod quiesce;
 
 /// A thread-local destructor that runs after the thread's exit retires a
 /// value: one whose value the thread set before its first pin, so that its

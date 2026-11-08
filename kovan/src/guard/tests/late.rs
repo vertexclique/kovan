@@ -240,3 +240,31 @@ fn a_retire_inside_a_section_after_the_exit_is_freed() {
         "a value retired in a section after the thread's exit was never freed"
     );
 }
+
+/// `quiesce` in a section after the thread's exit behaves as `flush` does
+/// there: the section's guard keeps its reservation, what the section retired
+/// goes out with its end, and a call outside any section is a no-op.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn quiesce_after_the_exit_is_flush_without_the_advance() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let l = Arc::clone(&live);
+    after_exit(move || {
+        crate::guard::quiesce();
+        let guard = pin();
+        Counted::retire_one(&l);
+        crate::guard::quiesce();
+        assert!(late_section().is_some_and(|(_, epoch)| epoch != 0));
+        drop(guard);
+        crate::guard::quiesce();
+        assert!(holds_no_tid());
+    });
+    for _ in 0..=crate::slot::global().max_threads() {
+        if live.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        flush();
+    }
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}

@@ -196,7 +196,15 @@ impl Signal {
     /// regardless of timing; it exists only to filter spurious/foreign
     /// unparks (see `crate::waitlist` for why a thread can pick up an
     /// unpark token that wasn't meant for this particular wait).
+    ///
+    /// A wait that has to park first leaves the reclamation protocol
+    /// (`kovan::quiesce`), so a receiver that blocks for long holds no
+    /// retired memory back; a wait that returns at once pays nothing.
     pub fn wait(&self) {
+        if self.state.load(Ordering::Acquire) != WAITING {
+            return;
+        }
+        kovan::quiesce();
         while self.state.load(Ordering::Acquire) == WAITING {
             thread::park();
         }
@@ -216,7 +224,11 @@ impl Signal {
     /// like `park`, so a shuttle run only ever exercises this loop's wake
     /// path; the timeout path is covered by the plain (non-shuttle) unit
     /// tests in `tests/recv_deadline_test.rs` instead.
+    ///
+    /// Like [`wait`](Self::wait), it quiesces once, right before the first
+    /// park, never for a call that returns at once.
     pub fn wait_deadline(&self, deadline: Instant) -> bool {
+        let mut quiesced = false;
         loop {
             if self.state.load(Ordering::Acquire) != WAITING {
                 return true;
@@ -224,6 +236,10 @@ impl Signal {
             let now = Instant::now();
             if now >= deadline {
                 return false;
+            }
+            if !quiesced {
+                kovan::quiesce();
+                quiesced = true;
             }
             thread::park_timeout(deadline - now);
         }

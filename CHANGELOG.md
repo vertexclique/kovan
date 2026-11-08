@@ -4,6 +4,43 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
+## 0.2.4
+
+Every crate goes to 0.2.4.
+
+### Added
+
+- kovan: `quiesce()`, for a thread about to block or park for a time it cannot bound. A thread's
+  reservation stays published after its last guard drops, so a thread that pinned once and then
+  blocks held every batch retired at or after its epoch until its next pin, flush or exit; when
+  the global epoch barely moves, that is everything retired anywhere. With no guard live,
+  `quiesce()` does what `flush()` does (drains its slots, adopts parked batches, submits its
+  partial batch, frees its cached batches, publishes epoch 0) but advances the global epoch only
+  when it submitted a batch, so that the readers whose slots took it traverse it as after any
+  retire that places one; `flush()` advances it every time. With a guard live it submits the
+  partial batch and leaves the reservation alone. A batch it cannot place (fewer nodes than
+  eligible slots) is parked on its thread ID for the next `flush()` or `quiesce()` of a live thread
+  to adopt, as an exit parks one, so a thread about to block holds nothing it retired (`flush()`
+  keeps such a batch in its own handle, as before). A thread that quiesced and has not pinned or
+  retired since returns after a few loads (its own state, the count of parked batches, the head
+  of its own slot's list), with no read-modify-write and no store to a shared line. Tests: `guard::tests::quiesce` (the defect
+  with and without the call, the epoch, the fast path, a live guard, a loaded value, a thread with
+  no ID, parked batches, a destructor that quiesces), `guard::tests::late`,
+  `kovan/tests/shuttle_quiesce.rs`, and the model `proofs/tla/reclaim` (`Qu`, `RC_quiesce_*`,
+  `RC_live_quiesce`, `RC_mut_quiesce_keeps_reservation`).
+
+### Fixed
+
+- kovan-channel: a thread blocked in `recv`, `recv_deadline`, a blocking `send` on a full bounded
+  channel, `select!` or on an `after` or `tick` channel no longer holds back the memory retired
+  meanwhile. `Signal::wait`, `Signal::wait_deadline` and the clock's sleep call `kovan::quiesce()`
+  once before they park; a wait that does not park pays nothing. Receivers blocked for long kept
+  every retired node alive. Tests: `kovan-channel/tests/quiesce_wait.rs` (one case per blocking
+  operation, a million-message ping-pong, per-sender order under blocking receives) and
+  `kovan-channel/tests/shuttle_quiesce.rs`.
+- kovan-queue: a disruptor consumer waiting on the blocking wait strategy's condition variable
+  quiesces first, for the same reason. Test: `kovan-queue/tests/disruptor_blocked.rs`.
+
 ## 0.2.3
 
 Every crate goes to 0.2.3.

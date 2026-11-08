@@ -4,11 +4,12 @@
 (* of operations: pin (P) and unpin (U) a guard, a protected load (Ld) or  *)
 (* an unprotected one (Lu) of a cell, a write (Wr: a node allocated, the   *)
 (* cell swapped to it, the old value retired), a retire of a node never    *)
-(* published (Rt), flush (Fl), the thread's exit (Ex), a wait for another  *)
-(* thread to end (Join, the thread being spawned after it) and Idle (pin   *)
-(* and unpin forever). Nodes are allocated in id order, cells 1 .. NCells  *)
-(* holding nodes 1 .. NCells at first, so a configuration names the node   *)
-(* whose drop runs a program of its own (Dtor). With Recycle a node id     *)
+(* published (Rt), flush (Fl), quiesce (Qu), the thread's exit (Ex), a     *)
+(* wait for another thread to end (Join, the thread being spawned after    *)
+(* it) and Idle (pin and unpin forever). Nodes are allocated in id order,  *)
+(* cells 1 .. NCells holding nodes 1 .. NCells at first, so a              *)
+(* configuration names the node whose drop runs a program of its own       *)
+(* (Dtor). With Recycle a node id                                          *)
 (* comes back from the pool, and its drop runs the same program in every   *)
 (* incarnation.                                                            *)
 (***************************************************************************)
@@ -21,6 +22,7 @@ Lu(c) == [k |-> "lu", c |-> c]
 Wr(c) == [k |-> "wr", c |-> c]
 Rt == [k |-> "rt", c |-> 0]
 Fl == [k |-> "fl", c |-> 0]
+Qu == [k |-> "qu", c |-> 0]
 Ex == [k |-> "ex", c |-> 0]
 Idle == [k |-> "idle", c |-> 0]
 Join(t) == [k |-> "join", c |-> t]
@@ -322,6 +324,41 @@ P_wf_recycle == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, P, Ld(1), U>>
 \* own, stay within their bounds.
 P_wf_recycle_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Fl>>
                                                 ELSE <<P, Wr(2), U, Fl>>]
+
+\* ------------------------------------------------------------ quiesce
+
+\* Quiesce (Qu) between a reader's and a writer's operations, the writer's last one a flush.
+P_quiesce_rw == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Ld(1), U, Qu, P, Ld(1), U, Qu, Ex>>
+                                          ELSE <<P, Wr(1), U, Qu, P, Wr(1), U, Fl, Ex>>]
+\* Quiesce with a guard live, a value loaded before and after it, against a writer that replaces
+\* the value and flushes: the quiesce leaves the reservation, so the value stays allocated.
+P_quiesce_guard == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Qu, Ld(1), U, Ex>>
+                                             ELSE <<P, Wr(1), U, Fl, P, Wr(1), U, Fl, Ex>>]
+\* A quiesce on a thread that never pinned (thread 3) while thread 1 exits with a batch it cannot
+\* place, thread 2 quiescing too: it adopts what the exit parked, as a flush does.
+P_quiesce_exit == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
+                                          [] t = 2 -> <<P, Ld(1), U, Qu, Ex>>
+                                          [] t = 3 -> <<Qu, Qu, Ex>>]
+\* Thread 1 quiesces twice while thread 2 retires two values: a submission that checked thread
+\* 1's epoch before the first quiesce stored 0 inserts after it (RC_wit_quiesce_rescan), and the
+\* second quiesce, whose fast path reads the own list, takes it.
+P_quiesce_race == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Qu, Qu, Ex>> ELSE <<Rt, Rt, Ex>>]
+\* Node 1's drop quiesces, inside the flush that frees it (in_reclaim: nothing to do).
+DtorQu == DtorOf(1, <<Qu>>)
+P_quiesce_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Fl, Ex>> ELSE <<P, Ld(1), U, Ex>>]
+\* Thread 1 pins, unpins and quiesces, then idles for good (done, never exiting); thread 2 retires
+\* two values once thread 1 is past its quiesce. Both fit one batch, which thread 1's slot would
+\* take were its reservation still published.
+P_quiesce_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Qu>> ELSE <<After(1, 3), Rt, Rt>>]
+\* The same with thread 1 only unpinning: its slot keeps the epoch it published.
+P_unpin_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, U>> ELSE <<After(1, 2), Rt, Rt>>]
+\* Two threads hold reservations (they pinned and unpinned), a third retires one value and
+\* quiesces: its batch is smaller than the active slots, so it cannot be placed. The quiescer
+\* idles for good; the second thread's quiesce comes after the first's, which parks the batch
+\* again (the second slot is still active) and the second frees it.
+P_quiesce_small == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, U, After(3, 4), Qu>>
+                                         [] t = 2 -> <<P, U, After(1, 4), Qu>>
+                                         [] t = 3 -> <<After(1, 2), After(2, 2), Rt, Qu>>]
 
 \* ------------------------------------------------------------ liveness and bounds
 

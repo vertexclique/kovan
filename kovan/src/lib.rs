@@ -40,7 +40,7 @@
 //! - **`Guard` drop: wait-free** (a counter store; plus one slot
 //!   transition when the section escalated to an unconditional
 //!   reservation).
-//! - **`flush()` and thread exit: wait-free**, a fixed sequence of the
+//! - **`flush()`, `quiesce()` and thread exit: wait-free**, a fixed sequence of the
 //!   steps above; batches an exiting thread cannot place are parked on its
 //!   thread ID and adopted by `flush()`, both without a lock: one load tells
 //!   whether any ID holds parked batches, and each call adopts one ID's
@@ -98,6 +98,10 @@
 //! Long-idle threads that once pinned should call [`flush`] before idling
 //! to release retained garbage promptly: with no guard live, `flush()`
 //! also leaves the slot holding nothing back until the thread pins again.
+//! A thread about to block for an unknown time calls [`quiesce`] instead: the
+//! same release, without the epoch advance `flush` makes every time (it moves
+//! the epoch only for a batch it submits), and free when nothing was pinned
+//! or retired since the last call, so it can precede every park.
 //!
 //! # Recycling node memory (the `recycle` feature)
 //!
@@ -179,7 +183,7 @@ mod stall;
 pub use atom::{Atom, AtomGuard, AtomMap, AtomMapGuard, AtomOption, Removed};
 pub use atomic::{Atomic, Shared};
 pub use cache_padded::CachePadded;
-pub use guard::{Guard, flush, flush_pending, pin};
+pub use guard::{Guard, flush, flush_pending, pin, quiesce};
 pub use reclaim::Reclaimable;
 pub use retired::RetiredNode;
 

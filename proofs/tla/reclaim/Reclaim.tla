@@ -116,6 +116,12 @@ MutHelpFollows == Mutation = "help_follows_next_request"
 MutNoSeqnoCheck == Mutation = "help_no_seqno_check"
 MutStaleBirth == Mutation = "stale_birth"
 MutFlushKeep == Mutation = "flush_keeps_reservation"
+\* quiesce_keeps_reservation: a quiesce never publishes epoch 0, so the reservation of a thread
+\* that quiesced and went idle keeps every batch retired at or after its epoch (RetiredFreed).
+MutQuiesceKeeps == Mutation = "quiesce_keeps_reservation"
+\* quiesce_keeps_batch: a quiesce whose batch cannot be placed merges it back into its own batch,
+\* as a flush does, so a thread that went idle holds a value it retired (RetiredFreed).
+MutQuiesceMerges == Mutation = "quiesce_keeps_batch"
 \* flush_needs_tid puts back the flush of kovan 0.1.22: on a thread that has no tid (it never
 \* pinned), flush() returns at its first line, so it never adopts what exited threads parked.
 MutFlushNeedsTid == Mutation = "flush_needs_tid"
@@ -556,7 +562,8 @@ DS2: \* the drop's next operation; at its end the node is freed
     elsif Dtor[dn][di + 1].k = "lu" then di := di + 1; call LoadU(Dtor[dn][di].c); goto DS2;
     elsif Dtor[dn][di + 1].k = "wr" then di := di + 1; call Write(Dtor[dn][di].c); goto DS2;
     elsif Dtor[dn][di + 1].k = "rt" then di := di + 1; call RetireNew(); goto DS2;
-    elsif Dtor[dn][di + 1].k = "fl" then di := di + 1; call Flush(); goto DS2;
+    elsif Dtor[dn][di + 1].k = "fl" then di := di + 1; call Flush(TRUE); goto DS2;
+    elsif Dtor[dn][di + 1].k = "qu" then di := di + 1; call Flush(FALSE); goto DS2;
     end if;
 end procedure;
 
@@ -1282,9 +1289,11 @@ RN2: \* (Recycle) RetiredNode::new() written over the taken node's header (under
     end if;
 end procedure;
 
-\* flush (guard.rs).
-procedure Flush()
-variables fsv = 0, fx = NULL, ff = NULL, fl2 = NULL;
+\* flush and quiesce (guard.rs): `flush_inner(advances)`, flush with `advances` true, quiesce with
+\* it false. A quiesce advances the epoch only for a batch it submitted (fsub), and returns
+\* at once (the fast path, FL1 and QU1) when its thread is already at rest.
+procedure Flush(advances)
+variables fsv = 0, fx = NULL, ff = NULL, fl2 = NULL, fsub = FALSE, fq = FALSE;
 begin
 FL1: \* The start of flush(), one step: it reads the thread's own handle (its tid, in_reclaim,
      \* the pin count, whether its own batch holds a value: `bfst`) and, on a thread with no tid,
@@ -1302,10 +1311,17 @@ FL1: \* The start of flush(), one step: it reads the thread's own handle (its ti
     \* parked while no thread with a tid flushes afterwards stays parked for good.
     \* Under the mutation flush_skips_batch case (1) ignores the own batch: what a thread retired
     \* without pinning is not submitted here, only at its exit (EX1).
+    \* Quiesce's fast path (Handle::quiesce, before flush_inner): a thread with a tid whose cached
+    \* epoch is 0 (its slot publishes 0), batch and free-list cache are empty and no batch is
+    \* parked does not run the body: one more read, of its own slot's list (QU1), tells whether
+    \* a submission that raced its clear inserted a node after it. fq: that read was made.
     if (tid[self] = NoTid
         /\ (MutFlushNeedsTid \/ (orphaned = 0 /\ (bfst[self] = NULL \/ MutFlushSkipsBatch))))
        \/ inr[self] then
         return;
+    elsif ~advances /\ ~fq /\ tid[self] # NoTid /\ cep[self] = 0 /\ bfst[self] = NULL
+          /\ flst[self] = NULL /\ orphaned = 0 then
+        goto QU1;
     else
         \* As before the fix: in_reclaim set, the pin count saved (fsv) and raised by one.
         inr[self] := TRUE || fsv := pinc[self] || pinc[self] := pinc[self] + 1;
@@ -1340,18 +1356,31 @@ FL4: \* take_batch, the batch submitted with the own slot left out
             || bcnt[self] := 0 || nbl[blst[self]] := RNODE(bfst[self]);
         call TryRetire(ff, fl2, IF fsv = 0 /\ ~MutFlushDeact THEN tid[self] ELSE NoSkip);
     end if;
-FL6: \* not placed: back to the accumulating batch; increment_era: help_read
-    if ff # NULL /\ rok[self] = FALSE then Merge(ff, fl2) end if;
+FL6: \* not placed: a flush merges the batch back into the accumulating one; a quiesce parks it
+     \* on its own tid (park_orphans), so that a thread about to block holds nothing it retired
+     \* (quiesce_keeps_batch: it merges, as a flush does)
+    fsub := ff # NULL /\ rok[self];
     rok[self] := TRUE;
     \* (flush_deactivates: 0.1.21's flush reactivated its slot here)
     if MutFlushDeact /\ fsv = 0 then fst[tid[self]][0].lo := NULL end if;
-    call HelpRead(tid[self]);
-FL7: \* advance_epoch, the birth stamp set to the epoch it advanced to; drain_free_list
-    ep := ep + 1 || adv[self] := ep + 1 || cbe[self] := IF MutStaleBirth THEN cbe[self] ELSE ep + 1;
+    if ff # NULL /\ ~fsub then
+        if advances \/ MutQuiesceMerges then
+            Merge(ff, fl2);
+        else
+            call ParkOrphans(tid[self], fl2, fl2);
+        end if;
+    end if;
+FL6b: \* increment_era: help_read (a quiesce runs it only when its batch was submitted: fsub)
+    if advances \/ fsub then call HelpRead(tid[self]) end if;
+FL7: \* advance_epoch, the birth stamp set to the epoch it advanced to (quiesce: only after a
+     \* submitted batch); drain_free_list
+    if advances \/ fsub then
+        ep := ep + 1 || adv[self] := ep + 1 || cbe[self] := IF MutStaleBirth THEN cbe[self] ELSE ep + 1;
+    end if;
     if flst[self] # NULL then call Drain() end if;
 FlushClear: \* with no guard live: the own list exchanged to 0 once more, traversed;
             \* (0.1.21: nothing here; before: only an escalated section's do_update)
-    if fsv # 0 \/ MutFlushUnc then
+    if fsv # 0 \/ MutFlushUnc \/ (MutQuiesceKeeps /\ ~advances) then
         goto FL9;
     elsif MutFlushKeep /\ cep[self] = UNC then
         call DoUpdate(ep, 0, tid[self]);
@@ -1370,6 +1399,13 @@ FlushClear3: \* epoch.store_lo(0); the cached and drained epochs 0
 FL9: \* the pin count and in_reclaim restored
     pinc[self] := fsv || inr[self] := FALSE || rv[self] := 0;
     return;
+QU1: \* quiesce's fast path: the own slot's list read; empty, return at once, else the body
+    if fst[tid[self]][0].lo = NULL then
+        return;
+    else
+        fq := TRUE;
+        goto FL1;
+    end if;
 end procedure;
 
 \* A thread's exit: Handle::drop (guard.rs) and cleanup.
@@ -1501,7 +1537,8 @@ TH2: \* the program's next operation
     elsif Prog[self][opi[self]].k = "lu" then call LoadU(Prog[self][opi[self]].c); goto TH2;
     elsif Prog[self][opi[self]].k = "wr" then call Write(Prog[self][opi[self]].c); goto TH2;
     elsif Prog[self][opi[self]].k = "rt" then call RetireNew(); goto TH2;
-    elsif Prog[self][opi[self]].k = "fl" then call Flush(); goto TH2;
+    elsif Prog[self][opi[self]].k = "fl" then call Flush(TRUE); goto TH2;
+    elsif Prog[self][opi[self]].k = "qu" then call Flush(FALSE); goto TH2;
     elsif Prog[self][opi[self]].k = "ex" then call Exit(); goto TH2;
     elsif Prog[self][opi[self]].k = "join" then goto THJ;
     elsif Prog[self][opi[self]].k = "awaitrel" then goto THR;
@@ -1570,7 +1607,8 @@ VARIABLES which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache,
           sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
           hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
           rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-          nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt
+          nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+          xcap, xu, xr, xph, xpt
 
 vars == << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, res, nst, 
            nnx, nbl, nro, nbe, cell, nalloc, pool, ninc, plk, tid, pinc, bfst, 
@@ -1582,8 +1620,8 @@ vars == << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, res, nst,
            sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
            hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
            rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-           nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-           xpt >>
+           nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+           xcap, xu, xr, xph, xpt >>
 
 ProcSet == (Threads)
 
@@ -1742,10 +1780,13 @@ Init == (* Global variables *)
         (* Procedure RetireNew *)
         /\ nn = [ self \in ProcSet |-> NULL]
         (* Procedure Flush *)
+        /\ advances = [ self \in ProcSet |-> defaultInitValue]
         /\ fsv = [ self \in ProcSet |-> 0]
         /\ fx = [ self \in ProcSet |-> NULL]
         /\ ff = [ self \in ProcSet |-> NULL]
         /\ fl2 = [ self \in ProcSet |-> NULL]
+        /\ fsub = [ self \in ProcSet |-> FALSE]
+        /\ fq = [ self \in ProcSet |-> FALSE]
         (* Procedure Exit *)
         /\ xsv = [ self \in ProcSet |-> 0]
         /\ xown = [ self \in ProcSet |-> NoSkip]
@@ -1777,8 +1818,9 @@ SK1(self) == /\ pc[self] = "SK1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SK2(self) == /\ pc[self] = "SK2"
              /\ IF which[self] = 1
@@ -1807,8 +1849,8 @@ SK2(self) == /\ pc[self] = "SK2"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SK3(self) == /\ pc[self] = "SK3"
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
@@ -1827,8 +1869,8 @@ SK3(self) == /\ pc[self] = "SK3"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SpinLock(self) == SK1(self) \/ SK2(self) \/ SK3(self)
 
@@ -1855,8 +1897,8 @@ AT0(self) == /\ pc[self] = "AT0"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TidClaim(self) == /\ pc[self] = "TidClaim"
                   /\ /\ acl' = [acl EXCEPT ![self] = 0]
@@ -1879,9 +1921,9 @@ TidClaim(self) == /\ pc[self] = "TidClaim"
                                   hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
                                   rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
                                   rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                  lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                  ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                  xph, xpt >>
+                                  lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                  advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                                  xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TidClaim2(self) == /\ pc[self] = "TidClaim2"
                    /\ /\ acl' = [acl EXCEPT ![self] = acl[self] + (IF CountSteps THEN 1 ELSE 0)]
@@ -1904,8 +1946,9 @@ TidClaim2(self) == /\ pc[self] = "TidClaim2"
                                    hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                    radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                                    el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                   wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                                   xl, xx, xcap, xu, xr, xph, xpt >>
+                                   wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                                   fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, 
+                                   xr, xph, xpt >>
 
 TidClaim3(self) == /\ pc[self] = "TidClaim3"
                    /\ IF MinOf(aseen[self]) \in rel
@@ -1941,14 +1984,14 @@ TidClaim3(self) == /\ pc[self] = "TidClaim3"
                                    hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                    rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                    rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                   lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                   ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                   xr, xph, xpt >>
+                                   lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                                   fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, 
+                                   xl, xx, xcap, xu, xr, xph, xpt >>
 
 TidFresh(self) == /\ pc[self] = "TidFresh"
                   /\ ah' = [ah EXCEPT ![self] = ntid]
                   /\ Assert(ntid < MaxTid, 
-                            "Failure of assertion at line 408, column 5.")
+                            "Failure of assertion at line 414, column 5.")
                   /\ pc' = [pc EXCEPT ![self] = "TidFresh2"]
                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
                                   fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
@@ -1964,9 +2007,9 @@ TidFresh(self) == /\ pc[self] = "TidFresh"
                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
                                   rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                                   rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, 
-                                  pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                  fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                  xr, xph, xpt >>
+                                  pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                  advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                                  xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TidFresh2(self) == /\ pc[self] = "TidFresh2"
                    /\ IF ntid = ah[self]
@@ -1998,9 +2041,9 @@ TidFresh2(self) == /\ pc[self] = "TidFresh2"
                                    hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                    rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                    rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                   lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                   ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                   xr, xph, xpt >>
+                                   lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                                   fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, 
+                                   xl, xx, xcap, xu, xr, xph, xpt >>
 
 AllocTid(self) == AT0(self) \/ TidClaim(self) \/ TidClaim2(self)
                      \/ TidClaim3(self) \/ TidFresh(self)
@@ -2029,8 +2072,8 @@ RL0(self) == /\ pc[self] = "RL0"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TidRelease(self) == /\ pc[self] = "TidRelease"
                     /\ rel' = (rel \cup {rt[self]})
@@ -2056,8 +2099,9 @@ TidRelease(self) == /\ pc[self] = "TidRelease"
                                     hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                     radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                                     el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                    wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                    xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                    wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                                    fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, 
+                                    xr, xph, xpt >>
 
 ReleaseTid(self) == RL0(self) \/ TidRelease(self)
 
@@ -2084,8 +2128,8 @@ PK0(self) == /\ pc[self] = "PK0"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 OrphanTake(self) == /\ pc[self] = "OrphanTake"
                     /\ /\ orw' = [orw EXCEPT ![pk[self]] = NULL]
@@ -2106,9 +2150,9 @@ OrphanTake(self) == /\ pc[self] = "OrphanTake"
                                     hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                                     ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                                     rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                    lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                    fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                    xph, xpt >>
+                                    lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                                    fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                                    xx, xcap, xu, xr, xph, xpt >>
 
 OrphanPublish(self) == /\ pc[self] = "OrphanPublish"
                        /\ /\ nnx' = [nnx EXCEPT ![pt[self]] = pe[self]]
@@ -2142,8 +2186,9 @@ OrphanPublish(self) == /\ pc[self] = "OrphanPublish"
                                        rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                        rlate, rn, ecnt, ef, el, ewas, pce, pa, 
                                        lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                                       fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                       xcap, xu, xr, xph, xpt >>
+                                       advances, fsv, fx, ff, fl2, fsub, fq, 
+                                       xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                                       xph, xpt >>
 
 OrphanCount(self) == /\ pc[self] = "OrphanCount"
                      /\ orphaned' = orphaned + 1
@@ -2172,9 +2217,9 @@ OrphanCount(self) == /\ pc[self] = "OrphanCount"
                                      hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                                      rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                      ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                     xpt >>
+                                     le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                     ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                     xcap, xu, xr, xph, xpt >>
 
 ParkOrphans(self) == PK0(self) \/ OrphanTake(self) \/ OrphanPublish(self)
                         \/ OrphanCount(self)
@@ -2202,8 +2247,8 @@ AD0(self) == /\ pc[self] = "AD0"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 OrphanAdopt(self) == /\ pc[self] = "OrphanAdopt"
                      /\ IF orphaned = 0
@@ -2233,9 +2278,9 @@ OrphanAdopt(self) == /\ pc[self] = "OrphanAdopt"
                                      hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                                      rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                      ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                     xpt >>
+                                     le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                     ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                     xcap, xu, xr, xph, xpt >>
 
 OrphanAdopt2(self) == /\ pc[self] = "OrphanAdopt2"
                       /\ am' = [am EXCEPT ![self] = ntid]
@@ -2256,9 +2301,9 @@ OrphanAdopt2(self) == /\ pc[self] = "OrphanAdopt2"
                                       hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                       radj, rprv, rsi, rsj, rlate, rn, ecnt, 
                                       ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                                      la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                      xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                      xpt >>
+                                      la, uc, wc, wn, nn, advances, fsv, fx, 
+                                      ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                      xcap, xu, xr, xph, xpt >>
 
 OrphanAdopt3(self) == /\ pc[self] = "OrphanAdopt3"
                       /\ IF ai[self] >= am[self]
@@ -2292,9 +2337,9 @@ OrphanAdopt3(self) == /\ pc[self] = "OrphanAdopt3"
                                       hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                       rl, rmin, radj, rprv, rsi, rsj, rlate, 
                                       rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                      lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                      fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                      xph, xpt >>
+                                      lpi, le, la, uc, wc, wn, nn, advances, 
+                                      fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                                      xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 OrphanAdopt4(self) == /\ pc[self] = "OrphanAdopt4"
                       /\ /\ ac' = [ac EXCEPT ![self] = orw[ai[self]]]
@@ -2320,8 +2365,9 @@ OrphanAdopt4(self) == /\ pc[self] = "OrphanAdopt4"
                                       rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
                                       rsj, rlate, rn, ecnt, ef, el, ewas, pce, 
                                       pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                                      fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                      xcap, xu, xr, xph, xpt >>
+                                      advances, fsv, fx, ff, fl2, fsub, fq, 
+                                      xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                                      xpt >>
 
 OrphanAdopt5(self) == /\ pc[self] = "OrphanAdopt5"
                       /\ orphaned' = orphaned - 1
@@ -2346,8 +2392,9 @@ OrphanAdopt5(self) == /\ pc[self] = "OrphanAdopt5"
                                       rf, rr, rsk, rmx, ri, rl, rmin, radj, 
                                       rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
                                       ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                      wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                      xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                      wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                                      fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                                      xu, xr, xph, xpt >>
 
 OrphanMerge(self) == /\ pc[self] = "OrphanMerge"
                      /\ IF ac[self] = NULL
@@ -2390,9 +2437,9 @@ OrphanMerge(self) == /\ pc[self] = "OrphanMerge"
                                      hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                      rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                      rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                     lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                     fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                     xu, xr, xph, xpt >>
+                                     lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                     advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                                     xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 AdoptOrphans(self) == AD0(self) \/ OrphanAdopt(self) \/ OrphanAdopt2(self)
                          \/ OrphanAdopt3(self) \/ OrphanAdopt4(self)
@@ -2448,8 +2495,8 @@ TV1(self) == /\ pc[self] = "TV1"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TV2(self) == /\ pc[self] = "TV2"
              /\ /\ errs' = (errs \cup Bad({tf[self]}))
@@ -2468,8 +2515,8 @@ TV2(self) == /\ pc[self] = "TV2"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TV3(self) == /\ pc[self] = "TV3"
              /\ errs' = (errs \cup Bad({trf[self]}))
@@ -2494,9 +2541,9 @@ TV3(self) == /\ pc[self] = "TV3"
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                             fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 Traverse(self) == TV1(self) \/ TV2(self) \/ TV3(self)
 
@@ -2536,8 +2583,9 @@ DS1(self) == /\ pc[self] = "DS1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DS2(self) == /\ pc[self] = "DS2"
              /\ IF di[self] = Len(Dtor[dn[self]])
@@ -2552,7 +2600,8 @@ DS2(self) == /\ pc[self] = "DS2"
                         /\ dn' = [dn EXCEPT ![self] = Head(stack[self]).dn]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                                        wn, nn, fsv, fx, ff, fl2 >>
+                                        wn, nn, advances, fsv, fx, ff, fl2, 
+                                        fsub, fq >>
                    ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "pin"
                               THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                    /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
@@ -2564,7 +2613,8 @@ DS2(self) == /\ pc[self] = "DS2"
                                    /\ pa' = [pa EXCEPT ![self] = 0]
                                    /\ pc' = [pc EXCEPT ![self] = "PN1"]
                                    /\ UNCHANGED << lc, lp, lpi, le, la, uc, wc, 
-                                                   wn, nn, fsv, fx, ff, fl2 >>
+                                                   wn, nn, advances, fsv, fx, 
+                                                   ff, fl2, fsub, fq >>
                               ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "unpin"
                                          THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                               /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Unpin",
@@ -2573,8 +2623,9 @@ DS2(self) == /\ pc[self] = "DS2"
                                               /\ pc' = [pc EXCEPT ![self] = "UP1"]
                                               /\ UNCHANGED << lc, lp, lpi, le, 
                                                               la, uc, wc, wn, 
-                                                              nn, fsv, fx, ff, 
-                                                              fl2 >>
+                                                              nn, advances, 
+                                                              fsv, fx, ff, fl2, 
+                                                              fsub, fq >>
                                          ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "ld"
                                                     THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                                          /\ /\ lc' = [lc EXCEPT ![self] = Dtor[dn[self]][di'[self]].c]
@@ -2595,10 +2646,13 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                          wc, 
                                                                          wn, 
                                                                          nn, 
+                                                                         advances, 
                                                                          fsv, 
                                                                          fx, 
                                                                          ff, 
-                                                                         fl2 >>
+                                                                         fl2, 
+                                                                         fsub, 
+                                                                         fq >>
                                                     ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "lu"
                                                                THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                                                     /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "LoadU",
@@ -2610,10 +2664,13 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                     /\ UNCHANGED << wc, 
                                                                                     wn, 
                                                                                     nn, 
+                                                                                    advances, 
                                                                                     fsv, 
                                                                                     fx, 
                                                                                     ff, 
-                                                                                    fl2 >>
+                                                                                    fl2, 
+                                                                                    fsub, 
+                                                                                    fq >>
                                                                ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "wr"
                                                                           THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                                                                /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Write",
@@ -2625,10 +2682,13 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                /\ wn' = [wn EXCEPT ![self] = NULL]
                                                                                /\ pc' = [pc EXCEPT ![self] = "WR1"]
                                                                                /\ UNCHANGED << nn, 
+                                                                                               advances, 
                                                                                                fsv, 
                                                                                                fx, 
                                                                                                ff, 
-                                                                                               fl2 >>
+                                                                                               fl2, 
+                                                                                               fsub, 
+                                                                                               fq >>
                                                                           ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "rt"
                                                                                      THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                                                                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "RetireNew",
@@ -2637,31 +2697,63 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                                                                \o stack[self]]
                                                                                           /\ nn' = [nn EXCEPT ![self] = NULL]
                                                                                           /\ pc' = [pc EXCEPT ![self] = "RN1"]
-                                                                                          /\ UNCHANGED << fsv, 
+                                                                                          /\ UNCHANGED << advances, 
+                                                                                                          fsv, 
                                                                                                           fx, 
                                                                                                           ff, 
-                                                                                                          fl2 >>
+                                                                                                          fl2, 
+                                                                                                          fsub, 
+                                                                                                          fq >>
                                                                                      ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "fl"
                                                                                                 THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
-                                                                                                     /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
-                                                                                                                                              pc        |->  "DS2",
-                                                                                                                                              fsv       |->  fsv[self],
-                                                                                                                                              fx        |->  fx[self],
-                                                                                                                                              ff        |->  ff[self],
-                                                                                                                                              fl2       |->  fl2[self] ] >>
-                                                                                                                                          \o stack[self]]
+                                                                                                     /\ /\ advances' = [advances EXCEPT ![self] = TRUE]
+                                                                                                        /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
+                                                                                                                                                 pc        |->  "DS2",
+                                                                                                                                                 fsv       |->  fsv[self],
+                                                                                                                                                 fx        |->  fx[self],
+                                                                                                                                                 ff        |->  ff[self],
+                                                                                                                                                 fl2       |->  fl2[self],
+                                                                                                                                                 fsub      |->  fsub[self],
+                                                                                                                                                 fq        |->  fq[self],
+                                                                                                                                                 advances  |->  advances[self] ] >>
+                                                                                                                                             \o stack[self]]
                                                                                                      /\ fsv' = [fsv EXCEPT ![self] = 0]
                                                                                                      /\ fx' = [fx EXCEPT ![self] = NULL]
                                                                                                      /\ ff' = [ff EXCEPT ![self] = NULL]
                                                                                                      /\ fl2' = [fl2 EXCEPT ![self] = NULL]
+                                                                                                     /\ fsub' = [fsub EXCEPT ![self] = FALSE]
+                                                                                                     /\ fq' = [fq EXCEPT ![self] = FALSE]
                                                                                                      /\ pc' = [pc EXCEPT ![self] = "FL1"]
-                                                                                                ELSE /\ pc' = [pc EXCEPT ![self] = "Error"]
-                                                                                                     /\ UNCHANGED << stack, 
-                                                                                                                     di, 
-                                                                                                                     fsv, 
-                                                                                                                     fx, 
-                                                                                                                     ff, 
-                                                                                                                     fl2 >>
+                                                                                                ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "qu"
+                                                                                                           THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
+                                                                                                                /\ /\ advances' = [advances EXCEPT ![self] = FALSE]
+                                                                                                                   /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
+                                                                                                                                                            pc        |->  "DS2",
+                                                                                                                                                            fsv       |->  fsv[self],
+                                                                                                                                                            fx        |->  fx[self],
+                                                                                                                                                            ff        |->  ff[self],
+                                                                                                                                                            fl2       |->  fl2[self],
+                                                                                                                                                            fsub      |->  fsub[self],
+                                                                                                                                                            fq        |->  fq[self],
+                                                                                                                                                            advances  |->  advances[self] ] >>
+                                                                                                                                                        \o stack[self]]
+                                                                                                                /\ fsv' = [fsv EXCEPT ![self] = 0]
+                                                                                                                /\ fx' = [fx EXCEPT ![self] = NULL]
+                                                                                                                /\ ff' = [ff EXCEPT ![self] = NULL]
+                                                                                                                /\ fl2' = [fl2 EXCEPT ![self] = NULL]
+                                                                                                                /\ fsub' = [fsub EXCEPT ![self] = FALSE]
+                                                                                                                /\ fq' = [fq EXCEPT ![self] = FALSE]
+                                                                                                                /\ pc' = [pc EXCEPT ![self] = "FL1"]
+                                                                                                           ELSE /\ pc' = [pc EXCEPT ![self] = "Error"]
+                                                                                                                /\ UNCHANGED << stack, 
+                                                                                                                                di, 
+                                                                                                                                advances, 
+                                                                                                                                fsv, 
+                                                                                                                                fx, 
+                                                                                                                                ff, 
+                                                                                                                                fl2, 
+                                                                                                                                fsub, 
+                                                                                                                                fq >>
                                                                                           /\ nn' = nn
                                                                                /\ UNCHANGED << wc, 
                                                                                                wn >>
@@ -2800,8 +2892,8 @@ FB1(self) == /\ pc[self] = "FB1"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 FB2(self) == /\ pc[self] = "FB2"
              /\ errs' = (errs \cup (IF ninc[fc[self]] # fci[self] \/ (~Recycle /\ nst[fc[self]] = "freed")
@@ -2821,8 +2913,8 @@ FB2(self) == /\ pc[self] = "FB2"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 FreeBatch(self) == FB1(self) \/ FB2(self)
 
@@ -2925,9 +3017,9 @@ TC1(self) == /\ pc[self] = "TC1"
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                             fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 TC2(self) == /\ pc[self] = "TC2"
              /\ IF MutCopied \/ MutOverwritten
@@ -2985,8 +3077,9 @@ TC2(self) == /\ pc[self] = "TC2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TC3(self) == /\ pc[self] = "TC3"
              /\ IF MutOverwritten
@@ -3015,8 +3108,9 @@ TC3(self) == /\ pc[self] = "TC3"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TIC(self) == TC1(self) \/ TC2(self) \/ TC3(self)
 
@@ -3056,8 +3150,9 @@ DF1(self) == /\ pc[self] = "DF1"
                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
                              rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DF2(self) == /\ pc[self] = "DF2"
              /\ IF flst[self] = NULL
@@ -3095,8 +3190,9 @@ DF2(self) == /\ pc[self] = "DF2"
                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
                              rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 Drain(self) == DF1(self) \/ DF2(self)
 
@@ -3117,8 +3213,9 @@ DU1(self) == /\ pc[self] = "DU1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DU2(self) == /\ pc[self] = "DU2"
              /\ /\ dlo' = [dlo EXCEPT ![self] = fst[dt[self]][ix[self]].lo]
@@ -3152,8 +3249,9 @@ DU2(self) == /\ pc[self] = "DU2"
                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
                              rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DU3(self) == /\ pc[self] = "DU3"
              /\ ce' = [ce EXCEPT ![self] = ep]
@@ -3171,8 +3269,9 @@ DU3(self) == /\ pc[self] = "DU3"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DU4(self) == /\ pc[self] = "DU4"
              /\ sep' = [sep EXCEPT ![dt[self]][ix[self]].lo = ce[self]]
@@ -3202,8 +3301,9 @@ DU4(self) == /\ pc[self] = "DU4"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DoUpdate(self) == DU1(self) \/ DU2(self) \/ DU3(self) \/ DU4(self)
 
@@ -3229,8 +3329,9 @@ DetachEra(self) == /\ pc[self] = "DetachEra"
                                    hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                    radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                                    el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                   wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                                   xl, xx, xcap, xu, xr, xph, xpt >>
+                                   wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                                   fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, 
+                                   xr, xph, xpt >>
 
 DetachList(self) == /\ pc[self] = "DetachList"
                     /\ /\ kl' = [kl EXCEPT ![self] = fst[sk[self]][0].lo]
@@ -3251,9 +3352,9 @@ DetachList(self) == /\ pc[self] = "DetachList"
                                     hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                                     ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                                     rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                    lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                    fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                    xph, xpt >>
+                                    lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                                    fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                                    xx, xcap, xu, xr, xph, xpt >>
 
 DetachList2(self) == /\ pc[self] = "DetachList2"
                      /\ IF fst[sk[self]][0].hi # tg[self]
@@ -3283,8 +3384,9 @@ DetachList2(self) == /\ pc[self] = "DetachList2"
                                      rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                                      rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                                      pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                     nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                     xx, xcap, xu, xr, xph, xpt >>
+                                     nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                                     xpt >>
 
 DetachList3(self) == /\ pc[self] = "DetachList3"
                      /\ IF fst[sk[self]][0] = [lo |-> kl[self], hi |-> tg[self]]
@@ -3315,8 +3417,9 @@ DetachList3(self) == /\ pc[self] = "DetachList3"
                                      rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                                      rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                                      pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                     nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                     xx, xcap, xu, xr, xph, xpt >>
+                                     nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                                     xpt >>
 
 Detach(self) == DetachEra(self) \/ DetachList(self) \/ DetachList2(self)
                    \/ DetachList3(self)
@@ -3339,8 +3442,8 @@ SP1(self) == /\ pc[self] = "SP1"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SP2(self) == /\ pc[self] = "SP2"
              /\ slow' = slow + 1
@@ -3358,8 +3461,9 @@ SP2(self) == /\ pc[self] = "SP2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SP3(self) == /\ pc[self] = "SP3"
              /\ ssq' = [ssq EXCEPT ![self] = sep[tid[self]][0].hi]
@@ -3377,8 +3481,9 @@ SP3(self) == /\ pc[self] = "SP3"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SP4(self) == /\ pc[self] = "SP4"
              /\ res' = [res EXCEPT ![tid[self]].hi = ssq[self]]
@@ -3396,8 +3501,9 @@ SP4(self) == /\ pc[self] = "SP4"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SP5(self) == /\ pc[self] = "SP5"
              /\ res' = [res EXCEPT ![tid[self]].lo = INV]
@@ -3415,8 +3521,9 @@ SP5(self) == /\ pc[self] = "SP5"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SL1(self) == /\ pc[self] = "SL1"
              /\ /\ sce' = [sce EXCEPT ![self] = ep]
@@ -3437,8 +3544,8 @@ SL1(self) == /\ pc[self] = "SL1"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SL2(self) == /\ pc[self] = "SL2"
              /\ IF res[tid[self]] = [lo |-> INV, hi |-> ssq[self]]
@@ -3459,8 +3566,9 @@ SL2(self) == /\ pc[self] = "SL2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SL2a(self) == /\ pc[self] = "SL2a"
               /\ sep' = [sep EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
@@ -3478,9 +3586,9 @@ SL2a(self) == /\ pc[self] = "SL2a"
                               hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                               hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                               rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                              fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                              xx, xcap, xu, xr, xph, xpt >>
 
 SL2b(self) == /\ pc[self] = "SL2b"
               /\ fst' = [fst EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
@@ -3498,9 +3606,9 @@ SL2b(self) == /\ pc[self] = "SL2b"
                               hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                               hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                               rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                              fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                              xx, xcap, xu, xr, xph, xpt >>
 
 SL2c(self) == /\ pc[self] = "SL2c"
               /\ slow' = slow - 1
@@ -3531,9 +3639,9 @@ SL2c(self) == /\ pc[self] = "SL2c"
                               hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                               hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                               rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                              fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                              xx, xcap, xu, xr, xph, xpt >>
 
 SL2d(self) == /\ pc[self] = "SL2d"
               /\ inr' = [inr EXCEPT ![self] = swas[self]]
@@ -3560,8 +3668,9 @@ SL2d(self) == /\ pc[self] = "SL2d"
                               he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
                               rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                               rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                              ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                              xu, xr, xph, xpt >>
 
 SL3(self) == /\ pc[self] = "SL3"
              /\ IF fst[tid[self]][0].lo \in {NULL, INV}
@@ -3580,8 +3689,9 @@ SL3(self) == /\ pc[self] = "SL3"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 SL4(self) == /\ pc[self] = "SL4"
              /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
@@ -3600,8 +3710,8 @@ SL4(self) == /\ pc[self] = "SL4"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SL5(self) == /\ pc[self] = "SL5"
              /\ IF fst[tid[self]][0].hi # ssq[self]
@@ -3659,8 +3769,8 @@ SL5(self) == /\ pc[self] = "SL5"
                              hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                              radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
                              ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SL5b(self) == /\ pc[self] = "SL5b"
               /\ /\ sce' = [sce EXCEPT ![self] = ep]
@@ -3680,8 +3790,8 @@ SL5b(self) == /\ pc[self] = "SL5b"
                               hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, 
                               rprv, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                               pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                              fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                              xu, xr, xph, xpt >>
+                              advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                              xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SL6(self) == /\ pc[self] = "SL6"
              /\ IF sep[tid[self]][0] = [lo |-> spe[self], hi |-> ssq[self]]
@@ -3703,8 +3813,8 @@ SL6(self) == /\ pc[self] = "SL6"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 SL7(self) == /\ pc[self] = "SL7"
              /\ IF res[tid[self]].lo # INV
@@ -3723,8 +3833,9 @@ SL7(self) == /\ pc[self] = "SL7"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DN1(self) == /\ pc[self] = "DN1"
              /\ IF MutSlowFrees
@@ -3765,8 +3876,8 @@ DN1(self) == /\ pc[self] = "DN1"
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 Produced(self) == /\ pc[self] = "Produced"
                   /\ /\ rv' = [rv EXCEPT ![self] = 0]
@@ -3788,9 +3899,9 @@ Produced(self) == /\ pc[self] = "Produced"
                                   hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                                   ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                                   rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                  le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                  xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                  xpt >>
+                                  le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                  ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                  xcap, xu, xr, xph, xpt >>
 
 Produced2(self) == /\ pc[self] = "Produced2"
                    /\ sep' = [sep EXCEPT ![tid[self]][0].lo = sre[self]]
@@ -3810,9 +3921,9 @@ Produced2(self) == /\ pc[self] = "Produced2"
                                    hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                    rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                    ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                   le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                   xpt >>
+                                   le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                   ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                   xcap, xu, xr, xph, xpt >>
 
 Produced3(self) == /\ pc[self] = "Produced3"
                    /\ sep' = [sep EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
@@ -3836,8 +3947,9 @@ Produced3(self) == /\ pc[self] = "Produced3"
                                    rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                                    rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                                    pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                   nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                   xcap, xu, xr, xph, xpt >>
+                                   nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                                   xpt >>
 
 Produced4(self) == /\ pc[self] = "Produced4"
                    /\ fst' = [fst EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
@@ -3857,9 +3969,9 @@ Produced4(self) == /\ pc[self] = "Produced4"
                                    hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                    rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                    ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                   le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                   xpt >>
+                                   le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                   ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                   xcap, xu, xr, xph, xpt >>
 
 DN9(self) == /\ pc[self] = "DN9"
              /\ IF res[tid[self]].lo # 0
@@ -3880,8 +3992,9 @@ DN9(self) == /\ pc[self] = "DN9"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 DN10(self) == /\ pc[self] = "DN10"
               /\ slow' = slow - 1
@@ -3932,8 +4045,9 @@ DN10(self) == /\ pc[self] = "DN10"
                               hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                               rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                               rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                              la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                              xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                              fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                              xph, xpt >>
 
 DN11(self) == /\ pc[self] = "DN11"
               /\ IF flst[self] # NULL
@@ -3972,8 +4086,9 @@ DN11(self) == /\ pc[self] = "DN11"
                               hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                               rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                               rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                              ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                              xu, xr, xph, xpt >>
 
 DN12(self) == /\ pc[self] = "DN12"
               /\ inr' = [inr EXCEPT ![self] = swas[self]]
@@ -4000,8 +4115,9 @@ DN12(self) == /\ pc[self] = "DN12"
                               he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
                               rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                               rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                              ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                              xu, xr, xph, xpt >>
 
 DN2(self) == /\ pc[self] = "DN2"
              /\ /\ sfi' = [sfi EXCEPT ![self] = NULL]
@@ -4035,9 +4151,9 @@ DN2(self) == /\ pc[self] = "DN2"
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                             fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 SlowPath(self) == SP1(self) \/ SP2(self) \/ SP3(self) \/ SP4(self)
                      \/ SP5(self) \/ SL1(self) \/ SL2(self) \/ SL2a(self)
@@ -4070,8 +4186,8 @@ HR1(self) == /\ pc[self] = "HR1"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 HR2(self) == /\ pc[self] = "HR2"
              /\ hmx' = [hmx EXCEPT ![self] = ntid]
@@ -4089,8 +4205,9 @@ HR2(self) == /\ pc[self] = "HR2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 HR3(self) == /\ pc[self] = "HR3"
              /\ IF hx[self] >= hmx[self]
@@ -4142,8 +4259,8 @@ HR3(self) == /\ pc[self] = "HR3"
                              sfi, spr, sce, sex, sre, sps, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 HelpRead(self) == HR1(self) \/ HR2(self) \/ HR3(self)
 
@@ -4175,8 +4292,9 @@ HT1(self) == /\ pc[self] = "HT1"
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 HT2(self) == /\ pc[self] = "HT2"
              /\ hh' = [hh EXCEPT ![self] = res[he[self]].hi]
@@ -4194,8 +4312,9 @@ HT2(self) == /\ pc[self] = "HT2"
                              he, hme, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 HT3(self) == /\ pc[self] = "HT3"
              /\ hsq' = [hsq EXCEPT ![self] = sep[he[self]][0].hi]
@@ -4215,8 +4334,9 @@ HT3(self) == /\ pc[self] = "HT3"
                              he, hme, hh, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                              rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 HT4(self) == /\ pc[self] = "HT4"
              /\ hce' = [hce EXCEPT ![self] = ep]
@@ -4234,8 +4354,9 @@ HT4(self) == /\ pc[self] = "HT4"
                              he, hme, hh, hsq, hol, hoh, hps, hep, rf, rr, rsk, 
                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                              rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 HelpPass(self) == /\ pc[self] = "HelpPass"
                   /\ hps' = [hps EXCEPT ![self] = hps[self] + (IF CountSteps THEN 1 ELSE 0)]
@@ -4265,8 +4386,9 @@ HelpPass(self) == /\ pc[self] = "HelpPass"
                                   hol, hoh, hep, rf, rr, rsk, rmx, ri, rl, 
                                   rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, 
                                   ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                                  uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                  xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                  uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                                  fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, 
+                                  xr, xph, xpt >>
 
 HT6(self) == /\ pc[self] = "HT6"
              /\ IF rv[self] # ep
@@ -4289,8 +4411,9 @@ HT6(self) == /\ pc[self] = "HT6"
                              he, hme, hh, hsq, hol, hoh, hps, hep, rf, rr, rsk, 
                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                              rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 HT7(self) == /\ pc[self] = "HT7"
              /\ IF res[he[self]] = [lo |-> INV, hi |-> hh[self]]
@@ -4321,9 +4444,9 @@ HT7(self) == /\ pc[self] = "HT7"
                              sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
                              hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, 
                              rprv, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 HT10(self) == /\ pc[self] = "HT10"
               /\ IF rv[self] \notin {NULL, INV}
@@ -4356,8 +4479,9 @@ HT10(self) == /\ pc[self] = "HT10"
                               hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                               rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                               rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                              la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                              xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                              fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                              xph, xpt >>
 
 HandOverEpoch(self) == /\ pc[self] = "HandOverEpoch"
                        /\ /\ hol' = [hol EXCEPT ![self] = sep[he[self]][0].lo]
@@ -4379,9 +4503,9 @@ HandOverEpoch(self) == /\ pc[self] = "HandOverEpoch"
                                        hps, hep, rf, rr, rsk, rmx, ri, rl, 
                                        rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                        ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                       lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                       ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                       xu, xr, xph, xpt >>
+                                       lpi, le, la, uc, wc, wn, nn, advances, 
+                                       fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                                       xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 HandOverEpoch2(self) == /\ pc[self] = "HandOverEpoch2"
                         /\ hoh' = [hoh EXCEPT ![self] = sep[he[self]][0].hi]
@@ -4403,9 +4527,9 @@ HandOverEpoch2(self) == /\ pc[self] = "HandOverEpoch2"
                                         hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                         radj, rprv, rsi, rsj, rlate, rn, ecnt, 
                                         ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                                        la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                        xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                        xph, xpt >>
+                                        la, uc, wc, wn, nn, advances, fsv, fx, 
+                                        ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                                        xx, xcap, xu, xr, xph, xpt >>
 
 HandOverEpoch3(self) == /\ pc[self] = "HandOverEpoch3"
                         /\ IF hoh[self] # hsq[self] + 1
@@ -4437,9 +4561,10 @@ HandOverEpoch3(self) == /\ pc[self] = "HandOverEpoch3"
                                         hsq, hce, hps, rf, rr, rsk, rmx, ri, 
                                         rl, rmin, radj, rprv, rsi, rsj, rlate, 
                                         rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                        lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                        fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                        xcap, xu, xr, xph, xpt >>
+                                        lp, lpi, le, la, uc, wc, wn, nn, 
+                                        advances, fsv, fx, ff, fl2, fsub, fq, 
+                                        xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                                        xph, xpt >>
 
 HandOverList(self) == /\ pc[self] = "HandOverList"
                       /\ IF fst[he[self]][0].hi = hsq[self] + 1
@@ -4463,8 +4588,9 @@ HandOverList(self) == /\ pc[self] = "HandOverList"
                                       rf, rr, rsk, rmx, ri, rl, rmin, radj, 
                                       rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
                                       ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                      wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                      xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                      wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                                      fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                                      xu, xr, xph, xpt >>
 
 HT12(self) == /\ pc[self] = "HT12"
               /\ hol' = [hol EXCEPT ![self] = res[he[self]].lo]
@@ -4483,8 +4609,8 @@ HT12(self) == /\ pc[self] = "HT12"
                               hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                               radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
                               ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                              nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                              xcap, xu, xr, xph, xpt >>
+                              nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                              xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 HT12b(self) == /\ pc[self] = "HT12b"
                /\ IF MutHelpFollows /\ hol[self] = INV
@@ -4513,8 +4639,8 @@ HT12b(self) == /\ pc[self] = "HT12b"
                                hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
                                ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                               nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                               xcap, xu, xr, xph, xpt >>
+                               nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                               xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 HT12c(self) == /\ pc[self] = "HT12c"
                /\ IF sep[he[self]][0].hi = hsq[self]
@@ -4534,8 +4660,9 @@ HT12c(self) == /\ pc[self] = "HT12c"
                                hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                rl, rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, 
                                ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                               wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                               xx, xcap, xu, xr, xph, xpt >>
+                               wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                               fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                               xpt >>
 
 HelperLeave(self) == /\ pc[self] = "HelperLeave"
                      /\ /\ fst' = [fst EXCEPT ![hme[self]][2].lo = INV]
@@ -4573,8 +4700,9 @@ HelperLeave(self) == /\ pc[self] = "HelperLeave"
                                      rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                                      rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                                      pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                     nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                     xx, xcap, xu, xr, xph, xpt >>
+                                     nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                                     xpt >>
 
 HT20(self) == /\ pc[self] = "HT20"
               /\ IF flst[self] # NULL
@@ -4618,9 +4746,9 @@ HT20(self) == /\ pc[self] = "HT20"
                               spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
                               hx, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                               rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                              fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                              xx, xcap, xu, xr, xph, xpt >>
 
 HelpThread(self) == HT1(self) \/ HT2(self) \/ HT3(self) \/ HT4(self)
                        \/ HelpPass(self) \/ HT6(self) \/ HT7(self)
@@ -4651,8 +4779,8 @@ TR1(self) == /\ pc[self] = "TR1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
                              ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TS2(self) == /\ pc[self] = "TS2"
              /\ IF fst[ri[self]][0].lo = INV
@@ -4671,8 +4799,9 @@ TS2(self) == /\ pc[self] = "TS2"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TS3(self) == /\ pc[self] = "TS3"
              /\ IF fst[ri[self]][0].hi % 2 = 1
@@ -4691,8 +4820,9 @@ TS3(self) == /\ pc[self] = "TS3"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TS4(self) == /\ pc[self] = "TS4"
              /\ IF sep[ri[self]][0].lo < rmin[self]
@@ -4711,8 +4841,9 @@ TS4(self) == /\ pc[self] = "TS4"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TS5(self) == /\ pc[self] = "TS5"
              /\ IF sep[ri[self]][0].hi % 2 = 1
@@ -4755,9 +4886,9 @@ TS5(self) == /\ pc[self] = "TS5"
                              dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
                              hce, hol, hoh, hps, hep, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TG1(self) == /\ pc[self] = "TG1"
              /\ IF fst[ri[self]][2].lo = INV
@@ -4780,8 +4911,9 @@ TG1(self) == /\ pc[self] = "TG1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, rl, rmin, radj, rprv, rsi, rsj, rlate, 
                              rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 TG2(self) == /\ pc[self] = "TG2"
              /\ IF sep[ri[self]][2].lo < rmin[self]
@@ -4828,9 +4960,9 @@ TG2(self) == /\ pc[self] = "TG2"
                              dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
                              hce, hol, hoh, hps, hep, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TN2(self) == /\ pc[self] = "TN2"
              /\ IF rf[self] = rl[self]
@@ -4859,8 +4991,8 @@ TN2(self) == /\ pc[self] = "TN2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rr, rsk, 
                              rmx, ri, rl, rmin, radj, rprv, rlate, rn, ecnt, 
                              ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                             wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                             xx, xcap, xu, xr, xph, xpt >>
+                             wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TN3(self) == /\ pc[self] = "TN3"
              /\ IF sep[rsi[self]][rsj[self]].lo < rmin[self]
@@ -4881,8 +5013,9 @@ TN3(self) == /\ pc[self] = "TN3"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TN4(self) == /\ pc[self] = "TN4"
              /\ /\ errs' = (errs \cup (IF rsj[self] = 0 /\ rsi[self] \in rlate[self] /\ \E tk \in detaching[rsi[self]] : tk[2] = fst[rsi[self]][0].hi
@@ -4909,9 +5042,9 @@ TN4(self) == /\ pc[self] = "TN4"
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
                              hce, hol, hoh, hps, hep, rr, rsk, rmx, ri, rl, 
                              rmin, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 InsertRollback(self) == /\ pc[self] = "InsertRollback"
                         /\ IF fst[rsi[self]][rsj[self]].lo = rf[self]
@@ -4939,8 +5072,9 @@ InsertRollback(self) == /\ pc[self] = "InsertRollback"
                                         rmx, ri, rl, rmin, rprv, rsi, rsj, 
                                         rlate, rn, ecnt, ef, el, ewas, pce, pa, 
                                         lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                                        fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                        xx, xcap, xu, xr, xph, xpt >>
+                                        advances, fsv, fx, ff, fl2, fsub, fq, 
+                                        xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                                        xph, xpt >>
 
 TL1(self) == /\ pc[self] = "TL1"
              /\ errs' = (errs \cup Bad({rf[self]}))
@@ -4977,8 +5111,8 @@ TL1(self) == /\ pc[self] = "TL1"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rr, rsk, 
                              rmx, ri, rl, rmin, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TL2(self) == /\ pc[self] = "TL2"
              /\ /\ fl' = [fl EXCEPT ![self] = rv[self]]
@@ -5006,8 +5140,8 @@ TL2(self) == /\ pc[self] = "TL2"
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TL3(self) == /\ pc[self] = "TL3"
              /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
@@ -5027,8 +5161,8 @@ TL3(self) == /\ pc[self] = "TL3"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rr, 
                              rsk, rmx, ri, rl, rmin, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TF1(self) == /\ pc[self] = "TF1"
              /\ errs' = (errs \cup Bad({rr[self]}))
@@ -5077,8 +5211,8 @@ TF1(self) == /\ pc[self] = "TF1"
                              ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TF2(self) == /\ pc[self] = "TF2"
              /\ rok' = [rok EXCEPT ![self] = TRUE]
@@ -5108,8 +5242,8 @@ TF2(self) == /\ pc[self] = "TF2"
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rn, ecnt, 
                              ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                             wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                             xx, xcap, xu, xr, xph, xpt >>
+                             wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 TryRetire(self) == TR1(self) \/ TS2(self) \/ TS3(self) \/ TS4(self)
                       \/ TS5(self) \/ TG1(self) \/ TG2(self) \/ TN2(self)
@@ -5147,8 +5281,9 @@ RE1(self) == /\ pc[self] = "RE1"
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ef, el, ewas, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lp, lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                             fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 RE2(self) == /\ pc[self] = "RE2"
              /\ IF bfst[self] = NULL
@@ -5213,9 +5348,9 @@ RE2(self) == /\ pc[self] = "RE2"
                              dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
                              spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 RE3(self) == /\ pc[self] = "RE3"
              /\ IF rok[self] = FALSE
@@ -5260,8 +5395,8 @@ RE3(self) == /\ pc[self] = "RE3"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 RE4(self) == /\ pc[self] = "RE4"
              /\ acnt' = [acnt EXCEPT ![self] = (acnt[self] + 1) % EpochFreq]
@@ -5305,8 +5440,9 @@ RE4(self) == /\ pc[self] = "RE4"
                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lp, lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                             fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 RE5(self) == /\ pc[self] = "RE5"
              /\ /\ ewas' = [ewas EXCEPT ![self] = inr[self]]
@@ -5334,8 +5470,8 @@ RE5(self) == /\ pc[self] = "RE5"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                             fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                             xr, xph, xpt >>
+                             advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 RE6(self) == /\ pc[self] = "RE6"
              /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
@@ -5364,8 +5500,9 @@ RE6(self) == /\ pc[self] = "RE6"
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lp, lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                             fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 Retire(self) == RE1(self) \/ RE2(self) \/ RE3(self) \/ RE4(self)
                    \/ RE5(self) \/ RE6(self)
@@ -5437,8 +5574,9 @@ PN1(self) == /\ pc[self] = "PN1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 PNU(self) == /\ pc[self] = "PNU"
              /\ /\ ce' = [ce EXCEPT ![self] = pce[self]]
@@ -5466,8 +5604,8 @@ PNU(self) == /\ pc[self] = "PNU"
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 PNC(self) == /\ pc[self] = "PNC"
              /\ IF pa[self] = 1
@@ -5521,8 +5659,9 @@ PNC(self) == /\ pc[self] = "PNC"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 Pin(self) == PN1(self) \/ PNU(self) \/ PNC(self)
 
@@ -5552,8 +5691,8 @@ UP1(self) == /\ pc[self] = "UP1"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 UP2(self) == /\ pc[self] = "UP2"
              /\ /\ ce' = [ce EXCEPT ![self] = ep]
@@ -5581,8 +5720,8 @@ UP2(self) == /\ pc[self] = "UP2"
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 UP3(self) == /\ pc[self] = "UP3"
              /\ /\ pinc' = [pinc EXCEPT ![self] = 0]
@@ -5602,8 +5741,8 @@ UP3(self) == /\ pc[self] = "UP3"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 Unpin(self) == UP1(self) \/ UP2(self) \/ UP3(self)
 
@@ -5624,8 +5763,9 @@ LD1(self) == /\ pc[self] = "LD1"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 LD2(self) == /\ pc[self] = "LD2"
              /\ IF ep <= cep[self] \/ MutNoEraCheck \/ NoHandle(self)
@@ -5654,8 +5794,8 @@ LD2(self) == /\ pc[self] = "LD2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 LD3(self) == /\ pc[self] = "LD3"
              /\ IF la[self] = 1 /\ ~MutNoEscalate
@@ -5699,8 +5839,9 @@ LD3(self) == /\ pc[self] = "LD3"
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lc, lp, lpi, le, uc, wc, wn, nn, advances, fsv, 
+                             fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 LD4(self) == /\ pc[self] = "LD4"
              /\ /\ lp' = [lp EXCEPT ![self] = cell[lc[self]]]
@@ -5719,8 +5860,9 @@ LD4(self) == /\ pc[self] = "LD4"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 LD5(self) == /\ pc[self] = "LD5"
              /\ IF ep = le[self]
@@ -5748,8 +5890,8 @@ LD5(self) == /\ pc[self] = "LD5"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 LD6(self) == /\ pc[self] = "LD6"
              /\ held' = [held EXCEPT ![self] = held[self] \cup Held(self, cell[lc[self]], "p", Inc(cell[lc[self]]))]
@@ -5773,8 +5915,8 @@ LD6(self) == /\ pc[self] = "LD6"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 Load(self) == LD1(self) \/ LD2(self) \/ LD3(self) \/ LD4(self) \/ LD5(self)
                  \/ LD6(self)
@@ -5797,8 +5939,9 @@ LU1(self) == /\ pc[self] = "LU1"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, wc, wn, nn, fsv, fx, ff, fl2, xsv, 
-                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, wc, wn, nn, advances, fsv, fx, ff, 
+                             fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, 
+                             xr, xph, xpt >>
 
 LoadU(self) == LU1(self)
 
@@ -5816,7 +5959,7 @@ WR1(self) == /\ pc[self] = "WR1"
                                         held, rv, errs, stack, rn, ecnt, ef, 
                                         el, ewas, wc >>
                    ELSE /\ Assert(nalloc < MaxNodes, 
-                                  "Failure of assertion at line 323, column 5 of macro called at line 1224, column 9.")
+                                  "Failure of assertion at line 329, column 5 of macro called at line 1231, column 9.")
                         /\ /\ nalloc' = nalloc + 1
                            /\ nst' = [nst EXCEPT ![nalloc + 1] = "live"]
                         /\ /\ cbe' = [cbe EXCEPT ![self] = Stamp(self)]
@@ -5862,8 +6005,8 @@ WR1(self) == /\ pc[self] = "WR1"
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, pce, pa, lc, lp, lpi, le, la, uc, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 WR2(self) == /\ pc[self] = "WR2"
              /\ IF ~MutStaleReuse
@@ -5924,9 +6067,9 @@ WR2(self) == /\ pc[self] = "WR2"
                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, pce, 
-                             pa, lc, lp, lpi, le, la, uc, wc, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             pa, lc, lp, lpi, le, la, uc, wc, nn, advances, 
+                             fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 WR3(self) == /\ pc[self] = "WR3"
              /\ plk' = IF MutPoolLock THEN 0 ELSE plk
@@ -5947,8 +6090,9 @@ WR3(self) == /\ pc[self] = "WR3"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 Write(self) == WR1(self) \/ WR2(self) \/ WR3(self)
 
@@ -5965,7 +6109,7 @@ RN1(self) == /\ pc[self] = "RN1"
                         /\ UNCHANGED << nnx, nbl, nro, nbe, nalloc, cbe, errs, 
                                         stack, rn, ecnt, ef, el, ewas >>
                    ELSE /\ Assert(nalloc < MaxNodes, 
-                                  "Failure of assertion at line 323, column 5 of macro called at line 1266, column 9.")
+                                  "Failure of assertion at line 329, column 5 of macro called at line 1273, column 9.")
                         /\ /\ nalloc' = nalloc + 1
                            /\ nst' = [nst EXCEPT ![nalloc + 1] = "live"]
                         /\ /\ cbe' = [cbe EXCEPT ![self] = Stamp(self)]
@@ -6006,8 +6150,9 @@ RN1(self) == /\ pc[self] = "RN1"
                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lp, lpi, le, la, uc, wc, wn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 RN2(self) == /\ pc[self] = "RN2"
              /\ IF ~MutStaleReuse
@@ -6051,8 +6196,8 @@ RN2(self) == /\ pc[self] = "RN2"
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, pce, pa, lc, lp, lpi, le, la, uc, 
-                             wc, wn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wc, wn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 RetireNew(self) == RN1(self) \/ RN2(self)
 
@@ -6065,34 +6210,44 @@ FL1(self) == /\ pc[self] = "FL1"
                         /\ fx' = [fx EXCEPT ![self] = Head(stack[self]).fx]
                         /\ ff' = [ff EXCEPT ![self] = Head(stack[self]).ff]
                         /\ fl2' = [fl2 EXCEPT ![self] = Head(stack[self]).fl2]
+                        /\ fsub' = [fsub EXCEPT ![self] = Head(stack[self]).fsub]
+                        /\ fq' = [fq EXCEPT ![self] = Head(stack[self]).fq]
+                        /\ advances' = [advances EXCEPT ![self] = Head(stack[self]).advances]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << pinc, inr, ah, aseen >>
-                   ELSE /\ /\ fsv' = [fsv EXCEPT ![self] = pinc[self]]
-                           /\ inr' = [inr EXCEPT ![self] = TRUE]
-                           /\ pinc' = [pinc EXCEPT ![self] = pinc[self] + 1]
-                        /\ IF tid[self] = NoTid /\ pinc'[self] = 1
-                              THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
-                                                                            pc        |->  "FL2",
-                                                                            ah        |->  ah[self],
-                                                                            aseen     |->  aseen[self] ] >>
-                                                                        \o stack[self]]
-                                   /\ ah' = [ah EXCEPT ![self] = 0]
-                                   /\ aseen' = [aseen EXCEPT ![self] = {}]
-                                   /\ pc' = [pc EXCEPT ![self] = "AT0"]
-                              ELSE /\ IF tid[self] = NoTid
+                   ELSE /\ IF ~advances[self] /\ ~fq[self] /\ tid[self] # NoTid /\ cep[self] = 0 /\ bfst[self] = NULL
+                              /\ flst[self] = NULL /\ orphaned = 0
+                              THEN /\ pc' = [pc EXCEPT ![self] = "QU1"]
+                                   /\ UNCHANGED << pinc, inr, stack, ah, aseen, 
+                                                   fsv >>
+                              ELSE /\ /\ fsv' = [fsv EXCEPT ![self] = pinc[self]]
+                                      /\ inr' = [inr EXCEPT ![self] = TRUE]
+                                      /\ pinc' = [pinc EXCEPT ![self] = pinc[self] + 1]
+                                   /\ IF tid[self] = NoTid /\ pinc'[self] = 1
                                          THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
-                                                                                       pc        |->  "FL3",
+                                                                                       pc        |->  "FL2",
                                                                                        ah        |->  ah[self],
                                                                                        aseen     |->  aseen[self] ] >>
                                                                                    \o stack[self]]
                                               /\ ah' = [ah EXCEPT ![self] = 0]
                                               /\ aseen' = [aseen EXCEPT ![self] = {}]
                                               /\ pc' = [pc EXCEPT ![self] = "AT0"]
-                                         ELSE /\ IF pinc'[self] # 1
-                                                    THEN /\ pc' = [pc EXCEPT ![self] = "FL3"]
-                                                    ELSE /\ pc' = [pc EXCEPT ![self] = "FL2"]
-                                              /\ UNCHANGED << stack, ah, aseen >>
-                        /\ UNCHANGED << fx, ff, fl2 >>
+                                         ELSE /\ IF tid[self] = NoTid
+                                                    THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
+                                                                                                  pc        |->  "FL3",
+                                                                                                  ah        |->  ah[self],
+                                                                                                  aseen     |->  aseen[self] ] >>
+                                                                                              \o stack[self]]
+                                                         /\ ah' = [ah EXCEPT ![self] = 0]
+                                                         /\ aseen' = [aseen EXCEPT ![self] = {}]
+                                                         /\ pc' = [pc EXCEPT ![self] = "AT0"]
+                                                    ELSE /\ IF pinc'[self] # 1
+                                                               THEN /\ pc' = [pc EXCEPT ![self] = "FL3"]
+                                                               ELSE /\ pc' = [pc EXCEPT ![self] = "FL2"]
+                                                         /\ UNCHANGED << stack, 
+                                                                         ah, 
+                                                                         aseen >>
+                        /\ UNCHANGED << advances, fx, ff, fl2, fsub, fq >>
              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
                              sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
                              pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
@@ -6140,8 +6295,9 @@ FL2(self) == /\ pc[self] = "FL2"
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                             fsv, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                             xcap, xu, xr, xph, xpt >>
 
 FL3(self) == /\ pc[self] = "FL3"
              /\ fx' = [fx EXCEPT ![self] = NULL]
@@ -6168,8 +6324,8 @@ FL3(self) == /\ pc[self] = "FL3"
                              hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 FL4(self) == /\ pc[self] = "FL4"
              /\ IF bfst[self] = NULL
@@ -6223,61 +6379,105 @@ FL4(self) == /\ pc[self] = "FL4"
                              kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                             le, la, uc, wc, wn, nn, fsv, fx, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             le, la, uc, wc, wn, nn, advances, fsv, fx, fsub, 
+                             fq, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 FL6(self) == /\ pc[self] = "FL6"
-             /\ IF ff[self] # NULL /\ rok[self] = FALSE
-                   THEN /\ LET f0 == ff[self] IN
-                             LET r0 == fl2[self] IN
-                               LET ch == Chain(ff[self], fl2[self]) IN
-                                 IF bfst[self] = NULL
-                                    THEN /\ /\ bcnt' = [bcnt EXCEPT ![self] = Len(ch)]
-                                            /\ bfst' = [bfst EXCEPT ![self] = f0]
-                                            /\ blst' = [blst EXCEPT ![self] = r0]
-                                         /\ UNCHANGED << nbl, nro, nbe >>
-                                    ELSE /\ nbe' = [nbe EXCEPT ![blst[self]] = Min2(nbe[blst[self]], nbe[r0])]
-                                         /\ nbl' = [n \in Nodes |-> IF n \in Range(ch) THEN blst[self] ELSE nbl[n]]
-                                         /\ nro' = [nro EXCEPT ![r0] = bfst[self]]
-                                         /\ /\ bcnt' = [bcnt EXCEPT ![self] = bcnt[self] + Len(ch)]
-                                            /\ bfst' = [bfst EXCEPT ![self] = f0]
-                                         /\ blst' = blst
-                   ELSE /\ TRUE
-                        /\ UNCHANGED << nbl, nro, nbe, bfst, blst, bcnt >>
+             /\ fsub' = [fsub EXCEPT ![self] = ff[self] # NULL /\ rok[self]]
              /\ rok' = [rok EXCEPT ![self] = TRUE]
              /\ IF MutFlushDeact /\ fsv[self] = 0
                    THEN /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
                    ELSE /\ TRUE
                         /\ fst' = fst
-             /\ /\ hm' = [hm EXCEPT ![self] = tid[self]]
-                /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "HelpRead",
-                                                         pc        |->  "FL7",
-                                                         hmx       |->  hmx[self],
-                                                         hx        |->  hx[self],
-                                                         hm        |->  hm[self] ] >>
-                                                     \o stack[self]]
-             /\ hmx' = [hmx EXCEPT ![self] = 0]
-             /\ hx' = [hx EXCEPT ![self] = 0]
-             /\ pc' = [pc EXCEPT ![self] = "HR1"]
+             /\ IF ff[self] # NULL /\ ~fsub'[self]
+                   THEN /\ IF advances[self] \/ MutQuiesceMerges
+                              THEN /\ LET f0 == ff[self] IN
+                                        LET r0 == fl2[self] IN
+                                          LET ch == Chain(ff[self], fl2[self]) IN
+                                            IF bfst[self] = NULL
+                                               THEN /\ /\ bcnt' = [bcnt EXCEPT ![self] = Len(ch)]
+                                                       /\ bfst' = [bfst EXCEPT ![self] = f0]
+                                                       /\ blst' = [blst EXCEPT ![self] = r0]
+                                                    /\ UNCHANGED << nbl, nro, 
+                                                                    nbe >>
+                                               ELSE /\ nbe' = [nbe EXCEPT ![blst[self]] = Min2(nbe[blst[self]], nbe[r0])]
+                                                    /\ nbl' = [n \in Nodes |-> IF n \in Range(ch) THEN blst[self] ELSE nbl[n]]
+                                                    /\ nro' = [nro EXCEPT ![r0] = bfst[self]]
+                                                    /\ /\ bcnt' = [bcnt EXCEPT ![self] = bcnt[self] + Len(ch)]
+                                                       /\ bfst' = [bfst EXCEPT ![self] = f0]
+                                                    /\ blst' = blst
+                                   /\ pc' = [pc EXCEPT ![self] = "FL6b"]
+                                   /\ UNCHANGED << stack, pk, ph, pt, pe >>
+                              ELSE /\ /\ ph' = [ph EXCEPT ![self] = fl2[self]]
+                                      /\ pk' = [pk EXCEPT ![self] = tid[self]]
+                                      /\ pt' = [pt EXCEPT ![self] = fl2[self]]
+                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ParkOrphans",
+                                                                               pc        |->  "FL6b",
+                                                                               pe        |->  pe[self],
+                                                                               pk        |->  pk[self],
+                                                                               ph        |->  ph[self],
+                                                                               pt        |->  pt[self] ] >>
+                                                                           \o stack[self]]
+                                   /\ pe' = [pe EXCEPT ![self] = NULL]
+                                   /\ pc' = [pc EXCEPT ![self] = "PK0"]
+                                   /\ UNCHANGED << nbl, nro, nbe, bfst, blst, 
+                                                   bcnt >>
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "FL6b"]
+                        /\ UNCHANGED << nbl, nro, nbe, bfst, blst, bcnt, stack, 
+                                        pk, ph, pt, pe >>
              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
                              res, nst, nnx, cell, nalloc, pool, ninc, plk, tid, 
                              pinc, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
                              held, lvl, gdep, rv, opi, afr, acl, detaching, 
-                             adv, errs, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             adv, errs, which, ah, aseen, rt, ai, am, ac, tf, 
+                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
+                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
+                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
+                             wn, nn, advances, fsv, fx, ff, fl2, fq, xsv, xown, 
+                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+
+FL6b(self) == /\ pc[self] = "FL6b"
+              /\ IF advances[self] \/ fsub[self]
+                    THEN /\ /\ hm' = [hm EXCEPT ![self] = tid[self]]
+                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "HelpRead",
+                                                                     pc        |->  "FL7",
+                                                                     hmx       |->  hmx[self],
+                                                                     hx        |->  hx[self],
+                                                                     hm        |->  hm[self] ] >>
+                                                                 \o stack[self]]
+                         /\ hmx' = [hmx EXCEPT ![self] = 0]
+                         /\ hx' = [hx EXCEPT ![self] = 0]
+                         /\ pc' = [pc EXCEPT ![self] = "HR1"]
+                    ELSE /\ pc' = [pc EXCEPT ![self] = "FL7"]
+                         /\ UNCHANGED << stack, hm, hmx, hx >>
+              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
+                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                              nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
+                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
+                              held, lvl, gdep, rv, rok, opi, afr, acl, 
+                              detaching, adv, errs, which, ah, aseen, rt, pk, 
+                              ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
+                              trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
+                              tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
+                              kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
+                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                              rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
+                              lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                              ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                              xu, xr, xph, xpt >>
 
 FL7(self) == /\ pc[self] = "FL7"
-             /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
-                /\ cbe' = [cbe EXCEPT ![self] = IF MutStaleBirth THEN cbe[self] ELSE ep + 1]
-                /\ ep' = ep + 1
+             /\ IF advances[self] \/ fsub[self]
+                   THEN /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
+                           /\ cbe' = [cbe EXCEPT ![self] = IF MutStaleBirth THEN cbe[self] ELSE ep + 1]
+                           /\ ep' = ep + 1
+                   ELSE /\ TRUE
+                        /\ UNCHANGED << ep, cbe, adv >>
              /\ IF flst[self] # NULL
                    THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
                                                                  pc        |->  "FlushClear",
@@ -6302,11 +6502,11 @@ FL7(self) == /\ pc[self] = "FL7"
                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             wn, nn, advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 FlushClear(self) == /\ pc[self] = "FlushClear"
-                    /\ IF fsv[self] # 0 \/ MutFlushUnc
+                    /\ IF fsv[self] # 0 \/ MutFlushUnc \/ (MutQuiesceKeeps /\ ~advances[self])
                           THEN /\ pc' = [pc EXCEPT ![self] = "FL9"]
                                /\ UNCHANGED << fst, stack, tt, tdo, twas, tloc, 
                                                tlc, ce, ix, dt, dlo, fx >>
@@ -6371,8 +6571,9 @@ FlushClear(self) == /\ pc[self] = "FlushClear"
                                     hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                     rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                     ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                    le, la, uc, wc, wn, nn, fsv, ff, fl2, xsv, 
-                                    xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                    le, la, uc, wc, wn, nn, advances, fsv, ff, 
+                                    fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                                    xu, xr, xph, xpt >>
 
 FlushClear2(self) == /\ pc[self] = "FlushClear2"
                      /\ fx' = [fx EXCEPT ![self] = NULL]
@@ -6402,9 +6603,9 @@ FlushClear2(self) == /\ pc[self] = "FlushClear2"
                                      hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                      rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                      rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                     lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                     ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                     xr, xph, xpt >>
+                                     lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                     advances, fsv, ff, fl2, fsub, fq, xsv, 
+                                     xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 FlushClear3(self) == /\ pc[self] = "FlushClear3"
                      /\ /\ cep' = [cep EXCEPT ![self] = 0]
@@ -6427,9 +6628,9 @@ FlushClear3(self) == /\ pc[self] = "FlushClear3"
                                      hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                      rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                      ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                     xpt >>
+                                     le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                     ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                     xcap, xu, xr, xph, xpt >>
 
 FL9(self) == /\ pc[self] = "FL9"
              /\ /\ inr' = [inr EXCEPT ![self] = FALSE]
@@ -6440,6 +6641,9 @@ FL9(self) == /\ pc[self] = "FL9"
              /\ fx' = [fx EXCEPT ![self] = Head(stack[self]).fx]
              /\ ff' = [ff EXCEPT ![self] = Head(stack[self]).ff]
              /\ fl2' = [fl2 EXCEPT ![self] = Head(stack[self]).fl2]
+             /\ fsub' = [fsub EXCEPT ![self] = Head(stack[self]).fsub]
+             /\ fq' = [fq EXCEPT ![self] = Head(stack[self]).fq]
+             /\ advances' = [advances EXCEPT ![self] = Head(stack[self]).advances]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
                              sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
@@ -6457,9 +6661,41 @@ FL9(self) == /\ pc[self] = "FL9"
                              wn, nn, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
                              xpt >>
 
+QU1(self) == /\ pc[self] = "QU1"
+             /\ IF fst[tid[self]][0].lo = NULL
+                   THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                        /\ fsv' = [fsv EXCEPT ![self] = Head(stack[self]).fsv]
+                        /\ fx' = [fx EXCEPT ![self] = Head(stack[self]).fx]
+                        /\ ff' = [ff EXCEPT ![self] = Head(stack[self]).ff]
+                        /\ fl2' = [fl2 EXCEPT ![self] = Head(stack[self]).fl2]
+                        /\ fsub' = [fsub EXCEPT ![self] = Head(stack[self]).fsub]
+                        /\ fq' = [fq EXCEPT ![self] = Head(stack[self]).fq]
+                        /\ advances' = [advances EXCEPT ![self] = Head(stack[self]).advances]
+                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                   ELSE /\ fq' = [fq EXCEPT ![self] = TRUE]
+                        /\ pc' = [pc EXCEPT ![self] = "FL1"]
+                        /\ UNCHANGED << stack, advances, fsv, fx, ff, fl2, 
+                                        fsub >>
+             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
+                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
+                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
+                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
+                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
+                             lpi, le, la, uc, wc, wn, nn, xsv, xown, xf, xl, 
+                             xx, xcap, xu, xr, xph, xpt >>
+
 Flush(self) == FL1(self) \/ FL2(self) \/ FL3(self) \/ FL4(self)
-                  \/ FL6(self) \/ FL7(self) \/ FlushClear(self)
-                  \/ FlushClear2(self) \/ FlushClear3(self) \/ FL9(self)
+                  \/ FL6(self) \/ FL6b(self) \/ FL7(self)
+                  \/ FlushClear(self) \/ FlushClear2(self)
+                  \/ FlushClear3(self) \/ FL9(self) \/ QU1(self)
 
 EX1(self) == /\ pc[self] = "EX1"
              /\ IF tid[self] = NoTid /\ (bfst[self] = NULL \/ MutExitSkipsBatch)
@@ -6505,8 +6741,8 @@ EX1(self) == /\ pc[self] = "EX1"
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2 >>
+                             lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                             fsv, fx, ff, fl2, fsub, fq >>
 
 ExitAdopt(self) == /\ pc[self] = "ExitAdopt"
                    /\ IF ~MutExitNoAdopt
@@ -6537,8 +6773,9 @@ ExitAdopt(self) == /\ pc[self] = "ExitAdopt"
                                    rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                                    rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                                    pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                   nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                   xcap, xu, xr, xph, xpt >>
+                                   nn, advances, fsv, fx, ff, fl2, fsub, fq, 
+                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
+                                   xpt >>
 
 ExitSubmit(self) == /\ pc[self] = "ExitSubmit"
                     /\ xr' = [xr EXCEPT ![self] = xr[self] + 1]
@@ -6595,8 +6832,9 @@ ExitSubmit(self) == /\ pc[self] = "ExitSubmit"
                                     sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
                                     he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
                                     rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                    lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                    fl2, xsv, xown, xx, xcap, xu, xph, xpt >>
+                                    lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                                    fx, ff, fl2, fsub, fq, xsv, xown, xx, xcap, 
+                                    xu, xph, xpt >>
 
 ExitSubmit2(self) == /\ pc[self] = "ExitSubmit2"
                      /\ IF rok[self] = FALSE
@@ -6635,8 +6873,9 @@ ExitSubmit2(self) == /\ pc[self] = "ExitSubmit2"
                                      hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                                      rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                      ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr >>
+                                     le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                     ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                     xcap, xu, xr >>
 
 ExitAdvance(self) == /\ pc[self] = "ExitAdvance"
                      /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
@@ -6658,9 +6897,9 @@ ExitAdvance(self) == /\ pc[self] = "ExitAdvance"
                                      hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                      rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                      rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                     lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                     fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                     xu, xr, xph, xpt >>
+                                     lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                     advances, fsv, fx, ff, fl2, fsub, fq, xsv, 
+                                     xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 ExitTake(self) == /\ pc[self] = "ExitTake"
                   /\ IF xown[self] = NoSkip \/ MutExitInactive
@@ -6701,8 +6940,9 @@ ExitTake(self) == /\ pc[self] = "ExitTake"
                                   hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
                                   radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                                   el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                  wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                                  xl, xcap, xu, xr, xph, xpt >>
+                                  wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                                  fq, xsv, xown, xf, xl, xcap, xu, xr, xph, 
+                                  xpt >>
 
 ExitFree(self) == /\ pc[self] = "ExitFree"
                   /\ IF flst[self] # NULL /\ ~MutExitInactive
@@ -6730,9 +6970,9 @@ ExitFree(self) == /\ pc[self] = "ExitFree"
                                   hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                   rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                   rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                  lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                  fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                  xph, xpt >>
+                                  lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                                  fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, 
+                                  xl, xx, xcap, xu, xr, xph, xpt >>
 
 ExitRound(self) == /\ pc[self] = "ExitRound"
                    /\ IF (MutExitLoop /\ bfst[self] # NULL)
@@ -6754,9 +6994,9 @@ ExitRound(self) == /\ pc[self] = "ExitRound"
                                    hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
                                    rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                                    ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                   le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                   xpt >>
+                                   le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                                   ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                   xcap, xu, xr, xph, xpt >>
 
 ExitParkRest(self) == /\ pc[self] = "ExitParkRest"
                       /\ IF bfst[self] # NULL
@@ -6786,9 +7026,9 @@ ExitParkRest(self) == /\ pc[self] = "ExitParkRest"
                                       hce, hol, hoh, hps, hep, rf, rr, rsk, 
                                       rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                                       rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                      lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                      fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                      xu, xr >>
+                                      lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                      advances, fsv, fx, ff, fl2, fsub, fq, 
+                                      xsv, xown, xf, xl, xx, xcap, xu, xr >>
 
 EX6(self) == /\ pc[self] = "EX6"
              /\ sep' = [sep EXCEPT ![tid[self]][0].lo = 0]
@@ -6806,8 +7046,9 @@ EX6(self) == /\ pc[self] = "EX6"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 EX7(self) == /\ pc[self] = "EX7"
              /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = INV]
@@ -6830,8 +7071,9 @@ EX7(self) == /\ pc[self] = "EX7"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xu, xr, xph, 
+                             xpt >>
 
 EX7b(self) == /\ pc[self] = "EX7b"
               /\ sep' = [sep EXCEPT ![tid[self]][2].lo = 0]
@@ -6849,9 +7091,9 @@ EX7b(self) == /\ pc[self] = "EX7b"
                               hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
                               hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
                               rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              lc, lp, lpi, le, la, uc, wc, wn, nn, advances, 
+                              fsv, fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, 
+                              xx, xcap, xu, xr, xph, xpt >>
 
 EX7c(self) == /\ pc[self] = "EX7c"
               /\ /\ fst' = [fst EXCEPT ![tid[self]][2].lo = INV]
@@ -6882,8 +7124,9 @@ EX7c(self) == /\ pc[self] = "EX7c"
                               hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                               rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                               rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xu, xr, xph, xpt >>
+                              lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                              ff, fl2, fsub, fq, xsv, xown, xf, xl, xu, xr, 
+                              xph, xpt >>
 
 EX8(self) == /\ pc[self] = "EX8"
              /\ IF xcap[self] = <<>> /\ MutExitInactive
@@ -6944,8 +7187,8 @@ EX8(self) == /\ pc[self] = "EX8"
                              hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
                              ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xu, xr, xph, xpt >>
+                             uc, wc, wn, nn, advances, fsv, fx, ff, fl2, fsub, 
+                             fq, xsv, xown, xf, xl, xu, xr, xph, xpt >>
 
 EX9(self) == /\ pc[self] = "EX9"
              /\ /\ rv' = [rv EXCEPT ![self] = 0]
@@ -6964,8 +7207,9 @@ EX9(self) == /\ pc[self] = "EX9"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xr, xph, xpt >>
 
 EX10(self) == /\ pc[self] = "EX10"
               /\ IF xu[self] = NULL
@@ -6990,8 +7234,9 @@ EX10(self) == /\ pc[self] = "EX10"
                               hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
                               rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
                               rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                              lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xr >>
+                              lp, lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                              fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                              xcap, xr >>
 
 EX11(self) == /\ pc[self] = "EX11"
               /\ IF MutExitInactive /\ flst[self] # NULL
@@ -7018,9 +7263,9 @@ EX11(self) == /\ pc[self] = "EX11"
                               hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
                               rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
                               rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                              lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              lp, lpi, le, la, uc, wc, wn, nn, advances, fsv, 
+                              fx, ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                              xcap, xu, xr, xph, xpt >>
 
 EX12(self) == /\ pc[self] = "EX12"
               /\ IF xph[self] # NULL
@@ -7051,8 +7296,9 @@ EX12(self) == /\ pc[self] = "EX12"
                               hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                               rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                               rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                              ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                              xu, xr, xph, xpt >>
 
 EX12b(self) == /\ pc[self] = "EX12b"
                /\ IF ~MutTidEarly
@@ -7078,8 +7324,8 @@ EX12b(self) == /\ pc[self] = "EX12b"
                                hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, 
                                rprv, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
                                pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                               fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                               xu, xr, xph, xpt >>
+                               advances, fsv, fx, ff, fl2, fsub, fq, xsv, xown, 
+                               xf, xl, xx, xcap, xu, xr, xph, xpt >>
 
 EX13(self) == /\ pc[self] = "EX13"
               /\ /\ cep' = [cep EXCEPT ![self] = 0]
@@ -7113,7 +7359,7 @@ EX13(self) == /\ pc[self] = "EX13"
                               hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
                               rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
                               el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                              wn, nn, fsv, fx, ff, fl2 >>
+                              wn, nn, advances, fsv, fx, ff, fl2, fsub, fq >>
 
 Exit(self) == EX1(self) \/ ExitAdopt(self) \/ ExitSubmit(self)
                  \/ ExitSubmit2(self) \/ ExitAdvance(self)
@@ -7128,9 +7374,9 @@ TH2(self) == /\ pc[self] = "TH2"
              /\ IF opi'[self] > Len(Prog[self])
                    THEN /\ pc' = [pc EXCEPT ![self] = "Done"]
                         /\ UNCHANGED << stack, pce, pa, lc, lp, lpi, le, la, 
-                                        uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, 
-                                        xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                        xpt >>
+                                        uc, wc, wn, nn, advances, fsv, fx, ff, 
+                                        fl2, fsub, fq, xsv, xown, xf, xl, xx, 
+                                        xcap, xu, xr, xph, xpt >>
                    ELSE /\ IF Prog[self][opi'[self]].k = "idle"
                               THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
                                                                             pc        |->  "TI2",
@@ -7141,9 +7387,10 @@ TH2(self) == /\ pc[self] = "TH2"
                                    /\ pa' = [pa EXCEPT ![self] = 0]
                                    /\ pc' = [pc EXCEPT ![self] = "PN1"]
                                    /\ UNCHANGED << lc, lp, lpi, le, la, uc, wc, 
-                                                   wn, nn, fsv, fx, ff, fl2, 
-                                                   xsv, xown, xf, xl, xx, xcap, 
-                                                   xu, xr, xph, xpt >>
+                                                   wn, nn, advances, fsv, fx, 
+                                                   ff, fl2, fsub, fq, xsv, 
+                                                   xown, xf, xl, xx, xcap, xu, 
+                                                   xr, xph, xpt >>
                               ELSE /\ IF Prog[self][opi'[self]].k = "pin"
                                          THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
                                                                                        pc        |->  "TH2",
@@ -7155,10 +7402,12 @@ TH2(self) == /\ pc[self] = "TH2"
                                               /\ pc' = [pc EXCEPT ![self] = "PN1"]
                                               /\ UNCHANGED << lc, lp, lpi, le, 
                                                               la, uc, wc, wn, 
-                                                              nn, fsv, fx, ff, 
-                                                              fl2, xsv, xown, 
-                                                              xf, xl, xx, xcap, 
-                                                              xu, xr, xph, xpt >>
+                                                              nn, advances, 
+                                                              fsv, fx, ff, fl2, 
+                                                              fsub, fq, xsv, 
+                                                              xown, xf, xl, xx, 
+                                                              xcap, xu, xr, 
+                                                              xph, xpt >>
                                          ELSE /\ IF Prog[self][opi'[self]].k = "unpin"
                                                     THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Unpin",
                                                                                                   pc        |->  "TH2" ] >>
@@ -7173,10 +7422,13 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                          wc, 
                                                                          wn, 
                                                                          nn, 
+                                                                         advances, 
                                                                          fsv, 
                                                                          fx, 
                                                                          ff, 
                                                                          fl2, 
+                                                                         fsub, 
+                                                                         fq, 
                                                                          xsv, 
                                                                          xown, 
                                                                          xf, 
@@ -7206,10 +7458,13 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                     wc, 
                                                                                     wn, 
                                                                                     nn, 
+                                                                                    advances, 
                                                                                     fsv, 
                                                                                     fx, 
                                                                                     ff, 
                                                                                     fl2, 
+                                                                                    fsub, 
+                                                                                    fq, 
                                                                                     xsv, 
                                                                                     xown, 
                                                                                     xf, 
@@ -7230,10 +7485,13 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                /\ UNCHANGED << wc, 
                                                                                                wn, 
                                                                                                nn, 
+                                                                                               advances, 
                                                                                                fsv, 
                                                                                                fx, 
                                                                                                ff, 
                                                                                                fl2, 
+                                                                                               fsub, 
+                                                                                               fq, 
                                                                                                xsv, 
                                                                                                xown, 
                                                                                                xf, 
@@ -7254,10 +7512,13 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                           /\ wn' = [wn EXCEPT ![self] = NULL]
                                                                                           /\ pc' = [pc EXCEPT ![self] = "WR1"]
                                                                                           /\ UNCHANGED << nn, 
+                                                                                                          advances, 
                                                                                                           fsv, 
                                                                                                           fx, 
                                                                                                           ff, 
                                                                                                           fl2, 
+                                                                                                          fsub, 
+                                                                                                          fq, 
                                                                                                           xsv, 
                                                                                                           xown, 
                                                                                                           xf, 
@@ -7275,10 +7536,13 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                                                           \o stack[self]]
                                                                                                      /\ nn' = [nn EXCEPT ![self] = NULL]
                                                                                                      /\ pc' = [pc EXCEPT ![self] = "RN1"]
-                                                                                                     /\ UNCHANGED << fsv, 
+                                                                                                     /\ UNCHANGED << advances, 
+                                                                                                                     fsv, 
                                                                                                                      fx, 
                                                                                                                      ff, 
                                                                                                                      fl2, 
+                                                                                                                     fsub, 
+                                                                                                                     fq, 
                                                                                                                      xsv, 
                                                                                                                      xown, 
                                                                                                                      xf, 
@@ -7290,17 +7554,23 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                                      xph, 
                                                                                                                      xpt >>
                                                                                                 ELSE /\ IF Prog[self][opi'[self]].k = "fl"
-                                                                                                           THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
-                                                                                                                                                         pc        |->  "TH2",
-                                                                                                                                                         fsv       |->  fsv[self],
-                                                                                                                                                         fx        |->  fx[self],
-                                                                                                                                                         ff        |->  ff[self],
-                                                                                                                                                         fl2       |->  fl2[self] ] >>
-                                                                                                                                                     \o stack[self]]
+                                                                                                           THEN /\ /\ advances' = [advances EXCEPT ![self] = TRUE]
+                                                                                                                   /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
+                                                                                                                                                            pc        |->  "TH2",
+                                                                                                                                                            fsv       |->  fsv[self],
+                                                                                                                                                            fx        |->  fx[self],
+                                                                                                                                                            ff        |->  ff[self],
+                                                                                                                                                            fl2       |->  fl2[self],
+                                                                                                                                                            fsub      |->  fsub[self],
+                                                                                                                                                            fq        |->  fq[self],
+                                                                                                                                                            advances  |->  advances[self] ] >>
+                                                                                                                                                        \o stack[self]]
                                                                                                                 /\ fsv' = [fsv EXCEPT ![self] = 0]
                                                                                                                 /\ fx' = [fx EXCEPT ![self] = NULL]
                                                                                                                 /\ ff' = [ff EXCEPT ![self] = NULL]
                                                                                                                 /\ fl2' = [fl2 EXCEPT ![self] = NULL]
+                                                                                                                /\ fsub' = [fsub EXCEPT ![self] = FALSE]
+                                                                                                                /\ fq' = [fq EXCEPT ![self] = FALSE]
                                                                                                                 /\ pc' = [pc EXCEPT ![self] = "FL1"]
                                                                                                                 /\ UNCHANGED << xsv, 
                                                                                                                                 xown, 
@@ -7312,40 +7582,26 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                                                 xr, 
                                                                                                                                 xph, 
                                                                                                                                 xpt >>
-                                                                                                           ELSE /\ IF Prog[self][opi'[self]].k = "ex"
-                                                                                                                      THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Exit",
-                                                                                                                                                                    pc        |->  "TH2",
-                                                                                                                                                                    xsv       |->  xsv[self],
-                                                                                                                                                                    xown      |->  xown[self],
-                                                                                                                                                                    xf        |->  xf[self],
-                                                                                                                                                                    xl        |->  xl[self],
-                                                                                                                                                                    xx        |->  xx[self],
-                                                                                                                                                                    xcap      |->  xcap[self],
-                                                                                                                                                                    xu        |->  xu[self],
-                                                                                                                                                                    xr        |->  xr[self],
-                                                                                                                                                                    xph       |->  xph[self],
-                                                                                                                                                                    xpt       |->  xpt[self] ] >>
-                                                                                                                                                                \o stack[self]]
-                                                                                                                           /\ xsv' = [xsv EXCEPT ![self] = 0]
-                                                                                                                           /\ xown' = [xown EXCEPT ![self] = NoSkip]
-                                                                                                                           /\ xf' = [xf EXCEPT ![self] = NULL]
-                                                                                                                           /\ xl' = [xl EXCEPT ![self] = NULL]
-                                                                                                                           /\ xx' = [xx EXCEPT ![self] = NULL]
-                                                                                                                           /\ xcap' = [xcap EXCEPT ![self] = <<>>]
-                                                                                                                           /\ xu' = [xu EXCEPT ![self] = NULL]
-                                                                                                                           /\ xr' = [xr EXCEPT ![self] = 0]
-                                                                                                                           /\ xph' = [xph EXCEPT ![self] = NULL]
-                                                                                                                           /\ xpt' = [xpt EXCEPT ![self] = NULL]
-                                                                                                                           /\ pc' = [pc EXCEPT ![self] = "EX1"]
-                                                                                                                      ELSE /\ IF Prog[self][opi'[self]].k = "join"
-                                                                                                                                 THEN /\ pc' = [pc EXCEPT ![self] = "THJ"]
-                                                                                                                                 ELSE /\ IF Prog[self][opi'[self]].k = "awaitrel"
-                                                                                                                                            THEN /\ pc' = [pc EXCEPT ![self] = "THR"]
-                                                                                                                                            ELSE /\ IF Prog[self][opi'[self]].k = "after"
-                                                                                                                                                       THEN /\ pc' = [pc EXCEPT ![self] = "THA"]
-                                                                                                                                                       ELSE /\ pc' = [pc EXCEPT ![self] = "THJ"]
-                                                                                                                           /\ UNCHANGED << stack, 
-                                                                                                                                           xsv, 
+                                                                                                           ELSE /\ IF Prog[self][opi'[self]].k = "qu"
+                                                                                                                      THEN /\ /\ advances' = [advances EXCEPT ![self] = FALSE]
+                                                                                                                              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
+                                                                                                                                                                       pc        |->  "TH2",
+                                                                                                                                                                       fsv       |->  fsv[self],
+                                                                                                                                                                       fx        |->  fx[self],
+                                                                                                                                                                       ff        |->  ff[self],
+                                                                                                                                                                       fl2       |->  fl2[self],
+                                                                                                                                                                       fsub      |->  fsub[self],
+                                                                                                                                                                       fq        |->  fq[self],
+                                                                                                                                                                       advances  |->  advances[self] ] >>
+                                                                                                                                                                   \o stack[self]]
+                                                                                                                           /\ fsv' = [fsv EXCEPT ![self] = 0]
+                                                                                                                           /\ fx' = [fx EXCEPT ![self] = NULL]
+                                                                                                                           /\ ff' = [ff EXCEPT ![self] = NULL]
+                                                                                                                           /\ fl2' = [fl2 EXCEPT ![self] = NULL]
+                                                                                                                           /\ fsub' = [fsub EXCEPT ![self] = FALSE]
+                                                                                                                           /\ fq' = [fq EXCEPT ![self] = FALSE]
+                                                                                                                           /\ pc' = [pc EXCEPT ![self] = "FL1"]
+                                                                                                                           /\ UNCHANGED << xsv, 
                                                                                                                                            xown, 
                                                                                                                                            xf, 
                                                                                                                                            xl, 
@@ -7355,10 +7611,56 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                                                            xr, 
                                                                                                                                            xph, 
                                                                                                                                            xpt >>
-                                                                                                                /\ UNCHANGED << fsv, 
-                                                                                                                                fx, 
-                                                                                                                                ff, 
-                                                                                                                                fl2 >>
+                                                                                                                      ELSE /\ IF Prog[self][opi'[self]].k = "ex"
+                                                                                                                                 THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Exit",
+                                                                                                                                                                               pc        |->  "TH2",
+                                                                                                                                                                               xsv       |->  xsv[self],
+                                                                                                                                                                               xown      |->  xown[self],
+                                                                                                                                                                               xf        |->  xf[self],
+                                                                                                                                                                               xl        |->  xl[self],
+                                                                                                                                                                               xx        |->  xx[self],
+                                                                                                                                                                               xcap      |->  xcap[self],
+                                                                                                                                                                               xu        |->  xu[self],
+                                                                                                                                                                               xr        |->  xr[self],
+                                                                                                                                                                               xph       |->  xph[self],
+                                                                                                                                                                               xpt       |->  xpt[self] ] >>
+                                                                                                                                                                           \o stack[self]]
+                                                                                                                                      /\ xsv' = [xsv EXCEPT ![self] = 0]
+                                                                                                                                      /\ xown' = [xown EXCEPT ![self] = NoSkip]
+                                                                                                                                      /\ xf' = [xf EXCEPT ![self] = NULL]
+                                                                                                                                      /\ xl' = [xl EXCEPT ![self] = NULL]
+                                                                                                                                      /\ xx' = [xx EXCEPT ![self] = NULL]
+                                                                                                                                      /\ xcap' = [xcap EXCEPT ![self] = <<>>]
+                                                                                                                                      /\ xu' = [xu EXCEPT ![self] = NULL]
+                                                                                                                                      /\ xr' = [xr EXCEPT ![self] = 0]
+                                                                                                                                      /\ xph' = [xph EXCEPT ![self] = NULL]
+                                                                                                                                      /\ xpt' = [xpt EXCEPT ![self] = NULL]
+                                                                                                                                      /\ pc' = [pc EXCEPT ![self] = "EX1"]
+                                                                                                                                 ELSE /\ IF Prog[self][opi'[self]].k = "join"
+                                                                                                                                            THEN /\ pc' = [pc EXCEPT ![self] = "THJ"]
+                                                                                                                                            ELSE /\ IF Prog[self][opi'[self]].k = "awaitrel"
+                                                                                                                                                       THEN /\ pc' = [pc EXCEPT ![self] = "THR"]
+                                                                                                                                                       ELSE /\ IF Prog[self][opi'[self]].k = "after"
+                                                                                                                                                                  THEN /\ pc' = [pc EXCEPT ![self] = "THA"]
+                                                                                                                                                                  ELSE /\ pc' = [pc EXCEPT ![self] = "THJ"]
+                                                                                                                                      /\ UNCHANGED << stack, 
+                                                                                                                                                      xsv, 
+                                                                                                                                                      xown, 
+                                                                                                                                                      xf, 
+                                                                                                                                                      xl, 
+                                                                                                                                                      xx, 
+                                                                                                                                                      xcap, 
+                                                                                                                                                      xu, 
+                                                                                                                                                      xr, 
+                                                                                                                                                      xph, 
+                                                                                                                                                      xpt >>
+                                                                                                                           /\ UNCHANGED << advances, 
+                                                                                                                                           fsv, 
+                                                                                                                                           fx, 
+                                                                                                                                           ff, 
+                                                                                                                                           fl2, 
+                                                                                                                                           fsub, 
+                                                                                                                                           fq >>
                                                                                                      /\ nn' = nn
                                                                                           /\ UNCHANGED << wc, 
                                                                                                           wn >>
@@ -7399,8 +7701,9 @@ THJ(self) == /\ pc[self] = "THJ"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 THR(self) == /\ pc[self] = "THR"
              /\ rel # {}
@@ -7418,8 +7721,9 @@ THR(self) == /\ pc[self] = "THR"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 THA(self) == /\ pc[self] = "THA"
              /\ opi[Prog[self][opi[self]].c] > Prog[self][opi[self]].n \/ pc[Prog[self][opi[self]].c] = "Done"
@@ -7437,8 +7741,9 @@ THA(self) == /\ pc[self] = "THA"
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TI2(self) == /\ pc[self] = "TI2"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Unpin",
@@ -7458,8 +7763,9 @@ TI2(self) == /\ pc[self] = "TI2"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             lpi, le, la, uc, wc, wn, nn, advances, fsv, fx, 
+                             ff, fl2, fsub, fq, xsv, xown, xf, xl, xx, xcap, 
+                             xu, xr, xph, xpt >>
 
 TI3(self) == /\ pc[self] = "TI3"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
@@ -7483,8 +7789,9 @@ TI3(self) == /\ pc[self] = "TI3"
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
                              rlate, rn, ecnt, ef, el, ewas, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             la, uc, wc, wn, nn, advances, fsv, fx, ff, fl2, 
+                             fsub, fq, xsv, xown, xf, xl, xx, xcap, xu, xr, 
+                             xph, xpt >>
 
 Th(self) == TH2(self) \/ THJ(self) \/ THR(self) \/ THA(self) \/ TI2(self)
                \/ TI3(self)
@@ -7627,10 +7934,12 @@ TryCtl == 5 + 7 * MaxTid
 RetireCtl == 7 + TryCtl + TidCtl + HelpReadCtl
 AdoptCtl == 6 + 2 * MaxTid
 PinCtl == 2 + TidCtl + PinAttempts * (2 + DoUpdCtl) + SlowCtl
-\* FL1-FL4, FL6, FL7, FlushClear-FlushClear3, FL9, a tid claimed, two traversals, two drains.
+\* FL1-FL4, FL6, FL7, FlushClear-FlushClear3, FL9, a tid claimed, two traversals, two drains; a
+\* quiesce adds QU1 and a second pass over FL1 (2), FL6b (1) and the park of a batch it could not
+\* place (PK0, OrphanTake, OrphanPublish, OrphanCount: 4).
 \* The claim (TidCtl, the steps of alloc_tid) is new: a flush on a thread with no tid claims one
 \* when batches are parked, and a bound without those steps would not cover that flush.
-FlushCtl == 10 + TidCtl + 2 * TICCtl + 2 * DrainCtl + AdoptCtl + TryCtl + HelpReadCtl
+FlushCtl == 13 + TidCtl + 4 + 2 * TICCtl + 2 * DrainCtl + AdoptCtl + TryCtl + HelpReadCtl
 \* The exit of a thread with no tid whose batch holds a value first claims one, then passes EX1
 \* once more: the last TidCtl + 1 count those steps, which the bound would otherwise leave out.
 ExitCtl == 20 + ExitRounds * (8 + TryCtl + TICCtl) + TidCtl + 6 + TidCtl + 1
@@ -7697,7 +8006,7 @@ EscalationBounded ==
 FlushReleases ==
     \A t \in Threads :
         (/\ pc[t] = "TH2" /\ stack[t] = <<>> /\ pinc[t] = 0 /\ tid[t] # NoTid
-         /\ opi[t] \in DOMAIN Prog[t] /\ Prog[t][opi[t]].k = "fl")
+         /\ opi[t] \in DOMAIN Prog[t] /\ Prog[t][opi[t]].k \in {"fl", "qu"})
         => sep[tid[t]][0].lo = 0
 
 \* In a section (or while its flush or exit runs destructors), a thread's cached epoch never
@@ -7749,6 +8058,10 @@ NoFlushClaimW ==
 NoExitClaimW ==
     \A t \in Threads : \A i \in DOMAIN stack[t] :
         ~(stack[t][i].procedure = "AllocTid" /\ stack[t][i].pc = "EX1")
+\* "No quiesce finds a node in its own list on its fast path's second read." QU1 reached with a tid
+\* and a non-empty list: a submission that raced the quiesce's clear inserted after it.
+NoQuiesceRescanW ==
+    \A t \in Threads : ~(pc[t] = "QU1" /\ tid[t] # NoTid /\ fst[tid[t]][0].lo # NULL)
 NoRecycleW == \A t \in Threads : ~(pc[t] = "TidClaim3" /\ MinOf(aseen[t]) \in rel)
 NoCacheFreeW == \A t \in Threads : ~(pc[t] = "TC2" /\ tdo[t])
 NoReentrantTransitionW == \A t \in Threads : ~(lvl[t] > 0 /\ pc[t] = "PNC")

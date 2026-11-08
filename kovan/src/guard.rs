@@ -1592,6 +1592,35 @@ impl Handle {
     /// one first, as its first pin would, when some ID holds a chain or its
     /// own batch holds values it retired without pinning.
     fn flush(&self) {
+        self.flush_inner(true);
+    }
+
+    /// Quiesce: `flush` that advances the epoch only for a batch it submitted.
+    /// A thread at rest (nothing pinned, retired or parked since the last
+    /// call) returns after reads alone, no store to a shared line.
+    fn quiesce(&self) {
+        // The own slot's list too: a submission racing the last clear may
+        // have inserted a node after it, which only a pass over the slot frees.
+        if self.cached_epoch.get() == 0
+            && self.batch_first.get().is_null()
+            && self.free_list.get().is_null()
+            && !crate::slot::orphans_parked()
+            && self
+                .tid
+                .get()
+                .is_none_or(|tid| self.global().thread_slots(tid).first[0].load_lo() == 0)
+        {
+            return;
+        }
+        #[cfg(test)]
+        tests::QUIESCE_BODIES.with(|n| n.set(n.get() + 1));
+        self.flush_inner(false);
+    }
+
+    /// The body of `flush` (`advance`) and `quiesce` (not): without `advance`
+    /// the epoch moves only for a submitted batch, as after a retire that
+    /// places one, so the readers holding it traverse it at their next pin.
+    fn flush_inner(&self, advance: bool) {
         // A thread that has never claimed an ID has no slot to drain, but it
         // must still adopt: a thread that only ever flushes would otherwise
         // leave what exited threads parked for good. It claims an ID only when
@@ -1654,18 +1683,27 @@ impl Handle {
         }
 
         // Adopt any orphaned batch, then finalize and submit the partial
-        // batch. On failure, keep accumulating - never leaked.
+        // batch. On failure, keep accumulating (quiesce: park it) - never leaked.
         self.adopt_orphans();
+        let mut submitted = false;
         if let Some((first, last)) = self.take_batch() {
             let own = (saved_pin == 0).then_some(tid);
-            if !self.try_retire(first, last, own) {
+            submitted = self.try_retire(first, last, own);
+            if !submitted && advance {
                 self.merge_batch(first, last);
+            } else if !submitted {
+                // Quiesce: too few nodes for the eligible slots. Park the batch on
+                // this ID for a live thread's next flush or quiesce, as an exit
+                // does, so a thread about to block holds nothing it retired.
+                unsafe { global.park_orphans(tid, last, last) };
             }
         }
 
         // Help pending slow-path threads before advancing the epoch (the
         // wait-free pin() bound requires every advance to be helped first).
-        self.increment_era(tid);
+        if advance || submitted {
+            self.increment_era(tid);
+        }
 
         self.drain_free_list();
 
@@ -2267,6 +2305,36 @@ pub fn flush() {
             && on_exiting_handle(Handle::flush).is_none()
         {
             on_late_handle(Handle::flush);
+        }
+    }
+}
+
+/// Leaves the reclamation protocol before this thread blocks or parks for a
+/// time it cannot bound (a condvar or futex wait, a park, a blocking receive).
+///
+/// A thread's reservation stays published after its last [`Guard`] drops, so
+/// a thread that pinned once and then blocks holds back every batch retired at
+/// or after its epoch until its next pin, flush or exit. With no guard live on
+/// this thread, `quiesce` does what [`flush`] does (drains its slots, adopts
+/// parked batches, submits its partial batch, publishes epoch 0) but advances
+/// the global epoch only when it submitted a batch; `flush` always advances
+/// it, sending every other thread's next pin down its slow path. A thread that
+/// quiesced and has not pinned or retired since returns at once, after a few
+/// loads and no store to a shared line: cheap enough to precede every park.
+///
+/// With a guard live the reservation is left alone (the guard needs it) and
+/// only the partial batch is submitted.
+pub fn quiesce() {
+    #[cfg(feature = "nightly")]
+    {
+        HANDLE.quiesce()
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        if HANDLE.try_with(|handle| handle.quiesce()).is_err()
+            && on_exiting_handle(Handle::quiesce).is_none()
+        {
+            on_late_handle(Handle::quiesce);
         }
     }
 }

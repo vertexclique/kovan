@@ -75,7 +75,7 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 ## Coverage
 
 - `tla/reclaim/`: kovan's memory reclamation (pin, the protected load, retire, the traversal,
-  flush, a thread's exit and the hand-over of its id, the flush and the exit of a thread that
+  flush and quiesce, a thread's exit and the hand-over of its id, the flush and the exit of a thread that
   never pinned, a value retired after a thread's exit, a critical section after a thread's exit,
   the recycling of retired nodes, the epoch's advance at a thread's first retire, the pin that
   traverses what was attached to its slot, the exit that adopts what earlier exits parked), 116
