@@ -877,6 +877,7 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_reenter_rt` | The same, the cache freed by a retire's help of the slow path. | nodes 9, EF 1, cache 0 | pass |
 | `RC_reentrant` | A retire outside any guard frees its batch at once; the drop it runs pins, enters, loads and drops its guard. | threads 1, tids 1, nodes 3 | pass |
 | `RC_slow_dtor` | A slow path detaching its list while a helper hands it over; a cached drop reads a cell, replaces it and retires what it read. | cells 2, nodes 8, RF 2, cache 0, pin attempts 1 | pass |
+| `RC_slow_frees` | A pending slow path with two batches placed in its slot, the first holding node 1, whose drop reads and replaces cell 2 (`P_slow_frees`). | cells 2, nodes 9, RF 2, EF 2, cache 0, pin attempts 1 | pass |
 | `RC_hand_over` | A slow-path hand-over racing a retire into the pending thread's slot. Steps not counted. | threads 3, tids 3, nodes 12, pin attempts 1 | pass |
 | `RC_help_follows` | A pinner whose every transition takes the slow path, advancing the epoch between its pins, helped from its second request on by another thread's flush. | nodes 8, RF 6, EF 1, pin attempts 1, epochs 8, steps counted yes | pass |
 | `RC_live` | Weak fairness for every thread: every program ends. | nodes 7 | pass |

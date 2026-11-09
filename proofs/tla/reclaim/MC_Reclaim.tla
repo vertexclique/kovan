@@ -301,6 +301,15 @@ P_help_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, Rt, U>>
 \* reads cell 2, replaces it and retires the value it read in a batch of two.
 P_slow_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, U>>
                                           ELSE <<After(1, 4), Rt, Rt>>]
+\* A slow path that frees (slow_path_frees). Thread 1's pin takes the slow path (one attempt).
+\* Thread 2 replaces cell 1 (retiring node 1, whose drop reads cell 2 and replaces it) and
+\* retires three more nodes: its two batches of two are placed in thread 1's slot while the pin
+\* is pending, the first (holding node 1) is taken onto the cache by the slow path's pass, and
+\* the second, detached once the slot is closed, makes the traversal free the full cache. The
+\* drop then runs with the slot closed: the value it read is retired into a batch no slot takes
+\* and freed while the drop still holds it. Unmutated, the drop runs after the republication.
+P_slow_frees == [t \in {1, 2} |-> IF t = 1 THEN <<P, U>>
+                                          ELSE <<Wr(1), Rt, Rt, Rt>>]
 \* A slow-path hand-over (thread 1's pin, pending once thread 2's first flush advanced the
 \* epoch under it, completed by thread 2's second flush) racing thread 3's third retire into
 \* thread 1's slot (its first two only fill the batch).

@@ -42,6 +42,7 @@ RC_mut_cache_copied                MC_Reclaim         violated:NoDoubleFree
 RC_mut_help_before_submit          MC_Reclaim         violated:NoNullDeref
 RC_mut_ttas_locks                  MC_Reclaim         violated:Thread2Ends
 RC_mut_exit_handle_unreachable     MC_Reclaim         violated:NoUseAfterFree
+RC_slow_frees                      MC_Reclaim         pass
 RC_mut_slow_path_frees             MC_Reclaim         violated:NoUseAfterFree
 RC_mut_detach_unclosed             MC_Reclaim         violated:DetachNotStarved
 RC_mut_help_follows_next_request   MC_Reclaim         violated:LoopBounds
