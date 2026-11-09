@@ -4,7 +4,11 @@ name: TLA+
 # `proofs/tla/run_tlc.sh shard <k> 16`, which deals every configuration of every family under
 # proofs/tla/ (a directory with an EXPECTED.txt) out to 16 shares by the seconds it took on a CI
 # runner (proofs/tla/ci-seconds.txt, or its family's tlc-run.txt), and checks share k against
-# EXPECTED.txt. The 16 jobs run at once, so a
+# EXPECTED.txt. The configurations expected to break a property (the mutations and witnesses) run
+# in a stage of their own, 8 jobs of a few minutes each (TLC_KIND=violation, 15 minutes each at
+# most), so a change that stops a program reaching what it checks shows every such configuration
+# in one report, minutes after the push; the 16 share jobs check the passing ones (TLC_KIND=pass).
+# The jobs run at once, so a
 # new model needs no change to this workflow. The whole check stays within an hour: a share is
 # stopped and fails at 58 minutes (TLC_DEADLINE, the rest of the job's 60 is its setup), and a
 # model that outgrows the budget is cut down, not given more time. A local run, `run_tlc.sh
@@ -37,6 +41,30 @@ jobs:
       - name: Check the reclamation model's code map
         run: python3 tools/proof-map-check.py
 
+  mutations:
+    name: TLA+ mutations ${{ matrix.shard }} of 8
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Run one share of the mutations and witnesses
+        run: .github/workflows/tla.sh
+        env:
+          TLC_KIND: violation
+          TLC_SHARD: ${{ matrix.shard }}
+          TLC_SHARDS: 8
+          TLC_LIMIT: 900
+          TLC_DEADLINE: 1380
+
   share:
     name: TLA+ share ${{ matrix.shard }} of 16
     runs-on: ubuntu-latest
@@ -55,6 +83,7 @@ jobs:
       - name: Run one share of the TLA+ models
         run: .github/workflows/tla.sh
         env:
+          TLC_KIND: pass
           TLC_SHARD: ${{ matrix.shard }}
           TLC_SHARDS: 16
           TLC_LIMIT: 3480
@@ -62,7 +91,7 @@ jobs:
 
   tla:
     name: TLA+ model checking
-    needs: [share, map]
+    needs: [share, mutations, map]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -70,6 +99,10 @@ jobs:
         run: |
           [ "${{ needs.map.result }}" = success ] || {
             echo "the reclamation model's code map does not match kovan/src: ${{ needs.map.result }}" >&2; exit 1; }
+      - name: Every mutation and witness broke what it must
+        run: |
+          [ "${{ needs.mutations.result }}" = success ] || {
+            echo "a mutation or witness found nothing, failed or was cancelled: ${{ needs.mutations.result }}" >&2; exit 1; }
       - name: Every share matched EXPECTED.txt
         run: |
           [ "${{ needs.share.result }}" = success ] || {
