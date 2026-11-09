@@ -1121,6 +1121,7 @@ impl Handle {
     /// - `destructor` must already be set on the node.
     /// - `birth_epoch` must already be set correctly.
     /// - The node must not be enqueued more than once.
+    #[inline(always)]
     unsafe fn enqueue_node(&self, node_ptr: *mut RetiredNode) {
         // A retire outside every reclamation frees what its submission and
         // its helping released itself, once they are done; a nested one
@@ -1171,6 +1172,24 @@ impl Handle {
         let count = self.batch_count.get() + 1;
         self.batch_count.set(count);
 
+        // The common retire only links its node and counts it, inline; the
+        // steps below run, in this order, only when one of them is due.
+        let alloc_count = self.alloc_counter.get();
+        if count.is_multiple_of(RETIRE_FREQ)
+            || alloc_count.is_multiple_of(EPOCH_FREQ)
+            || (outermost && !self.free_list.get().is_null())
+        {
+            self.enqueue_due(count, outermost);
+        } else {
+            self.alloc_counter.set(alloc_count + 1);
+        }
+    }
+
+    /// The submission, the era advance and the drain of a retire
+    /// (`enqueue_node`), out of its inline line: run when one is due.
+    #[cold]
+    #[inline(never)]
+    fn enqueue_due(&self, count: usize, outermost: bool) {
         let mut placed = false;
         if count.is_multiple_of(RETIRE_FREQ) {
             // Set in_reclaim: a destructor a drain runs from here (a batch
