@@ -70,6 +70,15 @@ Not modelled, and why:
   pointer half and checks that it is 0 (`WellFormed`).
 - Memory orderings (see above), and the fallback `WordPair` of targets without native 128-bit
   atomics, whose sub-word operations are compare-exchange loops (`lib.rs`: not lock-free there).
+- The orderings this model assumes were wrong in 0.2.4 in two places: the store of the left tag
+  in `leave` (0.2.4's `slot.rs:499`, Relaxed; 0.2.5 stores it Release) and the outermost pin's fast
+  path on x86-64, where `publish_fence` after the activation is a no-op (0.2.4's `guard.rs:653`,
+  `guard.rs:1962`). Under Miri a
+  writer that replaced a value and submitted it at once, against readers that pin, load, read and
+  drop again and again, had one reader's drop free the value another reader was still reading.
+  No interleaving of this model makes that free: the same shape passes here ("A writer and two
+  readers" below), and the mutations that make the same free in an interleaving break it. The
+  ordering model (`proofs/tla/ordering/`) checks those orderings.
 - Allocation (`Box::new`, `ensure_page`): a fresh node, and a filler, is allocated in one step,
   and the tids stay below `MaxTid` (65,536 in the code).
 - The pool's own code: the free list is the recycler's (the example in `reclaim.rs` is a
@@ -400,6 +409,74 @@ is a finding to read, not a number to adjust. The PlusCal translation block of `
 lags the algorithm until `pcal.trans` is run and its output committed: `run_tlc.sh` does not run
 the translator (the command is in "What is modelled").
 
+## A writer and two readers
+
+### The shape
+
+A workload failed under Miri on kovan 0.2.4. One writer replaces an `AtomOption` value
+(`store_some`: the pointer swapped, the old node retired) and submits it at once (63 more retires
+fill the batch to `RETIRE_FREQ`, then `flush`), while four readers each pin, load the value, walk
+it under the guard and drop the guard, again and again. One reader's drop (its leave, then the
+drain of its free list) freed the value another reader was still walking. The cause is two
+orderings ("Not modelled" above), which this model takes as sequentially consistent, so it cannot
+show that free. What it checks is the shape in every interleaving it allows: the configurations
+before these ran with one or two threads and one cell, and none ran a writer against two readers
+on the pin's fast path.
+
+The programs (`MC_Reclaim.tla`). Thread 1, the writer, pins, swaps cell 1 to a fresh node
+(retiring node 1), drops its guard and flushes, so its batch of one is placed padded, a filler
+for each eligible reader slot; with `RetireFreq` 2 the write's retire only fills the batch, as the
+code's first retire of 64 does. Threads 2 and 3, the readers, each run two sections of pin, load
+and drop; a second pin that finds the epoch unchanged takes the fast path (`PNF`: the activation's
+exchange, nothing published). A pointer a reader loaded is held, and may be read, until its guard
+drops, and `NoUseAfterFree` breaks if its node is freed meanwhile.
+
+With no order between the three threads the check is past the budget of one configuration (the
+first run passed 800 thousand distinct states in three minutes on one worker, its queue still
+growing; the writer with one reader is 73 thousand states), so the writer starts at a chosen
+point of each reader's program, and two programs cover the shape in halves:
+
+- `P_swap_readers`: the writer starts once reader 2 has pinned its second section and reader 3
+  has loaded node 1 in its second; both second pins took the fast path. Reader 2's load meets the
+  swap and both epoch advances in every order (node 1 or the fresh node, a raise, an escalation),
+  and both readers' drops (leave, traversal, drain) race the writer's swap, retire, drop and
+  padded flush, and each other.
+- `P_swap_readers_turn`: both readers hold node 1 when the writer starts, reader 2 in its first
+  section, reader 3 on the fast path in its second. Reader 2 waits until the writer has dropped
+  its guard, then drops its own (the tag, the exchange to INVPTR), pins again, loads and drops
+  while the flush's scan and inserts run; reader 3 keeps node 1 until reader 2 has ended, so
+  reader 2's drop and drain run while the other reader still reads. An insert meets reader 2's
+  slot in each of the three ways: rolled back after the leave's exchange, taken back after it
+  read the tag, and taken by the next pin's exchange (the witnesses `NoUndoW`, `NoInsertUndoW`
+  and `NoTakenInsertW`, run on this program on 2026-11-10, each broke within 6 thousand states).
+
+What the gates leave out: the readers' first pins while the writer runs, and both readers
+turning over during the flush at once. The configurations with one reader interleave its pins
+with a writer (`RC_rw`, `RC_pin_react`, `RC_tag_late`), and `RC_tag_race` and `RC_leave_race3`
+run three threads.
+
+### The configurations
+
+| configuration | expected | distinct states | seconds | what it checks |
+|---|---|---|---|---|
+| `RC_swap_readers` | pass | 81,660 | 20 | every safety invariant on `P_swap_readers` |
+| `RC_swap_readers_turn` | pass | 15,908 | 7 | every safety invariant on `P_swap_readers_turn` |
+| `RC_live_swap_readers_turn` | pass | 15,908 | 19 | `DrainLive` under weak fairness on `P_swap_readers_turn`: every retired node is eventually released, no thread pinning or flushing after its program ends |
+| `RC_mut_pin_skips_readers` | `violated:NoUseAfterFree` | 19,284 | 6 | `pin_skips_activation` on `P_swap_readers`: the fast-path pins activate nothing, the flush's scan finds no reader slot active, and the flush frees node 1 while reader 3 holds it |
+| `RC_mut_early_free_readers` | `violated:NoUseAfterFree` | 55,364 | 13 | `early_free` on `P_swap_readers`: the flush places the batch in both readers' slots (count 2), and reader 3's drop takes the count to zero with its traversal and frees node 1 in its drain while reader 2 holds it, the free Miri saw |
+| `RC_mut_tag_clear_late_readers` | `violated:PinnedIsActive` | 5,118 | 4 | `tag_clear_late` on `P_swap_readers_turn`: reader 2's second pin exchanges before it clears the tag, and the flush's insert lands in the active slot, reads the tag and takes its filler back out |
+
+Seconds are wall time of one TLC run on one worker (TLC 2.19, `run_tlc.sh` with `TLC_WORKERS=1`,
+2026-11-10), `tlc-run.txt` has the rows. `DrainLive` on `P_swap_readers` took 104 seconds, past the
+bound, so the liveness check runs on the smaller half. The mutations are the switches this model
+already has whose effect, in an interleaving, is what an ordering of 0.2.4 let happen: a scan that
+does not count a fast-path pin's slot (`pin_skips_activation`, the x86-64 fast path), an insert
+that reads the left tag on a slot its owner has activated again (`tag_clear_late`, the tag's
+ordering), and the free itself (`early_free`). A switch that plants an ordering directly (a scan
+that skips an active slot, a leave that tags after its exchange) is not in this model; the
+ordering model is where those orderings are checked. Each mutation keeps its counterexample in
+`<configuration>_counterexample.txt`.
+
 ## Recycling nodes (`retire_reclaimable`)
 
 ### A worked story
@@ -648,10 +725,11 @@ any order the code names; so a row says which operation the step is, with which 
 which branch, not the order. What the weaker orders of the code rest on (the fence pairing of a
 publication with a scan, the release half of an exchange ordering the tag store before it, the
 relaxed writes of an unpublished batch) is argued in the comments of `guard.rs`, and this model
-assumes it; the [ordering family](../ordering/README.md) checks the orders of the pin, the leave
-and the scan under C11, x86-TSO and ARM's load buffering. Where the code takes one load and one store (`activate`, `leave`) the model has two
-labels (`PNE`/`PNE2`, `DU2`/`DU2s`, `LeaveMark`/`LeaveMarkS`, `ExitMark`/`ExitMarkS`,
-`HelperLeave`/`HelperLeaveS`); `activate` stores only when the loaded word is tagged, so `PNE2`
+assumes it; in 0.2.4 two of those arguments did not hold ("Not modelled" above), and the
+[ordering family](../ordering/README.md) checks the orders of the pin, the leave and the scan under
+C11, x86-TSO and ARM's load buffering. Where the code takes one load and one store (`activate`,
+`leave`) the model has two labels (`PNE`/`PNE2`, `DU2`/`DU2s`, `LeaveMark`/`LeaveMarkS`,
+`ExitMark`/`ExitMarkS`, `HelperLeave`/`HelperLeaveS`); `activate` stores only when the loaded word is tagged, so `PNE2`
 and `DU2s` run only then, and `leave` always stores.
 
 | label | function | code | kind | step |
@@ -872,6 +950,8 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_nested` | Nested guards: the inner drop leaves the slot active and the outer section's value protected while a writer replaces and retires it. | nodes 8 | pass |
 | `RC_leave_race` | The leave against an insert: a thread pins and drops three times, then exits, while another retires into its slot and flushes between. | nodes 10 | pass |
 | `RC_leave_race3` | The same with a third thread pinning and dropping, so the eligible slots change under every scan. | threads 3, tids 3, nodes 10 | pass |
+| `RC_swap_readers` | A writer swaps cell 1's value, retires the old one and flushes it padded while two readers on the fast path (their second sections, pinned before the writer starts) load and drop (`P_swap_readers`; see "A writer and two readers"). | threads 3, tids 3, nodes 4, RF 2 | pass |
+| `RC_swap_readers_turn` | The same writer while one reader drops its guard and pins again during the flush, the other holding the old value on the fast path until it ended (`P_swap_readers_turn`). | threads 3, tids 3, nodes 4, RF 2 | pass |
 | `RC_unpinned_claims` | Two threads that never pin retire one value each; one flushes and exits, the other just exits, each submission claiming a tid. | threads 2, tids 2, nodes 7, RF 2 | pass |
 | `RC_late_retire` | A thread exits, then retires a value (a thread-local destructor that runs after the handle's) through a handle of its own and exits again, that handle's exit; another pins, loads and exits at any moment. | nodes 9, RF 2, EF 4, steps counted yes | pass |
 | `RC_late_pin` | A thread exits, then pins, loads and unpins (a thread-local destructor that runs after the handle's) in a section of a handle of its own, and exits again, that section's end; another replaces the value and flushes at any moment. | nodes 9, RF 2, EF 4, steps counted yes | pass |
@@ -892,6 +972,7 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_live_exit_pad` | Weak fairness; an exit's padded batch in a reader's slot is released by the reader's drop, the reader parked after it. | nodes 5 | pass |
 | `RC_live_exits_park` | Weak fairness; three threads, one parked after its section, two exiting with batches: every retired node is eventually released with no flush anywhere. | threads 3, tids 3, nodes 8 | pass |
 | `RC_live_flush_chain` | Weak fairness; a flush whose destructors retire again: every retired node is eventually freed. | threads 1, tids 1, nodes 6 | pass |
+| `RC_live_swap_readers_turn` | Weak fairness; the programs of `RC_swap_readers_turn` end and park: every retired node is eventually released. | threads 3, tids 3, nodes 4, RF 2 | pass |
 | `RC_live_unpinned_flush` | Weak fairness; one thread retires a value without pinning, flushes, then keeps pinning and unpinning without exiting: the value is eventually freed. | threads 1, tids 1, nodes 2, RF 2 | pass |
 | `RC_live_late_retire` | Weak fairness; a thread exits, retires a value through a handle of its own and exits again; another waits until it ended and flushes: the value is eventually freed. | nodes 9, RF 2, EF 4 | pass |
 | `RC_live_late_pin` | Weak fairness; a thread exits, replaces a value in a section of a handle of its own and ends it; another waits until it ended and flushes: the value is eventually freed. | nodes 9, RF 2, EF 4 | pass |
@@ -916,6 +997,9 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_mut_filler_freed_early` | filler_freed_early: a placement frees its fillers as soon as it placed the batch, while a slot still holds one; the slot's traversal touches a freed node. | as `RC_exit_pad` | `NoUseAfterFree` broken |
 | `RC_mut_drain_before_leave` | drain_before_leave: the outermost drop takes its list with the slot still active, drains, and only then stores INVPTR, so a node inserted during the drain is lost. | as `RC_leave_race` | `NoLoss` broken |
 | `RC_mut_nested_destructors` | nested_destructors (kovan 0.2.3): flush raises the pin count around the destructors it runs, so a destructor's pin enters no slot while the thread's own slot is inactive, and its load is unprotected. | as `RC_flush_dtor_load` | `NoUseAfterFree` broken |
+| `RC_mut_pin_skips_readers` | pin_skips_activation, the programs of `RC_swap_readers`: the fast-path pins activate nothing, so the flush's scan finds no reader slot active and the flush frees the old value while a reader holds it. | as `RC_swap_readers`, nodes 2 | `NoUseAfterFree` broken |
+| `RC_mut_early_free_readers` | early_free, the programs of `RC_swap_readers`: one reader's drop frees the batch placed in both readers' slots while the other reader holds the old value. | as `RC_swap_readers` | `NoUseAfterFree` broken |
+| `RC_mut_tag_clear_late_readers` | tag_clear_late, the programs of `RC_swap_readers_turn`: the reader's second pin clears the tag after its exchange, so the flush's insert takes its filler back out of the active slot. | as `RC_swap_readers_turn` | `PinnedIsActive` broken |
 | `RC_mut_no_era_check_birth` | no_era_check, the programs of `RC_era`, checked against the era rule alone: a load that does not compare the epoch leaves a node born after the reservation unprotected. | as `RC_era` | `EraCoversBirth` broken |
 | `RC_mut_tid_released_early` | tid_released_early: an exit releases its tid after leaving its slot, before the drops it runs enter the slot the next owner took. | as `RC_exit_tid_steal`, the release before the drops | `NoUseAfterFree` broken |
 | `RC_mut_cache_copied` | cache_copied: a full cache is freed from a copy while its cell still holds it, so a traversal re-entered from a drop frees it again. | nodes 9, EF 1, cache 0 | `NoDoubleFree` broken |
@@ -1237,4 +1321,6 @@ the reader's guard; every outermost pin enters), and `tests/exit_adopt.rs`, whic
 `tlc-run.txt` holds the last recorded run of the earlier model (commit 2d77e32), not of the
 changes above: not measured yet for them, to be refreshed from the CI run. It is the one this table was written from; see that file for the
 states, seconds and result of every configuration, and `../ci-seconds.txt` for the seconds CI's
-shares are dealt by. This section is refreshed with every full run.
+shares are dealt by. This section is refreshed with every full run. The configurations of "A
+writer and two readers" were measured locally, one worker each, and their rows are at the end of
+`tlc-run.txt`; their CI seconds come from their first CI run.

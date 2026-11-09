@@ -80,8 +80,10 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
   thread's id, the exit of a thread that never pinned, a value retired after a thread's exit, a
   critical section after a thread's exit,
   the recycling of retired nodes, the epoch's advance at a thread's first retire, the leave
-  against a concurrent insert and its rollback, a parked reader that never pins again), 138
-  configurations: 71 that must pass and 67 mutations and witnesses that must fail (the era tag and the pin's activation add 3 and 4; the count of the last CI run is the one that counts).
+  against a concurrent insert and its rollback, a parked reader that never pins again, a writer
+  against two readers on the pin's fast path), 149 configurations: 79 that must pass and 70
+  mutations and witnesses that must fail (the era tag and the pin's activation add 3 and 4, the
+  writer and two readers 3 and 3; the count of the last CI run is the one that counts).
 - `tla/chained/`: `kovan_map::HashMap`, the chained map (the link words, the writes, the walks,
   the conditional writes, the freezing migration and clear), 47 configurations: 26 that must
   pass and 21 that must fail.
