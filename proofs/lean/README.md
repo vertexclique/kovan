@@ -228,8 +228,11 @@ every rule too, and is ordered.
 
 What these cover: the C11 theorems hold for every execution of the shape they name, of any size;
 the concrete executions are single ones, each checked against every rule of `Consistent`; the
-x86-64 theorem covers every run of its two-thread program. A TLA+ model checks the interleavings
-at small sizes; these files check the orderings themselves.
+x86-64 theorem covers every run of its two-thread program. The TLA+ model in `../tla/ordering`
+checks the interleavings at small sizes, under the same memory models: `LS_tso_024` (0.2.4 holds
+on x86-64), `LS_mut_no_pin_fence` (edge 2), `LS_mut_relaxed_tag` (edge 1), `LS_mut_armlb_relaxed_tag`
+(edge 1 reads freed memory on ARM and POWER), `LS_c11_fence` and `LS_c11_scload` (the two fixes);
+these files check the orderings themselves.
 
 ## What is proved
 
