@@ -7260,6 +7260,13 @@ NoBatchOnLeftSlot ==
         /\ (sep[i][2].lo < 0 /\ fst[i][2].lo # INV /\ ~PendingInsert(i, 2))
               => \E t \in Threads : pc[t] = "HelperLeave2" /\ hme[t] = i
 
+ExitLabels == {"ExitMark", "ExitLeave", "ExitLeave2", "ExitPlace", "ExitHelp", "ExitAdvance", "ExitFree",
+               "ExitRound", "EX12b", "EX13"}
+Deactivating(t) ==
+    pc[t] \in ExitLabels \/ \E i \in DOMAIN stack[t] : stack[t][i].pc \in ExitLabels
+\* The pin raises the count first and clears the era word's tag at PNE, so the check starts there.
+Entering(t) == pc[t] = "PNE" \/ \E i \in DOMAIN stack[t] : stack[t][i].pc = "PNE"
+
 \* The reservation of a pinned thread is active from the end of its pin's activation on: the read
 \* after a clear cannot find the slot inactive.
 PinnedIsActive ==
@@ -7287,12 +7294,6 @@ EraCoversBirth ==
 
 \* In a section (or while its flush or exit runs destructors), a thread's cached epoch never
 \* exceeds the epoch its slot publishes: the fast path's compare is sound.
-ExitLabels == {"ExitMark", "ExitLeave", "ExitLeave2", "ExitPlace", "ExitHelp", "ExitAdvance", "ExitFree",
-               "ExitRound", "EX12b", "EX13"}
-Deactivating(t) ==
-    pc[t] \in ExitLabels \/ \E i \in DOMAIN stack[t] : stack[t][i].pc \in ExitLabels
-\* The pin raises the count first and clears the era word's tag at PNE, so the check starts there.
-Entering(t) == pc[t] = "PNE" \/ \E i \in DOMAIN stack[t] : stack[t][i].pc = "PNE"
 CacheBelowPublished ==
     \A t \in Threads :
         (pinc[t] > 0 /\ tid[t] # NoTid /\ ~Deactivating(t) /\ ~Entering(t)) => cep[t] <= sep[tid[t]][0].lo
