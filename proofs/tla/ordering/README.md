@@ -178,7 +178,7 @@ shows edge 1.
 
 ## Code map
 
-Lines as of kovan 0.2.4.
+Lines as of kovan 0.2.5.
 
 | label | function | code | step |
 |---|---|---|---|
@@ -188,8 +188,8 @@ Lines as of kovan 0.2.4.
 | `PT` | `Guard::enter_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:665-670`, `guard.rs:1676-1684`, `reclaim.rs:291-297` | the captured node's batch count, `fetch_sub(1)` AcqRel; zero puts it on the cache |
 | `PL` | `Atomic::load`, `protect_load` | `atomic.rs:110-111`, `guard.rs:344-363` | `data.load(order)`; the epoch unchanged, the fast path returns it |
 | `RD`, `Satisfy` | the caller | | the read of the node through the guard; `Satisfy` completes it late (ARMLB) |
-| `LE` | `Guard::leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:473-479`, `guard.rs:511-512`, `slot.rs:495-499` | `store_lo(kept \| ERA_INACTIVE)`, Relaxed in 0.2.4 |
-| `LX` | `ThreadSlots::leave` | `slot.rs:500` | `exchange_lo(INVPTR)`, AcqRel |
+| `LE` | `Guard::leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:473-479`, `guard.rs:511-512`, `slot.rs:495-504` | `store_lo(kept \| ERA_INACTIVE)`, Relaxed in 0.2.4, Release in 0.2.5 |
+| `LX` | `ThreadSlots::leave` | `slot.rs:505` | `exchange_lo(INVPTR)`, AcqRel |
 | `LT` | `leave_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:497-500`, `reclaim.rs:291-297` | the captured node's count, `fetch_sub(1)` |
 | `LD` | `leave_cold`, `drain_free_list` | `guard.rs:501-503`, `guard.rs:1692` | the cache drained: A freed when its count reached zero |
 | `WS` | `Atomic::swap` | `atomic.rs:255-256` | `swap(B)`, AcqRel (the caller's order); A retired |
