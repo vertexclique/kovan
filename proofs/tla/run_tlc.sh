@@ -16,8 +16,9 @@
 # expected result is (or is not) pass, for `shard` and `plan` (CI checks the mutations in a stage of
 # their own, minutes long). TLC_WORKERS caps the workers of a passing configuration (default auto);
 # TLC_LIMIT the seconds each configuration may take (default 3600). A configuration expected to
-# break a property runs one worker, so breadth-first search keeps its trace the shortest, and the
-# trace is kept in <family>/<name>_counterexample.txt. Exit status 0 means every result matched.
+# break a property runs one worker, so breadth-first search keeps its trace the shortest (or
+# TLC_VIOLATION_WORKERS, where only the verdict matters), and the trace is kept in
+# <family>/<name>_counterexample.txt. Exit status 0 means every result matched.
 # The whole check, of every family, stays within an hour, locally (`local`, 16 workers in all) and
 # in CI (16 share jobs at once): a share past TLC_DEADLINE seconds (default 3600) is stopped and
 # fails, and a model that outgrows the budget is cut down, not given more time.
@@ -154,7 +155,7 @@ for n in "${names[@]}"; do
   spec=$(awk -v n="$n" '$1==n{print $2}' EXPECTED.txt)
   exp=$(awk -v n="$n" '$1==n{print $3}' EXPECTED.txt)
   [ -n "$spec" ] || { echo "$n: not in EXPECTED.txt"; bad=1; rm -rf "$meta"; continue; }
-  w="${TLC_WORKERS:-auto}"; [ "$exp" != "pass" ] && w=1
+  w="${TLC_WORKERS:-auto}"; [ "$exp" != "pass" ] && w="${TLC_VIOLATION_WORKERS:-1}"
   timeout --signal=KILL "${TLC_LIMIT:-3600}" java -XX:+UseParallelGC -Xmx8g -cp "$jar" tlc2.TLC \
       -workers "$w" -metadir "$meta/states" -config "$n.cfg" "$spec.tla" > "$log" 2>&1
   t1=$(date +%s)
