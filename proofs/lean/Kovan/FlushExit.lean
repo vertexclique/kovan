@@ -54,72 +54,45 @@ namespace Kovan.FlushExit
 inductive Start where
   /-- It returns at once and does nothing. -/
   | returns
-  /-- It claims a tid first (`alloc_tid`, the claim a first pin makes), then runs. -/
-  | claims
-  /-- It runs with the tid the thread already has. -/
+  /-- It runs: it places what the thread holds, with or without a tid. -/
   | runs
   deriving DecidableEq, Repr
 
-/-- The start of `Handle::flush`: the test on the tid, then the test on `in_reclaim`.
-* `hasTid`: the thread holds a tid (`self.tid.get().is_some()`);
-* `batchEmpty`: its batch holds no value (`self.batch_first.get().is_null()`);
-* `exitPending`: the thread's exit is still to run (`exit_pending()`);
+/-- The start of `Handle::flush`: one test, on `in_reclaim`.
 * `inReclaim`: this flush runs inside a destructor that a reclamation of the thread is
-  running (`self.in_reclaim.get()`).
+  running (`self.in_reclaim.get()`); then the outer operation finishes the work.
 
-Examples: a thread with no tid and an empty batch returns (`flushStart false true true false =
-.returns`); the same thread with one value in its batch claims (`flushStart false false true
-false = .claims`). -/
-def flushStart (hasTid batchEmpty exitPending inReclaim : Bool) : Start :=
-  if !hasTid && (batchEmpty || !exitPending) then .returns
-  else if inReclaim then .returns
-  else if !hasTid then .claims
-  else .runs
+A flush needs no tid: a placement goes to the reservations of the threads that hold one, and
+the epoch moves with allocations, so a thread that never pinned places its batch as any other
+does. Examples: `flushStart false = .runs`; `flushStart true = .returns`. -/
+def flushStart (inReclaim : Bool) : Start :=
+  if inReclaim then .returns else .runs
 
-/-- The start of `Handle::cleanup`, the exit: with no tid and a value in its batch it claims a
-tid (`claim_tid`), then it runs if the thread has a tid; a thread with no tid and an empty
-batch has nothing to leave, and returns.
-Examples: `exitStart false true = .returns`; `exitStart false false = .claims`. -/
+/-- The start of `Handle::cleanup`, the exit: a thread with no tid and an empty batch has
+nothing to leave or place, and returns; every other thread runs the exit: the slot left when
+the thread has one, the batch placed (no tid needed), the tid released when the thread has one.
+Examples: `exitStart false true = .returns`; `exitStart false false = .runs`. -/
 def exitStart (hasTid batchEmpty : Bool) : Start :=
-  if !hasTid && batchEmpty then .returns
-  else if !hasTid then .claims
-  else .runs
+  if !hasTid && batchEmpty then .returns else .runs
 
 /-- The start of the exit before 0.2.1: with no tid it returned at once, whatever its batch
 held. Example: `exitStartOld false false = .returns`, a batch left behind. -/
 def exitStartOld (hasTid _batchEmpty : Bool) : Start :=
   if !hasTid then .returns else .runs
 
-/-- `flush()` returns at once exactly when the thread has no tid and either nothing to submit or
-its exit has already run, or when it runs inside a reclamation. -/
-theorem flush_returns_iff (hasTid batchEmpty exitPending inReclaim : Bool) :
-    flushStart hasTid batchEmpty exitPending inReclaim = .returns ↔
-      (hasTid = false ∧ (batchEmpty = true ∨ exitPending = false)) ∨ inReclaim = true := by
-  -- Every input is true or false: Lean checks the 16 combinations one by one.
-  cases hasTid <;> cases batchEmpty <;> cases exitPending <;> cases inReclaim <;> decide
+/-- `flush()` returns at once exactly when it runs inside a reclamation. -/
+theorem flush_returns_iff (inReclaim : Bool) :
+    flushStart inReclaim = .returns ↔ inReclaim = true := by
+  cases inReclaim <;> decide
 
-/-- `flush()` claims a tid exactly when the thread has none, runs outside any reclamation
-before its exit, and has a value in its batch. -/
-theorem flush_claims_iff (hasTid batchEmpty exitPending inReclaim : Bool) :
-    flushStart hasTid batchEmpty exitPending inReclaim = .claims ↔
-      hasTid = false ∧ inReclaim = false ∧ exitPending = true ∧ batchEmpty = false := by
-  -- The same 16 combinations.
-  cases hasTid <;> cases batchEmpty <;> cases exitPending <;> cases inReclaim <;> decide
+/-- `flush()` runs exactly when it is outside any reclamation, tid or no tid. -/
+theorem flush_runs_iff (inReclaim : Bool) : flushStart inReclaim = .runs ↔ inReclaim = false := by
+  cases inReclaim <;> decide
 
-/-- `flush()` runs with the tid it has exactly when the thread has one and runs outside any
-reclamation. -/
-theorem flush_runs_iff (hasTid batchEmpty exitPending inReclaim : Bool) :
-    flushStart hasTid batchEmpty exitPending inReclaim = .runs ↔
-      hasTid = true ∧ inReclaim = false := by
-  -- The same 16 combinations.
-  cases hasTid <;> cases batchEmpty <;> cases exitPending <;> cases inReclaim <;> decide
-
-/-- A flush on a thread with no tid and an empty batch claims no tid: it has nothing to do,
-and a tid it claimed would stay taken until the thread exits. -/
-theorem flush_idle_claims_none (exitPending inReclaim : Bool) :
-    flushStart false true exitPending inReclaim = .returns := by
-  -- Two inputs left: the four combinations.
-  cases exitPending <;> cases inReclaim <;> decide
+/-- A flush on a thread that never pinned (no tid) runs: it places what the thread retired
+without claiming a tid (before 0.2.4 it claimed one, since its epoch advance needed it). -/
+theorem flush_without_tid_runs : flushStart false = .runs := by
+  decide
 
 /-- The exit returns at once exactly when the thread has no tid and nothing in its batch. -/
 theorem exit_returns_iff (hasTid batchEmpty : Bool) :
@@ -127,17 +100,16 @@ theorem exit_returns_iff (hasTid batchEmpty : Bool) :
   -- The four combinations.
   cases hasTid <;> cases batchEmpty <;> decide
 
-/-- The exit claims a tid exactly when the thread has none and a value in its batch. -/
-theorem exit_claims_iff (hasTid batchEmpty : Bool) :
-    exitStart hasTid batchEmpty = .claims ↔ hasTid = false ∧ batchEmpty = false := by
+/-- The exit runs exactly when the thread has a tid or a value in its batch. -/
+theorem exit_runs_iff (hasTid batchEmpty : Bool) :
+    exitStart hasTid batchEmpty = .runs ↔ hasTid = true ∨ batchEmpty = false := by
   -- The four combinations.
   cases hasTid <;> cases batchEmpty <;> decide
 
-/-- The exit runs with the tid it has exactly when the thread has one. -/
-theorem exit_runs_iff (hasTid batchEmpty : Bool) :
-    exitStart hasTid batchEmpty = .runs ↔ hasTid = true := by
-  -- The four combinations.
-  cases hasTid <;> cases batchEmpty <;> decide
+/-- The exit of a thread with no tid whose batch holds a value runs: it places the batch
+without claiming a tid (before 0.2.4 it claimed one first). -/
+theorem exit_without_tid_runs : exitStart false false = .runs := by
+  decide
 
 /-! ## One thread's run -/
 
@@ -147,7 +119,8 @@ theorem exit_runs_iff (hasTid batchEmpty : Bool) :
   `try_retire` could place it (a retire's placement is not padded), a choice left free;
 * `flush dtor`: `flush()`, called outside any reclamation; `dtor` are the values the
   destructors it runs retire, which its loop places too;
-* `pin`: an outermost `pin()`, which claims a tid when the thread has none;
+* `pin`: an outermost `pin()`, which claims a tid when the thread has none (the one
+  operation that claims one);
 * `exit dtor`: the thread's exit, `dtor` as for a flush. -/
 inductive Op where
   | retire (v : Nat) (boundary placed : Bool)
@@ -203,16 +176,15 @@ the batch. Example: `placeOld false [1] [] = ([1], [])`. -/
 def placeOld (placed : Bool) (batch submitted : List Nat) : List Nat × List Nat :=
   submit placed batch submitted
 
-/-- A flush, called outside any reclamation before the exit: it starts by `flushStart`. Unless
-it returns at once, the thread holds a tid from then on (the one it had, or the one it claims)
-and the loop places its batch and what the destructors retire. Nothing happens once it has
-exited. Example: from `init` with `[3]` retired, a flush submits `[3]`. -/
+/-- A flush, called outside any reclamation before the exit: it starts by `flushStart`
+(outside a reclamation: it runs) and the loop places its batch and what the destructors
+retire; the thread's tid is as it was. Nothing happens once it has exited.
+Example: from `init` with `[3]` retired, a flush submits `[3]`. -/
 def flushStep (s : St) (dtor : List Nat) : St :=
   if s.exited then s
-  else if flushStart s.hasTid s.batch.isEmpty true false = .returns then s
+  else if flushStart false = .returns then s
   else
-    { s with hasTid := true,
-             batch := (placeAll s.batch dtor s.submitted).1,
+    { s with batch := (placeAll s.batch dtor s.submitted).1,
              submitted := (placeAll s.batch dtor s.submitted).2,
              owned := dtor ++ s.owned }
 
@@ -222,8 +194,8 @@ def pinStep (s : St) : St :=
   if s.exited then s else { s with hasTid := true }
 
 /-- The exit, starting by the rule `exitRule` (`exitStart` now, `exitStartOld` before 0.2.1).
-Unless it returns at once, its loop places the batch and what the destructors retire, and the
-thread releases its tid; either way the thread has exited.
+Unless it returns at once, its loop places the batch and what the destructors retire (no tid
+needed), and the thread releases its tid if it has one; either way the thread has exited.
 Example: with `exitStart`, a thread with no tid and `[7]` in its batch submits `[7]`. -/
 def exitStep (exitRule : Bool → Bool → Start) (s : St) (dtor : List Nat) : St :=
   if s.exited then s
@@ -328,7 +300,7 @@ theorem step_good (s : St) (op : Op) (h : Good s) : Good (step exitStart s op) :
       exact ⟨hk, hx⟩
     next hne =>
     split
-    · -- The flush returns at once: nothing changes.
+    · -- The flush returns at once (never, outside a reclamation): nothing changes.
       exact ⟨hk, hx⟩
     · -- The flush places its batch and what the destructors retired.
       refine ⟨?_, fun h => absurd h hne⟩
@@ -453,19 +425,16 @@ theorem retired_is_kept (pre post : List Op) (v : Nat) (boundary placed : Bool)
   exact run_owned _ post _ v (retire_owned _ _ v boundary placed hpre)
 
 /-- A flush made before the exit leaves the batch empty, whatever the destructors it ran
-retired: it either placed everything or returned at once, and it returns at once only on a
-thread with no tid and an empty batch. `flush()` never returns holding a retired value. -/
+retired: outside a reclamation it places everything, tid or no tid. `flush()` never returns
+holding a retired value. -/
 theorem flush_leaves_nothing (s : St) (dtor : List Nat) (hx : s.exited = false) :
     (flushStep s dtor).batch = [] := by
   unfold flushStep
   simp only [hx, Bool.false_eq_true, ↓reduceIte]
   split
   next hr =>
-    -- Returned at once: no tid and an empty batch (the run's flushes are outside any
-    -- reclamation, before the exit).
-    have h := (flush_returns_iff _ _ _ _).mp hr
-    simp only [Bool.true_eq_false, or_false, Bool.false_eq_true] at h
-    exact List.isEmpty_iff.mp h.2
+    -- Outside a reclamation a flush never returns at once.
+    exact absurd hr (by decide)
   · -- Placed everything.
     rfl
 

@@ -74,14 +74,15 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 
 ## Coverage
 
-- `tla/reclaim/`: kovan's memory reclamation (pin, which enters the slot, the protected load,
-  the guard's drop, which leaves the slot and frees what it held, retire, the traversal, flush
-  and a thread's exit, which place the partial batch padded with fillers, the hand-over of a
-  thread's id, the exit of a thread that never pinned, a value retired after a thread's exit, a
-  critical section after a thread's exit,
-  the recycling of retired nodes, the epoch's advance at a thread's first retire, the leave
-  against a concurrent insert and its rollback, a parked reader that never pins again), 131
-  configurations: 68 that must pass and 63 mutations and witnesses that must fail.
+- `tla/reclaim/`: kovan's memory reclamation (pin, which activates the slot with one exchange,
+  the protected load, which publishes the epoch when it moved, the guard's drop, which leaves
+  the slot and frees what it held, allocation, whose clock advances the epoch, retire, the
+  traversal, flush and a thread's exit, which place the partial batch padded with fillers, the
+  hand-over of a thread's id, the exit of a thread that never pinned, a value retired after a
+  thread's exit, a critical section after a thread's exit, the recycling of retired nodes, the
+  leave against a concurrent insert and its rollback, two inserts racing one leave, a parked
+  reader that never pins again, the step bound of every operation), 114 configurations:
+  63 that must pass and 51 mutations, witnesses and findings that must fail.
 - `tla/chained/`: `kovan_map::HashMap`, the chained map (the link words, the writes, the walks,
   the conditional writes, the freezing migration and clear), 47 configurations: 26 that must
   pass and 21 that must fail.
@@ -130,11 +131,18 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
   that holds one of its nodes and no reader ever holds a node back in the pool; with the take that
   keeps a stale birth, a concrete run frees a node a reader holds.
 - `lean/Kovan/FlushExit.lean`: flush and the exit, for one thread and every sequence of
-  retires, flushes, pins and its exit: exactly when each returns at once, claims a tid or runs;
+  retires, flushes, pins and its exit: exactly when each returns at once or runs (neither
+  claims a tid: a placement needs none);
   every value the thread retired is submitted once it has exited, a flush and the exit leave
   the batch empty whatever the destructors they ran retired (and with the exit as it was before
   0.2.1, a value can be kept nowhere; with the placement as it was before 0.2.4, a flush could
   return holding its batch).
+- `lean/Kovan/Bounds.lean`: the step bound of every operation (`OpBound` of the reclamation
+  model), each term a function of the thread count, the constants and the lists walked, for
+  every size: a protected load within `3 L + 1` steps and unbounded without the escalation, the
+  pin and the drop by their exchanges and traversals, the scan within three steps per slot and
+  never more fillers than slots, every insert within six steps, a flush and an exit by their
+  rounds, and the epoch clock's first advance.
 - `lean/Kovan/Leave.lean`: the leave at the outermost drop, for every size: the padded
   placement assigns a node to every eligible slot with exactly the fillers needed, and freeing
   the batch frees every node once and runs no user destructor for a filler; a batch's count on

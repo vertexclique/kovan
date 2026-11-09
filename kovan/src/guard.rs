@@ -43,8 +43,8 @@ use core::sync::atomic::fence;
 use shuttle::thread_local;
 
 /// Bounded convergence attempts in `protect_load` before escalating to the
-/// unconditional reservation (mirrors the reference algorithm's 16-attempt
-/// fast path before its slow path).
+/// unconditional reservation (the algorithm's 16 attempts before its slow
+/// path, whose place the escalation takes here).
 const MAX_LOAD_ATTEMPTS: usize = 16;
 
 /// RAII guard representing an active critical section.
@@ -69,7 +69,10 @@ const MAX_LOAD_ATTEMPTS: usize = 16;
 /// delays no reclamation, however many values other threads retire
 /// meanwhile and whatever their birth epochs. Nothing has to be flushed
 /// before idling; [`flush()`](crate::flush) is for what the thread itself
-/// retired and has not submitted yet.
+/// retired and has not submitted yet. The one exception is a race of two
+/// inserts with the drop's exchange (the crate documentation, Quiescence):
+/// the list it leaves in the slot is taken by the thread's next `pin()` or
+/// exit.
 ///
 /// The destructors of the values a drop frees run inside the drop, with
 /// the slot already inactive and no guard live: a destructor may pin
@@ -499,8 +502,10 @@ impl Handle {
     /// # Progress: wait-free
     ///
     /// One exchange and one walk of the list it captured: the list of a
-    /// slot left INVPTR holds at most one node per retire whose insert
-    /// found INVPTR behind its exchange and has not rolled back yet.
+    /// slot left INVPTR holds the node of an insert that found INVPTR
+    /// behind its exchange and has not rolled back yet, and the nodes of
+    /// the inserts that landed on it since (one per batch), fixed in length
+    /// by the exchange.
     #[inline]
     fn enter(&self) {
         let tid = self.tid();
@@ -614,15 +619,14 @@ impl Handle {
             self.in_reclaim.set(true);
 
             // Detach the batch BEFORE try_retire (see `take_batch`).
-            if let Some((first, last)) = self.take_batch() {
-                if !self.try_retire(first, last, false) {
-                    // Fewer assignable nodes than eligible slots: nothing was
-                    // published, so keep accumulating. The merged batch
-                    // retries at the next RETIRE_FREQ multiple with more
-                    // nodes, and succeeds once batch_size exceeds the
-                    // eligible slot count.
-                    self.merge_batch(first, last);
-                }
+            if let Some((first, last)) = self.take_batch()
+                && !self.try_retire(first, last, false)
+            {
+                // Fewer assignable nodes than eligible slots: nothing was
+                // published, so keep accumulating. The merged batch retries
+                // at the next RETIRE_FREQ multiple with more nodes, and
+                // succeeds once batch_size exceeds the eligible slot count.
+                self.merge_batch(first, last);
             }
             self.in_reclaim.set(was_reclaiming);
         }
@@ -999,11 +1003,10 @@ impl Handle {
     /// published) goes out through `try_retire`, padded so it is always
     /// placed: other threads may still hold guard-protected references to
     /// its values, so the normal epoch-based checks apply and nothing is
-    /// just dropped. [FlushAdvance] A placed batch advances the epoch (the
-    /// pending slow paths helped first, as every advance is). [FlushDrain]
-    /// The free-list cache is drained. The destructors these steps run may
-    /// retire (into the batch, emptied by the placement) and so the three
-    /// steps repeat while the batch holds a value: bounded by the
+    /// just dropped. [FlushDrain] The free-list cache is drained. The
+    /// destructors these steps run may retire (into the batch, emptied by
+    /// the placement) and so the two steps repeat while the batch holds a
+    /// value: bounded by the
     /// destructors the thread's own values run, never by other threads,
     /// since the thread's slot is inactive with no guard live and takes no
     /// node of another thread's batch meanwhile.

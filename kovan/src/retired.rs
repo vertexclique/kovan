@@ -67,7 +67,7 @@ pub struct RetiredNode {
 
     /// Points to the refs-node for non-refs nodes.
     /// On the refs-node: set to RNODE(batch_first) after batch finalization.
-    /// Atomic because helpers may read it concurrently.
+    /// Atomic because the traversals of other threads read it concurrently.
     pub(crate) batch_link: AtomicPtr<RetiredNode>,
 
     /// Union: atomic refs counter (on refs-node) | batch_next pointer (others).

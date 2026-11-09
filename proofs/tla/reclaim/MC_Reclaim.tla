@@ -54,13 +54,13 @@ DtorChain == DtorOf2(1, <<Rt>>, 3, <<Rt>>)
 \* A reader holding what it loaded while the writer replaces and retires it, flushes and exits.
 P_rw == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Ld(1), U, Ex>>
                                    ELSE <<P, Wr(1), U, P, Wr(1), U, Fl, Ex>>]
-\* The same with every retire advancing the epoch and one load attempt: loads escalate, and the
-\* escalated section's drop transitions.
+\* The same with every allocation advancing the epoch and one load attempt: loads escalate, and
+\* the escalated section's drop resets the era word.
 P_esc == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Ld(1), U, P, Ld(1), U, Ex>>
                                     ELSE <<P, Wr(1), U, Fl, P, Wr(1), U, Ex>>]
-\* A pin with one fast attempt (the slow path) racing retires and flushes that advance the
-\* epoch and help it.
-P_slow == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, P, Ld(1), U, Ex>>
+\* A reader pinning twice and loading once against a writer that replaces the value twice and
+\* flushes twice: pins, loads, retires, placements and drains mixed (the step-counted mix).
+P_mix == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, P, Ld(1), U, Ex>>
                                      ELSE <<P, Wr(1), Wr(1), U, Fl, Fl, Ex>>]
 \* A reader loading three times across the writer's retires and epoch advances.
 P_two_loads == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Ld(1), Ld(1), U, Ex>>
@@ -71,39 +71,40 @@ P_lu == [t \in {1, 2} |-> IF t = 1 THEN <<P, Lu(1), Wr(1), U, P, Lu(1), Wr(1), U
                                    ELSE <<P, Ld(1), U, P, Ld(1), U, Ex>>]
 \* ------------------------------------------------------------ drains and escalation
 
-\* One thread: two retires place a node in its own slot and advance the epoch, then a load in
-\* the same section raises the reservation; the next pin must traverse.
-P_drain == [t \in {1} |-> <<P, Rt, Rt, Ld(1), U, P, U>>]
-P_drain_live == [t \in {1} |-> <<P, Rt, Rt, Ld(1), U, Idle>>]
-\* One thread: the flush frees node 1 after its epoch advance; node 1's drop loads cell 1 and
-\* escalates (one load attempt).
+\* One thread: a load publishes the epoch, then a write (retiring the node it loaded) and a
+\* retire of a fresh node place a batch in its own slot; the drop traverses and frees it.
+P_drain == [t \in {1} |-> <<P, Ld(1), Wr(1), Rt, U, P, U>>]
+P_drain_live == [t \in {1} |-> <<P, Ld(1), Wr(1), Rt, U, Idle>>]
+\* One thread: the flush frees node 1; node 1's drop loads cell 1 and escalates (one load
+\* attempt).
 P_flush_esc == [t \in {1} |-> <<P, Wr(1), Rt, U, Fl, P, U>>]
-\* One thread: an escalated section's drop transitions and frees the cache (nothing cached
-\* past one traversal); node 1's drop retires twice (a batch into the own slot) and pins.
+\* One thread: an escalated section's drop resets the era word and frees the cache; node 1's
+\* drop retires twice (a batch into the own slot) and pins.
 P_esc_drop == [t \in {1} |-> <<P, Wr(1), Rt, U, P, Rt, Ld(1), Rt, U, Ex>>]
 
 \* ------------------------------------------------------------ destructors in flush and exit
 
 \* Node 1's drop reads cell 2 while thread 2 replaces and retires cell 2's value: inside
-\* thread 1's flush, and inside its exit.
+\* thread 1's flush (a batch of two keeps node 1 for the flush), and inside its exit (a batch
+\* of three keeps node 1 and the fresh node for the exit).
 P_flush_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Fl, Ex>>
                                           ELSE <<P, Wr(2), U, Fl, Ex>>]
 P_exit_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Ex>>
                                          ELSE <<P, Wr(2), U, Fl, Ex>>]
-\* Thread 1's exit runs node 1's drop, which reads cell 3 (never written) while thread 2's flush,
-\* made once the exit began, advances the epoch; thread 3, spawned once a tid is released and
-\* the epoch advanced, takes thread 1's over and reads cell 2 once thread 2 replaced its value
-\* with a later one, which thread 2 then replaces and retires in batches of late values only
-\* (two fillers first place the early one).
+\* Thread 1's exit runs node 1's drop, which reads cell 3 (never written) while thread 2 (its
+\* sections load, so its slot is eligible) flushes once the exit began; thread 3, spawned once a
+\* tid is released, takes thread 1's over and reads cell 2 once thread 2 replaced its value with
+\* a later one, which thread 2 then replaces and retires in batches of late values only. With
+\* threads 2 and 3 both eligible a batch goes into two slot lists (early_free).
 P_exit_tid == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), Rt, Rt, U, After(2, 2), Ex>>
-                                    [] t = 2 -> <<After(1, 5), P, U, After(1, 6), Fl, P, Wr(2),
-                                                  Rt, Rt, Wr(2), Wr(2), U, Fl>>
-                                    [] t = 3 -> <<AwaitRel, After(2, 5), P, After(2, 7), Ld(2), U>>]
+                                    [] t = 2 -> <<After(1, 5), P, Ld(2), U, After(1, 6), Fl, P, Ld(2),
+                                                  Wr(2), Rt, Rt, Wr(2), Wr(2), U, Fl>>
+                                    [] t = 3 -> <<AwaitRel, After(2, 6), P, After(2, 9), Ld(2), U>>]
 \* One thread: a chain of drops that retire (node 1's retires node 3, node 3's node 4).
 P_exit_chain == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
-\* The same with one more pin before the exit: the retire's advances moved the epoch past the
-\* thread's last transition, and the pin publishes the epoch they made, so the nodes the drops
-\* retire (born at it) take an entry in the thread's slot and wait for the exit's next round.
+\* The same with one more pin and drop before the exit: the allocations moved the epoch, the
+\* drop's traversal and drain free what the first section held, and the exit's rounds place
+\* what the drops retire.
 P_exit_chain1 == [t \in {1} |-> <<P, Wr(1), U, P, U, Ex>>]
 \* Thread 1 exits with a batch of one node while thread 2's slot is eligible: the exit pads it
 \* (one filler for thread 2's slot) and places it; thread 2's drop traverses and frees it.
@@ -119,26 +120,25 @@ P_exit_pad_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
 P_exits_park == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), U, Ex>>
                                       [] t = 2 -> <<P, Ld(1), U>>
                                       [] t = 3 -> <<Join(1), P, Wr(1), U, Ex>>]
-\* A reader in one critical section for good (pinned at epoch 1, then nested pins); a thread that
-\* retires one fresh node and lives on without exiting, so it places no batch; then a thread that
-\* retires one more and exits. The second thread's first retire advanced the epoch, so the last
+\* A reader in one critical section for good (pinned and loaded at epoch 1, then nested pins); a
+\* thread that, once the reader loaded, retires one fresh node and lives on without exiting, so
+\* it places no batch; then a thread that retires one more and exits. Each thread's first allocation advanced the epoch, so the last
 \* node is born after the reader's reservation, skips its slot and is freed (late_first_advance:
-\* no retire moves the epoch before the last thread's exit places its node in the reader's slot,
-\* and that exit's advance comes too late: the reader holds the node for good).
-P_first_advance == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Idle>>
-                                          [] t = 2 -> <<After(1, 1), P, Rt, U>>
+\* no allocation moves the epoch before the last thread's exit places its node in the reader's
+\* slot: the reader holds the node for good).
+P_first_advance == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Ld(1), Idle>>
+                                          [] t = 2 -> <<After(1, 2), P, Rt, U>>
                                           [] t = 3 -> <<Join(2), P, Rt, U, Ex>>]
-\* A reader that pins and unpins for good, never retiring or flushing, and a thread that retires
-\* two fresh nodes and exits: its exit places the batch in the reader's slot, then advances the
-\* epoch, and the reader's next pin traverses the batch (no_placed_advance: after the first
-\* retire's advance nothing moves the epoch, and the batch waits in the reader's slot for good).
-P_exit_advance == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Idle>>
-                                             ELSE <<After(1, 2), P, Rt, Rt, U, Ex>>]
+\* A reader that pins, loads and unpins for good, never retiring or flushing, and a thread that
+\* replaces cell 1's value (retiring the node the reader loaded) and retires a fresh one, then
+\* exits: its exit places the batch in the reader's slot (eligible while the reader is in a
+\* section whose load published), and the reader's next drop traverses the batch.
+P_exit_idle == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, Idle>>
+                                         ELSE <<After(1, 3), P, Wr(1), Rt, U, Ex>>]
 \* The same, the batch placed by a retire: with two slots eligible, the third retire's batch of
-\* three is the first that can be placed, and that retire advances the epoch (no_placed_advance:
-\* only the first retire advances, and the batch waits in the reader's slot for good).
-P_retire_advance == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Idle>>
-                                               ELSE <<After(1, 2), P, Rt, Rt, Rt, U, Ex>>]
+\* three is the first that can be placed.
+P_retire_idle == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, Idle>>
+                                           ELSE <<After(1, 3), P, Wr(1), Rt, Rt, U, Ex>>]
 \* A retire after a thread's exit (a thread-local destructor that runs after the handle's), as the
 \* code makes it: through a handle of its own, whose drop runs the exit any thread runs (the
 \* thread's ops after its first exit are that handle's: no tid, an empty batch). Thread 1 pins,
@@ -189,9 +189,12 @@ P_late_pin_live == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex, P, Ld(1), 
 \* exit and its count is not at an advance: no claim) and exits again, and that exit claims a
 \* tid. Thread 2 pins, unpins and exits, so from its pin to its exit a one-value batch cannot be
 \* placed.
-P_wf_unpinned_exit == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Ex, Rt, Ex>> ELSE <<P, U, Ex>>]
+P_wf_unpinned_exit == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Ex, Rt, Ex>> ELSE <<P, Ld(1), U, Ex>>]
+\* Thread 1 retires one value (a batch of two never reaches its boundary) and exits with no tid:
+\* the exit must place it (exit_skips_batch: it does nothing, and the value is lost).
+P_exit_skips == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Ex>> ELSE <<P, Ld(1), U, Ex>>]
 \* Thread 1 retires one value without pinning (claiming a tid), flushes, then exits.
-P_wf_unpinned_flush == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<P, U, Ex>>]
+P_wf_unpinned_flush == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<P, Ld(1), U, Ex>>]
 \* Threads 1 and 2 without thread 3: each submission claims a tid, so the two race for tids.
 P_unpinned_claims == [t \in {1, 2} |-> IF t = 1 THEN <<Rt, Fl, Ex>> ELSE <<Rt, Ex>>]
 \* One thread that retires one value, flushes, then keeps pinning and unpinning forever without
@@ -218,54 +221,54 @@ P_park_two == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U>>
 \* value).
 P_nested == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), P, U, Ld(1), U>>
                                       ELSE <<P, Wr(1), U, Fl, P, Wr(1), U, Fl, Ex>>]
-\* The leave against an insert: thread 1 pins, drops and pins again, while thread 2 retires into
-\* its slot and flushes between: an insert whose scan found the slot active may find INVPTR
-\* behind its exchange (the rollback), or have its node taken by the next enter.
-P_leave_race == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, P, U, P, U, Ex>>
-                                          ELSE <<P, Rt, Rt, U, Fl, P, Rt, Rt, U, Fl, Ex>>]
-\* The same with one more thread so that the eligible slots change under every scan.
-P_leave_race3 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, U, P, U>>
-                                       [] t = 2 -> <<P, Rt, Rt, U, Fl, Ex>>
-                                       [] t = 3 -> <<P, U, P, U>>]
-\* The leave against an insert, once, with the reader parked for good after: thread 2 retires a
-\* node and flushes while thread 1 drops its guard, and exits. The insert that finds INVPTR must
+\* The leave against an insert: thread 1 pins, loads (its slot publishes the epoch), drops and
+\* pins again, while thread 2 replaces cell 1's value (retiring what the reader may hold) and
+\* flushes between: an insert whose scan found the slot active may find INVPTR behind its
+\* exchange (the rollback), or have its node taken by the next enter.
+P_leave_race == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, P, Ld(1), U, P, Ld(1), U, Ex>>
+                                          ELSE <<P, Wr(1), Wr(1), U, Fl, P, Wr(1), Wr(1), U, Fl, Ex>>]
+\* The same with two readers, each in one section, so that the eligible slots change under the scans.
+P_leave_race3 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Ld(1), U>>
+                                       [] t = 2 -> <<P, Wr(1), Wr(1), U, Fl, Ex>>
+                                       [] t = 3 -> <<P, Ld(1), U>>]
+\* The leave against an insert, once, with the reader parked for good after: thread 2 replaces
+\* cell 1's value (retiring the node the reader loaded) and flushes while thread 1 drops its
+\* guard, and exits. The insert that finds INVPTR must
 \* roll back, since no enter of thread 1 will ever take the word (no_rollback, as a lasso).
-P_leave_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, U>> ELSE <<P, Rt, U, Fl, Ex>>]
-\* A flush short of nodes: thread 1 holds a reservation while thread 2 retires one fresh node
-\* and flushes (one filler for thread 1's slot), then thread 1 drops its guard and parks.
-P_flush_pad == [t \in {1, 2} |-> IF t = 1 THEN <<P, After(2, 4), U>>
-                                         ELSE <<P, Rt, U, Fl>>]
-\* Two readers hold reservations while a thread retires one node and exits: two fillers.
-P_exit_pad2 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, After(3, 4), U>>
-                                     [] t = 2 -> <<P, After(3, 4), U>>
-                                     [] t = 3 -> <<P, Rt, U, Ex>>]
+P_leave_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U>> ELSE <<P, Wr(1), U, Fl, Ex>>]
+\* Two inserts racing one leave: the reader loads (its slot publishes the epoch), drops its
+\* guard, then replaces cell 2's initial value and flushes (its own flush places that batch,
+\* padded, into every slot that reads as active, its own left slot included) and parks; a
+\* writer replaces cell 1's value twice (a batch of two whose first node is the initial one,
+\* born at epoch 1, so the reader's slot is eligible and the second write's retire places it)
+\* and parks. The writer's insert that finds INVPTR behind its exchange rolls back, unless the
+\* reader's own flush landed its node on it first: then both count their nodes and the left
+\* slot holds a list nobody traverses (RC_find_reanimated_*, README.md).
+P_leave_race2 == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, Wr(2), Fl>>
+                                           ELSE <<P, Wr(1), Wr(1), U>>]
+\* A flush short of nodes: thread 1 holds a reservation (it loaded) while thread 2, in a
+\* section of its own that loaded too, replaces cell 1's value and flushes: one node, two
+\* eligible slots, one filler; then both drop their guards and thread 1 parks.
+P_flush_pad == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), After(2, 3), U>>
+                                         ELSE <<P, Ld(1), Wr(1), Fl, U>>]
+\* Two readers hold reservations (they loaded) while a thread replaces cell 1's value and
+\* exits with that one node: one filler.
+P_exit_pad2 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Ld(1), After(3, 4), U>>
+                                     [] t = 2 -> <<P, Ld(1), After(3, 4), U>>
+                                     [] t = 3 -> <<P, Wr(1), U, Ex>>]
 \* A drop whose destructor retires: the batch a flush places is freed at once (no slot active)
 \* and its value's drop retires two more nodes and pins, so the flush places again (DtorRtRtPU).
 P_flush_chain == [t \in {1} |-> <<P, Wr(1), U, Fl>>]
 \* The same at the exit.
 P_exit_chain_leave == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
 \* A destructor that loads (DtorR2) while another thread replaces and retires what it loads, run
-\* by a flush (nested_destructors: its pin enters no slot, the loads unprotected).
+\* by a flush (a batch of two, so the retire keeps the value and the flush frees it;
+\* nested_destructors: its pin enters no slot, the loads unprotected).
 P_flush_dtor_load == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Fl, Ex>>
                                                ELSE <<P, Wr(2), U, Fl, P, Wr(2), U, Fl, Ex>>]
 
-\* ------------------------------------------------------------ re-entrance with helping
+\* ------------------------------------------------------------ re-entrance
 
-\* Thread 1 caches a batch holding node 1 (whose drop retires) and retires on a batch and
-\* epoch boundary, helping thread 2's slow path, whose drain frees the cache.
-P_help_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, Rt, U>>
-                                          ELSE <<P, U, P, U>>]
-\* Thread 1 caches node 1's batch at a transition that then takes the slow path; thread 2's
-\* retires place a node in thread 1's slot, then its epoch advance helps thread 1. Node 1's drop
-\* reads cell 2, replaces it and retires the value it read in a batch of two.
-P_slow_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, U>>
-                                          ELSE <<After(1, 4), Rt, Rt>>]
-\* A slow-path hand-over (thread 1's pin, pending once thread 2's first flush advanced the
-\* epoch under it, completed by thread 2's second flush) racing thread 3's third retire into
-\* thread 1's slot (its first two only fill the batch).
-P_hand_over == [t \in {1, 2, 3} |-> CASE t = 1 -> <<After(2, 2), P, U>>
-                                [] t = 2 -> <<P, U, Fl, After(3, 3), Fl>>
-                                [] t = 3 -> <<After(2, 3), Rt, Rt, Rt>>]
 \* A reader pinned at the first epoch loads a value the writer allocated later, which the writer
 \* then retires in a batch of late values only (two fillers first place the early one).
 P_era == [t \in {1, 2} |-> IF t = 1 THEN <<P, After(2, 8), Ld(1), Ld(1), U>>
@@ -274,19 +277,18 @@ P_era == [t \in {1, 2} |-> IF t = 1 THEN <<P, After(2, 8), Ld(1), Ld(1), U>>
 \* epoch, in batches of late values only.
 P_exit_raw == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, After(2, 8), Ex>>
                                         ELSE <<After(1, 4), P, U, Fl, P, Wr(2), Rt, Rt, Wr(2), Wr(2), U, Fl>>]
-\* Thread 1 caches node 1, whose drop retires (a fast transition takes node 1's batch from its
-\* own slot onto the cache, which nothing drains), then retires twice with no guard, the
-\* retires advancing the epoch under thread 2's transition, which takes the slow path; thread
-\* 1's next transition frees the cache (nothing cached past one traversal), or its next retire
-\* helps thread 2 first.
-P_reenter == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, U, Rt, Rt, P, U>>
+\* Thread 1 loads (its slot publishes), replaces cell 1's value (node 1, whose drop retires) and
+\* retires a fresh node (a batch in its own slot, which its drop takes onto the cache and
+\* drains, running node 1's drop inside the drain), then retires twice with no guard while
+\* thread 2 pins and drops; thread 1 pins and drops again.
+P_reenter == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Wr(1), Rt, U, P, U, Rt, Rt, P, U>>
                                         ELSE <<After(1, 6), P, U>>]
-P_reenter_rt == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, U, Rt, Rt, Rt>>
+P_reenter_rt == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Wr(1), Rt, U, P, U, Rt, Rt, Rt>>
                                            ELSE <<After(1, 6), P, U>>]
 
-\* One thread: a flush with no guard leaves its reservation at epoch 0, so the retire after it
-\* frees its batch at once, outside any guard: the drop of that batch's value pins (outermost,
-\* a transition inside the retire), loads cell 1 and drops its guard.
+\* One thread: a flush with no guard; the retire after it frees its batch at once (no slot
+\* active), outside any guard: the drop of that batch's value pins (an outermost pin inside the
+\* retire, which activates the slot), loads cell 1 and drops its guard.
 P_reentrant == [t \in {1} |-> <<P, Wr(1), U, Fl, Rt>>]
 DtorR1At3 == DtorOf(3, DRead(1))
 
@@ -361,24 +363,15 @@ P_wf_recycle_dtor == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, Fl>>
 
 \* ------------------------------------------------------------ liveness and bounds
 
-\* Thread 1 exits (releasing its tid, parking what it cannot place) while thread 2 first pins,
+\* Thread 1 exits (releasing its tid, placing its batch padded) while thread 2 first pins,
 \* loads, retires and flushes; only thread 2 need be scheduled fairly.
 P_stall == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), U, Ex>>
                                      ELSE <<P, Ld(1), U, Rt, Fl>>]
-\* A pinner with one fast attempt against a thread that flushes (helps, then advances the
-\* epoch) again and again.
+\* A pinner against a thread that flushes again and again (the pin is one exchange whatever the
+\* flushes do).
 P_wf_pin == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, P, U, P, U>>
                                       ELSE <<P, U, Fl, Fl, Fl, Fl>>]
-\* A pinner whose every transition takes the slow path, advancing the epoch between its pins,
-\* against a thread whose flush helps it from its second request on.
-P_help_follows == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Rt, P, U, Rt, P, U, Rt, P, U, Rt, P, U,
-                                                      Rt, P, U>>
-                                            ELSE <<After(1, 2), P, U, Fl>>]
-\* The same, the flush free to help the pinner's first request, whose seqno is 0: the helper's
-\* check of that request can read a later request's INVPTR with the 0 its self-completion left.
-P_help_torn == [t \in {1, 2} |-> IF t = 1 THEN <<P, U, Rt, P, U, Rt, P, U, Rt, P, U, Rt, P, U>>
-                                         ELSE <<P, U, Fl>>]
-\* A loader against a writer that advances the epoch at every retire.
+\* A loader against a writer whose every allocation advances the epoch.
 P_wf_load == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), Ld(1), U>>
                                        ELSE <<P, Wr(1), Wr(1), Wr(1), U>>]
 
@@ -389,10 +382,12 @@ Fair2 == SpecW /\ WF_allvars(StepW(2))
 Released(n) == LET r == IF nbl[n] < 0 THEN n ELSE nbl[n]
                IN r \in Nodes /\ nro[r] = 0 /\ nbl[r] < 0
 DrainLive == <>[](\A n \in Nodes : nst[n] = "retired" => Released(n))
-\* The node the last thread retires (the highest id) is eventually released, though a reader
-\* stays in one critical section for good: born after the reader's reservation, its batch skips
-\* the reader's slot.
-LastReleased == <>[](nst[MaxNodes] = "retired" => Released(MaxNodes))
+\* The node the last thread retires is eventually released, though a reader stays in one critical
+\* section for good: born after the reader's reservation, its batch skips the reader's slot. In
+\* P_first_advance the nodes are allocated in id order, the cells' first, then thread 2's, then
+\* thread 3's (the fillers of thread 3's exit after it), so that node is NCells + 2.
+LastNode == NCells + 2
+LastReleased == <>[](nst[LastNode] = "retired" => Released(LastNode))
 \* Every retired value is eventually freed. In words: from some moment on ("<>[]", eventually and
 \* then for good), no node is in the state "retired" (each one retired has been freed). The
 \* scenario that checks it has one thread retire a value without pinning, flush, and then live on

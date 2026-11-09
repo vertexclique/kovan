@@ -30,9 +30,11 @@ Kovan tracks this automatically with near-zero overhead on reads.
   64-bit atomics, see Supported Platforms).
 - **Bounded memory**: Never grows unbounded like epoch-based schemes. A thread's
   reservation ends with the drop of its outermost guard, so a thread with no
-  live guard (idle, parked, between tasks) holds no retired value back; a
-  `flush()` or a thread exit places what the thread retired whatever other
-  threads reserve, never keeping a batch, even across thread exit.
+  live guard (idle, parked, between tasks) holds no retired value back (one
+  race of the algorithm's insert with that drop can leave the slot a list the
+  thread's next pin or exit takes; see the crate documentation); a `flush()`
+  or a thread exit places what the thread retired whatever other threads
+  reserve, never keeping a batch, even across thread exit.
 - **Simple API**: `Atom<T>` for safe usage, `pin()`/`load()`/`retire()` for low-level control
 
 ## Quick Start

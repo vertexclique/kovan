@@ -23,10 +23,10 @@
 //!   eligible for every batch) and completes with one final load.
 //! - **`pin()`: wait-free.** A nested pin is a counter update. An outermost
 //!   pin activates the thread's reservation: one exchange of its slot's
-//!   list word, and a walk of what that took (at most one node per retire
-//!   whose insert into the left slot has not rolled back yet). It publishes
-//!   no epoch. A thread's first pin also claims a thread ID: one pass over
-//!   the released IDs, no lock.
+//!   list word, and a walk of what that took (one node per batch an insert
+//!   left in the slot since it was left, see Quiescence). It publishes no
+//!   epoch. A thread's first pin also claims a thread ID: one pass over the
+//!   released IDs, no lock.
 //! - **`retire()`, `retire_reclaimable()`: wait-free.** O(1) per call;
 //!   every 64th submits the batch: one pass over the T slots, one insert
 //!   per eligible slot (one exchange, at most one compare-exchange after
@@ -105,6 +105,15 @@
 //! stays away and whatever it loaded before. Nothing has to be flushed
 //! before idling; [`flush`] submits what the calling thread itself retired
 //! and has not submitted yet (its partial batch).
+//!
+//! One race of the algorithm's insert is the exception. An insert that
+//! finds the slot just left (the inactive marker behind its exchange) takes
+//! its node back, unless a second insert landed on that node first: both
+//! then count their nodes, and the left slot holds a list until the
+//! thread's next pin or exit, which takes it. The batches it keeps
+//! meanwhile are those whose values were born no later than the epoch the
+//! slot last published; the thread's next `pin()` or exit frees them. The
+//! model's `RC_find_reanimated` exhibits the race (proofs/tla/reclaim).
 //!
 //! # Recycling node memory (the `recycle` feature)
 //!

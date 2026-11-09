@@ -6,9 +6,6 @@
 use crate::retired::{INVPTR, RetiredNode, is_rnode, rnode_unmask};
 use core::sync::atomic::Ordering;
 
-/// Traversals whose zero-count batches the free-list cache holds before it
-/// is freed (see `Handle::traverse_into_cache`).
-
 /// Trait for types that can be reclaimed by the wait-free memory
 /// reclamation system.
 ///
@@ -222,7 +219,7 @@ pub unsafe trait Reclaimable: Sized {
 /// Traverse a slot's retirement list, decrementing refs for each node.
 ///
 /// Walks the list following `next` pointers. For each node:
-/// - Exchanges `next` with INVPTR (prevents double-traverse by concurrent helpers)
+/// - Exchanges `next` with INVPTR (an insert still linking its node sees the traversal passed)
 /// - If RNODE: terminal refs-node, fetch_sub(1) on refs
 /// - Otherwise: follow batch_link to refs-node, fetch_sub(1)
 /// - If refs reaches 0: add refs-node to free list

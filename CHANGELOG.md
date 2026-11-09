@@ -26,9 +26,14 @@ Every crate goes to 0.2.4.
   (`unflushed_parked_thread_holds_nothing_back`), `tests/exit_adopt.rs`,
   `guard::tests::an_idle_thread_holds_nothing_back`, `guard::tests::a_nested_drop_leaves_the_slot_active`,
   `tests/shuttle_leave.rs` (the leave against an insert, under shuttle), the TLA+ configurations
-  `RC_park`, `RC_live_park`, `RC_nested`, `RC_leave_race` and the mutations `RC_mut_no_leave`,
-  `RC_mut_leave_store`, `RC_mut_leave_pinned`, `RC_mut_no_rollback` (`proofs/tla/reclaim`), and the
-  Lean proofs `Kovan.Leave` (`proofs/lean`).
+  `RC_park`, `RC_live_park`, `RC_nested`, `RC_leave_race`, `RC_leave_race2_safe` and the mutations
+  `RC_mut_no_leave`, `RC_mut_leave_store`, `RC_mut_leave_pinned`, `RC_mut_no_rollback`
+  (`proofs/tla/reclaim`), and the Lean proofs `Kovan.Leave` (`proofs/lean`). One case stays open
+  in the algorithm's insert, which the model exhibits (`RC_find_reanimated`,
+  `RC_find_reanimated_live`): two inserts racing one leave, the second landing on the first's node
+  before its rollback, leave the left slot a list nobody traverses until the thread's next pin or
+  exit; the batches it holds are those whose values were born no later than the slot's published
+  epoch.
 - kovan: `flush()` and a thread's exit place their partial batch whatever other threads reserve:
   a batch with fewer nodes than there are eligible slots is padded with fillers (bare nodes freed
   with the batch, one per eligible slot beyond the batch's nodes), so neither keeps a batch back
@@ -60,6 +65,15 @@ Every crate goes to 0.2.4.
   advance nothing. Tests:
   `guard::tests::era::a_thread_advances_at_its_first_allocation_and_every_epoch_freq_th`,
   `guard::tests::an_epoch_advance_refreshes_the_birth_stamp`.
+- kovan: every operation is wait-free with no helping: the pin is one exchange, the load makes
+  at most 16 attempts and escalates, the scan visits every slot once, an insert makes one
+  exchange and at most one compare-exchange, the drop one exchange, a walk and a drain, a flush
+  or an exit one placement per destructor round. The TLA+ model counts every operation's steps
+  (`RC_wf_pin`, `RC_wf_load`, `RC_wf_mix`, `RC_wf_leave_race`, `RC_wf_exit`, `RC_wf_unpinned_*`,
+  `RC_wf_recycle*`; `RC_mut_no_escalate` and `RC_mut_ttas_locks` break the bounds) and the Lean
+  module `Kovan.Bounds` proves the arithmetic of each bound for every size. Fillers are
+  allocated, one per eligible slot beyond the batch's nodes, the same step as a node's
+  allocation, outside the algorithm's step count.
 - kovan: a thread's reservation is a pointer-sized list word and a 64-bit era word, each a
   target-native atomic. The 128-bit word pairs, their sequence numbers and the helping state they
   carried are gone with the slow path, and so are the `portable-atomic` dependency, the

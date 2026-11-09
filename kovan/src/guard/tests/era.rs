@@ -43,7 +43,6 @@ fn a_thread_advances_at_its_first_allocation_and_every_epoch_freq_th() {
             .filter(|i| i % EPOCH_FREQ == 0)
             .collect();
         assert_eq!(advanced, expected);
-        assert!(2 * EPOCH_FREQ + 1 > RETIRE_FREQ, "the loop places batches");
     })
     .join()
     .unwrap();

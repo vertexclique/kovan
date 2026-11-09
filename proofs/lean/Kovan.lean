@@ -1,4 +1,5 @@
 import Kovan.Atom
+import Kovan.Bounds
 import Kovan.Channel
 import Kovan.FlushExit
 import Kovan.HopscotchShrink

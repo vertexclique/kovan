@@ -85,11 +85,12 @@ without a pin. B has no tid, and the values wait in its batch.
    and so did B's exit. B's values were never submitted, so never freed. And before 0.2.4 a
    flush whose batch had fewer nodes than there were eligible slots kept the batch, and an
    exit parked it on its tid for a later flush to adopt.
-2. What happens now: B's `flush()` claims a tid, as a first pin does, when its own batch holds
-   a value, and places the batch, padded with fillers so that it is always placed; with nothing
-   to do it still returns at once and claims nothing. B's exit, finding no tid and a value in
-   its batch, claims a tid and runs the exit every thread runs: leave the slot, place what it
-   holds, release the tid. Both place again while the destructors they ran retired.
+2. What happens now: B's `flush()` places the batch, padded with fillers so that it is always
+   placed, and claims no tid: a placement goes to the reservations of the threads that hold
+   one, and the epoch moves with allocations, so nothing a flush does needs a tid. B's exit,
+   finding a value in its batch, places it the same way (it has no slot to leave and no tid to
+   release); a thread with no tid and an empty batch has nothing to do and returns. Both place
+   again while the destructors they ran retired.
 3. So, whatever B does (retire, flush, pin, then exit) and whatever happens to each retire's
    submission, every value B retired is submitted once B has exited, and every flush B makes
    before its exit, and its exit, leaves its batch empty.
@@ -135,6 +136,32 @@ under 2^63, any sequence of steps. The TLA+ model in `../tla/reclaim` checks the
 several threads, several batches and the epoch at small sizes (`RC_park`, `RC_leave_race`,
 `RC_nested`, `RC_flush_pad`, and the mutations `no_leave`, `leave_store`, `leave_pinned`,
 `no_rollback`, `filler_kept`, `filler_freed_early`).
+
+### The fourth proof: the step bound of every operation
+
+The TLA+ model (`../tla/reclaim`) counts the steps of every operation in progress and checks
+each count against a bound (`OpBound`, the `RC_wf_*` configurations) at small sizes. The terms
+of that bound are arithmetic in the thread count, the constants and the lists an operation
+walks. `Kovan/Bounds.lean` states each term as a function of those sizes and proves the bound
+for every size:
+
+1. A protected load with `L` attempts takes at most `3 L + 1` steps whatever the epoch does
+   (`loadRun_le`, `protectLoad_le`); without the escalation no bound holds: for every candidate
+   there is a number of epoch moves past which the load has taken more steps
+   (`noEscalate_unbounded`, the model's `RC_mut_no_escalate`).
+2. An outermost pin is `3 + the tid claim` steps plus three per node its exchange took
+   (`pinSteps_eq`, `pinSteps_le_of_le`); an outermost drop is seven steps plus three per node
+   of the list and one per batch freed (`leaveSteps_eq`).
+3. A submission's scan takes at most three steps per slot (`scanSteps_le`), makes never more
+   fillers than slots (`fillers_le`), and each insert takes at most six steps
+   (`insertSteps_le`, `insertsSteps_le`): the whole submission is `6 + 3 T` plus six per node
+   (`tryRetireSteps_le`, `retireSteps_le`).
+4. A flush is two steps plus `12 + 3 T` per round and the per-node work (`flushSteps_le`), an
+   exit nine plus three per node of the list it took plus the same per round (`exitSteps_le`),
+   for any number of rounds over at most `T` slots each (`rounds_le`).
+5. The epoch clock: a thread's first allocation advances the epoch at any frequency
+   (`first_allocation_advances`); raised before its check, it does not
+   (`late_first_allocation_advances_nothing`, the model's `RC_mut_late_first_advance`).
 
 ### The segment queue's words
 
@@ -262,11 +289,11 @@ padded placement, `Kovan/Leave.lean`) together with what their destructors retir
 
 | theorem | what it says |
 |---------|--------------|
-| `flush_returns_iff` | `flush()` returns at once exactly when the thread has no tid and either nothing to submit or its exit already ran, or when it runs inside a reclamation |
-| `flush_claims_iff` | `flush()` claims a tid exactly when the thread has none, runs outside any reclamation before its exit, and has a value in its batch |
-| `flush_runs_iff` | `flush()` runs with the tid it has exactly when the thread has one, outside any reclamation |
-| `flush_idle_claims_none` | a flush with no tid and an empty batch claims no tid |
-| `exit_returns_iff`, `exit_claims_iff`, `exit_runs_iff` | the exit returns at once exactly with no tid and an empty batch, claims a tid exactly with no tid and a value in its batch, and runs exactly with a tid |
+| `flush_returns_iff` | `flush()` returns at once exactly when it runs inside a reclamation |
+| `flush_runs_iff` | `flush()` runs exactly when it is outside any reclamation, tid or no tid |
+| `flush_without_tid_runs` | a flush on a thread that never pinned runs: it places what the thread retired without claiming a tid |
+| `exit_returns_iff`, `exit_runs_iff` | the exit returns at once exactly with no tid and an empty batch, and runs exactly with a tid or a value in its batch |
+| `exit_without_tid_runs` | the exit of a thread with no tid whose batch holds a value runs: it places the batch without claiming a tid |
 | `leak_free` | once the thread has exited, every value it retired, over any run, is submitted |
 | `retired_is_kept` | every value the thread retires before its exit is submitted once it has exited |
 | `flush_leaves_nothing` | a flush made before the exit leaves the batch empty, whatever the destructors it ran retired |
@@ -291,7 +318,24 @@ every way.
 | `traversed_le_inserted`, `count_exact`, `count_zero_iff` | over any sequence of inserts, traversals and the submission, traversals never exceed inserts, the count's word is the bias less the traversals before the submission and the inserts not yet traversed after it, and it is zero exactly when the batch was submitted and every inserted node was traversed |
 | `threadStep_inv`, `threadReach_inv`, `active_only_pinned`, `idle_slot_inactive` | over any sequence of pins, nested pins, drops, enters, leaves and exits, a slot is active only while its thread holds a guard, is entering or is leaving, and an idle thread's slot is inactive |
 | `slotStep_inv`, `slotReach_inv`, `counted_only_if_owner_pinned` | one slot, its owner and one insert interleaved every way: an insert counts its node only when the owner's enter or leave took it or the node sits in the word of a slot whose owner holds a guard or is leaving |
-| `idle_never_counted`, `left_slot_holds_nothing` | a thread with no live guard, not mid-transition, is counted by no batch, and a left slot holds no node |
+| `idle_never_counted`, `left_slot_holds_nothing` | a thread with no live guard, not mid-transition, is counted by no batch, and a left slot holds no node (one insert per slot: two inserts racing the leave are the TLA+ finding `RC_find_reanimated`) |
+
+`Kovan/Bounds.lean`, the step bounds of `../tla/reclaim/Reclaim.tla`'s `OpBound`, each term a
+function of the sizes it depends on (the labels of the model's code map), for every size:
+
+| theorem | what it says |
+|---------|--------------|
+| `loadRun_le`, `protectLoad_le` | a protected load with `L` attempts takes at most `3 L + 1` steps, however often the epoch moves |
+| `noEscalate_unbounded` | without the escalation, for every candidate bound some number of epoch moves makes the load exceed it |
+| `pinSteps_eq`, `pinSteps_le_of_le` | an outermost pin is `3 + the tid claim` steps plus three per node taken |
+| `leaveSteps_eq` | an outermost drop is seven steps plus three per node of the list and one per batch freed |
+| `scanSteps_le` | the scan takes at most three steps per slot |
+| `fillers_le` | a padded submission makes never more fillers than there are slots |
+| `insertSteps_le`, `insertsSteps_le` | every insert takes at most six steps, whatever it finds |
+| `tryRetireSteps_le`, `retireSteps_le` | a submission is `6 + 3 T` steps plus six per node; a retire three more |
+| `roundSteps_le`, `rounds_le` | a round of a flush or an exit is `12 + 3 T` plus the per-node and per-batch work, summed over the rounds |
+| `flushSteps_le`, `exitSteps_le` | a flush is two steps plus its rounds; an exit nine plus three per node taken plus its rounds |
+| `first_allocation_advances`, `late_first_allocation_advances_nothing` | a thread's first allocation advances the epoch at any frequency; raised before its check it does not |
 
 All of them use only Lean's standard axioms (`propext`, `Classical.choice`, `Quot.sound`), or
 none; `#print axioms` lists them.
