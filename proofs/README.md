@@ -48,7 +48,7 @@ every size; a Lean proof covers every size, for its one-thread model of the code
 | tool | what it checks in kovan | how far a check goes |
 |------|-------------------------|----------------------|
 | TLA+, checked by TLC (`tla/`) | concurrent interleavings: the memory reclamation protocol of `kovan`, and the atomic steps of both maps of `kovan-map` (one step of the model is one atomic step of the code) | every order of every thread's steps, for the threads, keys, buckets and programs each configuration sets |
-| Lean 4 (`lean/`) | functional and arithmetic properties, such as thresholds and bounds on the work a sequence of operations causes | every input and every sequence of operations, for a one-thread model of the code |
+| Lean 4 (`lean/`) | functional and arithmetic properties, such as thresholds and bounds on the work a sequence of operations causes, and the memory-ordering laws the reclamation rests on (`lean/Kovan/Ordering/`) | every input and every sequence of operations, for a one-thread model of the code; for the orderings, every execution of the shape each theorem names |
 
 ## How to run them
 
@@ -170,3 +170,11 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 - `lean/Kovan/Stm.lean`: the STM's lock word (the lock in bit 0, the version in the rest, packed
   and unpacked exactly by the code's masks), the clock (even, growing, no wrap before `2^63`
   commit attempts), a load's retry as a later commit, and the rank renaming the TLA+ model uses.
+- `lean/Kovan/Ordering/`: the memory orderings 0.2.4 got wrong. On x86-64's store buffers
+  (`Tso.lean`), a locked write or `MFENCE` on both sides keeps the pin and the scan from both
+  missing, and plain stores do not. Under the C11 rules (`C11.lean`, [atomics.order] p4's
+  conditions as named definitions taken as hypotheses), a `SeqCst` fence on both sides or a
+  `SeqCst` load on the reader's side forbids both missing (`PinFence.lean`), and a `Release` tag
+  store at the leave orders the reader's reads before the free (`ReleaseTag.lean`); concrete
+  executions that obey every rule show 0.2.4's `SeqCst` exchange with an `Acquire` load allowing
+  both to miss, and its `Relaxed` tag store letting a read race with the free.
