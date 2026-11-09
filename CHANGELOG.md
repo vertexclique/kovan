@@ -52,10 +52,22 @@ Every crate goes to 0.2.4.
 
 ### Changed
 
-- kovan: every outermost `pin()` enters the slot (one exchange of the list word, one publication
-  of the current epoch, the stable-epoch attempts and the helping slow path as before); a pin
-  no longer skips when the global epoch is where the thread's last transition left it, since the
-  slot is inactive between sections. Test: `guard::tests::era::every_outermost_pin_enters`.
+- kovan: every outermost `pin()` activates the slot with one exchange of its list word, since the
+  slot is inactive between sections, and publishes the epoch only when the global epoch moved
+  since the slot's era (the stable-epoch attempts and the helping slow path as before). Test:
+  `guard::tests::era::an_outermost_pin_publishes_only_when_the_epoch_moved`.
+- kovan: no destructor runs inside a submission or a pin: the batches a retire's submission, its
+  helping or a pin's traversal release go onto the thread's cache and are freed once that work is
+  done, by the retire itself or by the guard's drop, and a leave inside a drain leaves the freeing
+  to the drain. A destructor that retires no longer nests one submission inside another, which
+  overflowed the stack of a thread whose destructors each submitted a batch. Tests:
+  `guard::tests::nesting::destructors_that_submit_batches_free_one_after_another`,
+  `guard::tests::nesting::a_leave_inside_a_drain_leaves_the_freeing_to_the_drain`, the TLA+
+  mutation `RC_mut_slow_path_frees` (a pin's slow path that frees what it traverses).
+- kovan: a retire links its node into the thread's batch inline, and runs the submission, the
+  epoch advance and the drain out of line only when one of them is due, as the retire of 0.2.3
+  was inlined: the deferred drain above had taken the retire out of line. Behaviour is
+  unchanged.
 - kovan: `flush()` advances the global epoch only when it placed a batch; with nothing retired it
   returns at once, as `flush_pending` did. It no longer drains or deactivates the thread's own
   slot, which the guard's drop now does. Test: `guard::tests::a_drop_that_retired_nothing_leaves_the_epoch`.
