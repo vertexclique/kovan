@@ -46,6 +46,9 @@ inductive Ph where
   | done
   deriving DecidableEq
 
+/-- `f` with the phase of insert `i` set to `v` (core Lean has no `Function.update`). -/
+def upd (f : Nat → Ph) (i : Nat) (v : Ph) : Nat → Ph := fun j => if j = i then v else f j
+
 /-- The word, by the node heading it, and every insert's phase. -/
 structure St where
   head : Option Nat
@@ -58,11 +61,11 @@ def init : St := ⟨none, fun _ => Ph.fresh⟩
 inductive Step (s : St) : St → Prop
   /-- An insert's exchange: its node heads the word. -/
   | exchange (i : Nat) (h : s.ph i = Ph.fresh) :
-      Step s ⟨some i, Function.update s.ph i Ph.placed⟩
+      Step s ⟨some i, upd s.ph i Ph.placed⟩
   /-- An insert's compare-exchange (the rollback, or the undo after the tag was read): the word
   becomes empty when the insert's node still heads it, and stays as it is otherwise. -/
   | resolve (i : Nat) (h : s.ph i = Ph.placed) :
-      Step s ⟨(if s.head = some i then none else s.head), Function.update s.ph i Ph.done⟩
+      Step s ⟨(if s.head = some i then none else s.head), upd s.ph i Ph.done⟩
 
 /-- The states reachable from the start. -/
 inductive Reach : St → Prop
@@ -81,7 +84,7 @@ theorem step_inv {s u : St} (hs : Step s u) (ih : Inv s) : Inv u := by
     intro h hh
     simp at hh
     subst hh
-    simp
+    simp [upd]
   | resolve i hi =>
     intro h hh
     by_cases hc : s.head = some i
@@ -91,7 +94,7 @@ theorem step_inv {s u : St} (hs : Step s u) (ih : Inv s) : Inv u := by
         intro e
         subst e
         exact hc hh
-      simp [hne]
+      simp [upd, hne]
       exact ih h hh
 
 theorem inv_of_reach {s : St} (hr : Reach s) : Inv s := by
