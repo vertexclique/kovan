@@ -6,8 +6,8 @@
 use super::era::slot_list;
 use super::progress::drain;
 use super::{
-    Counted, Hold, eventually, join_within, lock, own_tid, published_epoch, slot_inactive,
-    with_handle,
+    Counted, DESTRUCTOR_IN_TRY_RETIRE, Hold, eventually, join_within, lock, own_tid,
+    published_epoch, slot_inactive, with_handle,
 };
 use crate::guard::{flush, pin, retire};
 use crate::retired::RetiredNode;
@@ -54,6 +54,7 @@ fn two_retires_racing_a_leave_leave_the_slot_empty() {
     }
 
     let _l = lock();
+    DESTRUCTOR_IN_TRY_RETIRE.store(false, Ordering::SeqCst);
     let live = Arc::new(AtomicUsize::new(0));
     let values: Vec<usize> = (0..2)
         .map(|_| {
@@ -123,6 +124,10 @@ fn two_retires_racing_a_leave_leave_the_slot_empty() {
         live.load(Ordering::SeqCst),
         0,
         "the batches of two retires that raced a leave wait for the parked reader"
+    );
+    assert!(
+        !DESTRUCTOR_IN_TRY_RETIRE.load(Ordering::SeqCst),
+        "a destructor ran inside a submission"
     );
     parked.release();
     reader.join().unwrap();

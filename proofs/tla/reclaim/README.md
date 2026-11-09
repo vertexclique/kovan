@@ -173,12 +173,13 @@ Notation: T = `MaxTid` (the thread IDs handed out), L = `LoadAttempts` (16), A =
 a `Traverse` call ends at its last `TV1` (`TravCtl` = 1), a `FreeBatch` call at its last `FB1`
 (`FreeCtl` = 1).
 
-**Per object (`PerObject` = 20, times `Hist` = the node objects).** A node object is retired once,
+**Per object (`PerObject` = 17, times `Hist` = the node objects).** A node object is retired once,
 inserted into a slot list at most once (only a successful `try_retire` inserts; a failed one,
 `merge_batch`, inserts nothing, and no orphan chain re-submits a batch), traversed at most once
-(`traverse` swaps `next` with INVPTR) and freed once. It costs at most: 12 steps for its insert
+(`traverse` swaps `next` with INVPTR) and freed once. It costs at most: 9 steps for its insert
 (the longest path, a failed link CAS and a tagged era: `TN2`, `TN3`, `TN4`, `TL1`, the end of the
-displaced list's traversal, `TL2`, the end of its free, `TL3`, `TN5`, `TN6`, `TN7`, `TN8`);
+displaced list's traversal, `TL2`, `TN5`, `TN6`, `TN7`; the list goes onto the cache, a drain after
+the submission frees what it released);
 3 for its traversal (`TV1`, `TV2`, `TV3`); 3 for its free (`FB1`, `DS1`, the last `DS2`); and 2
 for the drain round that frees its batch (`DF2` and the call end), since a drain's further
 rounds each free at least one batch of at least one object. Without `Recycle` the objects are
@@ -202,8 +203,8 @@ count, evaluated in the state checked.
 | `HelpPassCtl` | 5 + `DoUpdCtl` | `HelpPass`, a `do_update`, `HT6`, `HT12`, `HT12b`, `HT12c` |
 | `HelpCtl` | 4 + (T + 2) x `HelpPassCtl` + 12 + `DetachCtl` + 2 `TICCtl` + 3 | `HT1` to `HT4`; the passes; `HT7`, `HT10`, `HandOverEpoch`, `HandOverEpoch2`, `HandOverEpoch3` three times (two compare-exchanges and the check that ends it), `HandOverList`, `HelperLeave`, `HelperLeaveS`, `HelperLeave2`, `HT20`, with a detach, two `traverse_into_cache` and a drain |
 | `HelpReadCtl` | 3 + T (1 + `HelpCtl`) | `HR1`, `HR2`, the last `HR3`; per thread `HR3` and a `help_thread` |
-| `TryCtl` | 6 + 7T | `TR1`, seven scan labels per thread (`TS2` to `TS5`, `TG0`, `TG1`, `TG2`), `TN1`, the last `TN2`, `TF1` with the free's end, `TF2` |
-| `RetireCtl` | 6 + `TryCtl` + `TidCtl` + `HelpReadCtl` | `RE1` to `RE6` |
+| `TryCtl` | 5 + 7T | `TR1`, seven scan labels per thread (`TS2` to `TS5`, `TG0`, `TG1`, `TG2`), `TN1`, the last `TN2`, `TF1`, `TF2` (a submission frees nothing) |
+| `RetireCtl` | 7 + `TryCtl` + `TidCtl` + `HelpReadCtl` + `DrainCtl` | `RE1` to `RE7`, and the drain `RE7` calls |
 | `LeaveCtl` | 5 + 1 + 3 | `UP1`, `LeaveMark`, `LeaveMarkS`, `Leave`, `LeaveDrain`, the traversal's end and a drain |
 | `PinCtl` | 8 + 1 + `TidCtl` + A (2 + `DoUpdOwnCtl`) + `SlowCtl` | `PN1`, `PNE`, `PNE2`, `PNX`, `PNX2`, `PNG`, `PNT`, `PNF`, the traversal's end, then A attempts of `PNU`, a `do_update` and `PNC`, and the slow path |
 | `RoundCtl` | 5 + `TryCtl` + `HelpReadCtl` + `DrainCtl` | `FL4` (or `ExitPlace`), the help and the advance, the drain, the check |
@@ -340,7 +341,7 @@ the leave at the outermost drop and the padded placement (commit 2d77e32) and th
   below every birth, as `era_covers` is in the code, so the scan and the insert's first checks
   skip a tagged slot with no further step. An insert reads the era word after its exchange
   (`TN5`): tagged, the owner left since the scan, and the insert takes its node back with one
-  compare-exchange (`TN6`), walking and freeing the list its node displaced (`TN7`, `TN8`);
+  compare-exchange (`TN6`), walking the list its node displaced onto the cache (`TN7` ends it);
   a failed compare-exchange counts the node, which an exchange took and traverses.
 - **Load and store as two steps.** `activate` loads the era word and stores the untagged value
   only when it was tagged (`PNE`, `PNE2`; `DU2`, `DU2s`); `leave` loads the era word and always
@@ -364,7 +365,7 @@ the leave at the outermost drop and the padded placement (commit 2d77e32) and th
   never INVPTR: the read after a clear cannot find the slot inactive.
 - `ActiveOnlyPinned` (an active slot belongs to a pinned, entering or leaving owner, or to an
   insert in flight), `CountExact` and `CacheBelowPublished` are the earlier invariants with the
-  new labels (`TN5` to `TN8`, `LeaveMark`, `ExitMark`, the pin's entry).
+  new labels (`TN5` to `TN7`, `LeaveMark`, `ExitMark`, the pin's entry).
 
 ### The new configurations
 
@@ -381,6 +382,16 @@ the leave at the outermost drop and the padded placement (commit 2d77e32) and th
 `RC_mut_no_leave` (the deferred leave: an idle thread holds batches, `DrainLive` and
 `ActiveOnlyPinned`) is the earlier mutation for it. Every configuration of the passing set lists
 `NoBatchOnLeftSlot`, `PinnedIsActive` and `IdleHoldsNothing` besides its earlier invariants.
+
+A submission frees nothing (guard.rs, `try_retire`): a batch whose count reaches zero (`TF1`), the
+list an insert displaced and walks (`TL1`, `TN6`) go onto the thread's free-list cache, and a retire
+outside every reclamation drains the cache once its submission and its help are done (`RE7`), so a
+destructor that retires never runs inside a submission. A guard dropped inside a reclamation adds
+to the cache and leaves the freeing to the running drain (`LeaveDrain` checks `in_reclaim`). The
+ghosts `sub` and `inlist` start over when the pool hands a node out (`Take`): a node that is a
+new object has been submitted in no batch and sits in no list, which `CountExact` needs under
+recycling. Since the free steps left the submission, the step bounds above are the new, lower
+ones (`TryCtl`, `PerObject`, `Bounds.lean`).
 
 The results of these configurations (states, depth, seconds) are not measured yet: the TLC runs
 are made by CI (`.github/workflows/tla.yml`), and the table below is filled from its run. The
@@ -628,145 +639,144 @@ only when the loaded word is tagged, so `PNE2` and `DU2s` run only then; `leave`
 | `TV1` | `traverse` | `reclaim.rs:260-282` | the end of the list; next swapped with INVPTR |
 | `TV2` | `traverse` | `reclaim.rs:290` | batch_link.load |
 | `TV3` | `traverse` | `reclaim.rs:291-296` | refs fetch_sub; the count's last decrement pushes the batch; (ghost) the node leaves its list |
-| `DS1` | `free_batch_list` | `reclaim.rs:332-345` | the destructor called |
-| `DS2` | `drop_boxed`, `dealloc_reclaimable` | `guard.rs:2058`, `2071` | the value's drop, then its memory freed or (Recycle) the node handed to the pool |
-| `FB1` | `free_batch_list`, `drop_filler` | `reclaim.rs:310-348`, `guard.rs:2064` | one node: the batch words (`316`, `330-331`), its destructor called; a filler freed by its own |
-| `TC1` | `traverse_into_cache` | `guard.rs:1618-1625` | a full cache taken out of its cell and freed |
-| `TC2` | `traverse_into_cache` | `guard.rs:1626` | in_reclaim restored; traverse_onto_cache |
-| `DF1` | `drain_free_list` | `guard.rs:1652-1662` | in_reclaim; the cache taken out of its cell and freed |
-| `DF2` | `drain_free_list` | `guard.rs:1654-1664` | again until the cell stays empty |
-| `DU1` | `do_update` | `guard.rs:550` | first.load_lo |
-| `DU2` | `do_update`, `ThreadSlots::activate` | `guard.rs:551`, `slot.rs:479-480` | the era word's load_lo |
+| `DS1` | `free_batch_list` | `reclaim.rs:334-347` | the destructor called |
+| `DS2` | `drop_boxed`, `dealloc_reclaimable` | `guard.rs:2098`, `2111` | the value's drop, then its memory freed or (Recycle) the node handed to the pool |
+| `FB1` | `free_batch_list`, `drop_filler` | `reclaim.rs:310-350`, `guard.rs:2104` | one node: the batch words (`316`, `330-331`), its destructor called; a filler freed by its own |
+| `TC1` | `traverse_into_cache` | `guard.rs:1639-1646` | a full cache taken out of its cell and freed |
+| `TC2` | `traverse_into_cache` | `guard.rs:1647` | in_reclaim restored; traverse_onto_cache |
+| `DF1` | `drain_free_list` | `guard.rs:1673-1683` | in_reclaim; the cache taken out of its cell and freed |
+| `DF2` | `drain_free_list` | `guard.rs:1675-1685` | again until the cell stays empty |
+| `DU1` | `do_update` | `guard.rs:566` | first.load_lo |
+| `DU2` | `do_update`, `ThreadSlots::activate` | `guard.rs:567`, `slot.rs:479-480` | the era word's load_lo |
 | `DU2s` | `do_update`, `ThreadSlots::activate` | `slot.rs:482` | store_lo of the era without the tag (only when tagged) |
-| `DU2b` | `do_update`, `ThreadSlots::activate` | `guard.rs:551-559`, `slot.rs:484` | the exchange_lo(0); the list traversed onto the cache (slot 0) or into it (a helper slot) |
-| `DU3` | `do_update` | `guard.rs:561` | epoch() after the traversal |
-| `DU4` | `do_update` | `guard.rs:562-578` | store_lo(curr_epoch) (`562` or `565`), fence, mirror_transition |
-| `DetachEra` | `detach_nodes` | `guard.rs:884` | the era's compare_exchange_hi(tag, tag + 1) |
-| `DetachList` | `detach_nodes` | `guard.rs:888` | first.load(): lo |
-| `DetachList2` | `detach_nodes` | `guard.rs:888-890` | then hi; taken by the other detach |
-| `DetachList3` | `detach_nodes` | `guard.rs:894-896` | compare_exchange (lo, tag) -> (0, tag + 1) |
-| `SP1` | `slow_path` | `guard.rs:719-725` | in_reclaim; prev_epoch = epoch.load_lo |
-| `SP2` | `slow_path` | `guard.rs:726` | inc_slow |
-| `SP3` | `slow_path` | `guard.rs:729-733` | the state words stored 0 (no step, see below); seqno = epoch.load_hi |
-| `SP4` | `slow_path` | `guard.rs:736-738` | result.store(INVPTR, seqno): hi (WordPair::store) |
-| `SP5` | `slow_path` | `guard.rs:738` | then lo |
-| `SL1` | `slow_path` | `guard.rs:759-761` | epoch() compared with prev_epoch |
-| `SL2` | `slow_path` | `guard.rs:763-766` | the self-completion CAS |
-| `SL2a` | `slow_path` | `guard.rs:767` | epoch.store_hi(seqno + 2) |
-| `SL2b` | `slow_path` | `guard.rs:768` | first.store_hi(seqno + 2) |
-| `SL2c` | `slow_path` | `guard.rs:769-779` | dec_slow, mirror_transition, fence, drain_free_list |
-| `SL2d` | `slow_path` | `guard.rs:780-781` | in_reclaim restored |
-| `SL3` | `slow_path` | `guard.rs:788` | first.load_lo |
-| `SL4` | `slow_path` | `guard.rs:790` | exchange_lo(0) |
-| `SL5` | `slow_path` | `guard.rs:792-798` | first.load_hi: detached (produced); else onto the cache |
-| `SL5b` | `slow_path` | `guard.rs:799` | epoch() read again |
-| `SL6` | `slow_path` | `guard.rs:804-805` | the era DCAS (prev, seqno) -> (curr, seqno) |
-| `SL7` | `slow_path` | `guard.rs:807-809` | result.load_lo: answered |
-| `DN1` | `slow_path` | `guard.rs:815-818` | detach_nodes unless produced |
-| `Produced` | `slow_path` | `guard.rs:823` | result.load_hi |
-| `Produced2` | `slow_path` | `guard.rs:824` | epoch.store_lo(result_epoch) |
-| `Produced3` | `slow_path` | `guard.rs:825-829` | epoch.store_hi(seqno + 2), mirror_transition, fence |
-| `Produced4` | `slow_path` | `guard.rs:830` | first.store_hi(seqno + 2) |
-| `DN9` | `slow_path` | `guard.rs:835-850` | result.load_lo; the hand-over branch, never taken |
-| `DN10` | `slow_path` | `guard.rs:852-856` | dec_slow; the list onto the cache |
-| `DN11` | `slow_path` | `guard.rs:858` | drain_free_list |
-| `DN12` | `slow_path` | `guard.rs:859` | in_reclaim restored |
-| `HR1` | `help_read` | `guard.rs:912-914` | slow_counter |
-| `HR2` | `help_read` | `guard.rs:916` | max_threads |
-| `HR3` | `help_read` | `guard.rs:921-928` | each result.load_lo; help_thread |
-| `HT1` | `help_thread` | `guard.rs:959-961` | result.load(): lo; nothing to help unless pending |
-| `HT2` | `help_thread` | `guard.rs:959` | then hi |
-| `HT3` | `help_thread` | `guard.rs:964-979` | state words (constants, see below); seqno = epoch.load_hi |
-| `HT4` | `help_thread` | `guard.rs:981` | curr_epoch = epoch() |
-| `HelpPass` | `help_thread` | `guard.rs:991` | do_update of the helper slot hr_num + 1 |
-| `HT6` | `help_thread` | `guard.rs:993-996` | epoch() compared |
-| `HT7` | `help_thread` | `guard.rs:998-1003` | the result CAS; detach_nodes |
-| `HT10` | `help_thread` | `guard.rs:1004-1007` | traverse_into_cache |
-| `HandOverEpoch` | `help_thread` | `guard.rs:1016` | epoch.load(): lo |
-| `HandOverEpoch2` | `help_thread` | `guard.rs:1016` | then hi |
-| `HandOverEpoch3` | `help_thread` | `guard.rs:1017-1030` | the strong CAS loop |
-| `HandOverList` | `help_thread` | `guard.rs:1034` | first.compare_exchange_hi(seqno + 1, seqno + 2) |
-| `HT12` | `help_thread` | `guard.rs:1050` | result.load_lo() |
-| `HT12b` | `help_thread` | `guard.rs:1053-1054` | result.load_hi(); the request the one read first? |
-| `HT12c` | `help_thread` | `guard.rs:1054` | the era's seqno still the request's: another pass |
-| `HelperLeave` | `help_thread`, `ThreadSlots::leave` | `guard.rs:1060`, `slot.rs:495` | the helper slot's era word load_lo |
+| `DU2b` | `do_update`, `ThreadSlots::activate` | `guard.rs:567-575`, `slot.rs:484` | the exchange_lo(0); the list traversed onto the cache (slot 0) or into it (a helper slot) |
+| `DU3` | `do_update` | `guard.rs:577` | epoch() after the traversal |
+| `DU4` | `do_update` | `guard.rs:578-594` | store_lo(curr_epoch) (`562` or `565`), fence, mirror_transition |
+| `DetachEra` | `detach_nodes` | `guard.rs:900` | the era's compare_exchange_hi(tag, tag + 1) |
+| `DetachList` | `detach_nodes` | `guard.rs:904` | first.load(): lo |
+| `DetachList2` | `detach_nodes` | `guard.rs:904-906` | then hi; taken by the other detach |
+| `DetachList3` | `detach_nodes` | `guard.rs:910-912` | compare_exchange (lo, tag) -> (0, tag + 1) |
+| `SP1` | `slow_path` | `guard.rs:735-741` | in_reclaim; prev_epoch = epoch.load_lo |
+| `SP2` | `slow_path` | `guard.rs:742` | inc_slow |
+| `SP3` | `slow_path` | `guard.rs:745-749` | the state words stored 0 (no step, see below); seqno = epoch.load_hi |
+| `SP4` | `slow_path` | `guard.rs:752-754` | result.store(INVPTR, seqno): hi (WordPair::store) |
+| `SP5` | `slow_path` | `guard.rs:754` | then lo |
+| `SL1` | `slow_path` | `guard.rs:775-777` | epoch() compared with prev_epoch |
+| `SL2` | `slow_path` | `guard.rs:779-782` | the self-completion CAS |
+| `SL2a` | `slow_path` | `guard.rs:783` | epoch.store_hi(seqno + 2) |
+| `SL2b` | `slow_path` | `guard.rs:784` | first.store_hi(seqno + 2) |
+| `SL2c` | `slow_path` | `guard.rs:785-795` | dec_slow, mirror_transition, fence, drain_free_list |
+| `SL2d` | `slow_path` | `guard.rs:796-797` | in_reclaim restored |
+| `SL3` | `slow_path` | `guard.rs:804` | first.load_lo |
+| `SL4` | `slow_path` | `guard.rs:806` | exchange_lo(0) |
+| `SL5` | `slow_path` | `guard.rs:808-814` | first.load_hi: detached (produced); else onto the cache |
+| `SL5b` | `slow_path` | `guard.rs:815` | epoch() read again |
+| `SL6` | `slow_path` | `guard.rs:820-821` | the era DCAS (prev, seqno) -> (curr, seqno) |
+| `SL7` | `slow_path` | `guard.rs:823-825` | result.load_lo: answered |
+| `DN1` | `slow_path` | `guard.rs:831-834` | detach_nodes unless produced |
+| `Produced` | `slow_path` | `guard.rs:839` | result.load_hi |
+| `Produced2` | `slow_path` | `guard.rs:840` | epoch.store_lo(result_epoch) |
+| `Produced3` | `slow_path` | `guard.rs:841-845` | epoch.store_hi(seqno + 2), mirror_transition, fence |
+| `Produced4` | `slow_path` | `guard.rs:846` | first.store_hi(seqno + 2) |
+| `DN9` | `slow_path` | `guard.rs:851-866` | result.load_lo; the hand-over branch, never taken |
+| `DN10` | `slow_path` | `guard.rs:868-872` | dec_slow; the list onto the cache |
+| `DN11` | `slow_path` | `guard.rs:874` | drain_free_list |
+| `DN12` | `slow_path` | `guard.rs:875` | in_reclaim restored |
+| `HR1` | `help_read` | `guard.rs:928-930` | slow_counter |
+| `HR2` | `help_read` | `guard.rs:932` | max_threads |
+| `HR3` | `help_read` | `guard.rs:937-944` | each result.load_lo; help_thread |
+| `HT1` | `help_thread` | `guard.rs:975-977` | result.load(): lo; nothing to help unless pending |
+| `HT2` | `help_thread` | `guard.rs:975` | then hi |
+| `HT3` | `help_thread` | `guard.rs:980-995` | state words (constants, see below); seqno = epoch.load_hi |
+| `HT4` | `help_thread` | `guard.rs:997` | curr_epoch = epoch() |
+| `HelpPass` | `help_thread` | `guard.rs:1007` | do_update of the helper slot hr_num + 1 |
+| `HT6` | `help_thread` | `guard.rs:1009-1012` | epoch() compared |
+| `HT7` | `help_thread` | `guard.rs:1014-1019` | the result CAS; detach_nodes |
+| `HT10` | `help_thread` | `guard.rs:1020-1023` | traverse_into_cache |
+| `HandOverEpoch` | `help_thread` | `guard.rs:1032` | epoch.load(): lo |
+| `HandOverEpoch2` | `help_thread` | `guard.rs:1032` | then hi |
+| `HandOverEpoch3` | `help_thread` | `guard.rs:1033-1046` | the strong CAS loop |
+| `HandOverList` | `help_thread` | `guard.rs:1050` | first.compare_exchange_hi(seqno + 1, seqno + 2) |
+| `HT12` | `help_thread` | `guard.rs:1066` | result.load_lo() |
+| `HT12b` | `help_thread` | `guard.rs:1069-1070` | result.load_hi(); the request the one read first? |
+| `HT12c` | `help_thread` | `guard.rs:1070` | the era's seqno still the request's: another pass |
+| `HelperLeave` | `help_thread`, `ThreadSlots::leave` | `guard.rs:1076`, `slot.rs:495` | the helper slot's era word load_lo |
 | `HelperLeaveS` | `help_thread`, `ThreadSlots::leave` | `slot.rs:496-499` | store_lo(kept, tagged left) |
-| `HelperLeave2` | `help_thread`, `ThreadSlots::leave` | `guard.rs:1060-1063`, `slot.rs:500` | the helper slot's first.exchange_lo(INVPTR); traversed |
-| `HT20` | `help_thread` | `guard.rs:1066-1088` | the parent words (no parent); drain_free_list |
-| `TR1` | `try_retire` | `guard.rs:1357-1370` | max_threads, min_epoch, the fence |
-| `TS2` | `try_retire` | `guard.rs:1374` | first.load_lo (reservation slot) |
-| `TS3` | `try_retire` | `guard.rs:1379` | first.load_hi odd |
-| `TS4` | `try_retire` | `guard.rs:1382-1383` | epoch.load_lo |
-| `TS5` | `try_retire` | `guard.rs:1387-1403` | epoch.load_hi odd; a node assigned, or [Pad] a filler made (`filler`, `1582`) and assigned |
-| `TG0` | `try_retire` | `guard.rs:1408-1410` (`j = 1`) | first.load_lo of the parent slot: INVPTR in every state, so the scan skips it |
-| `TG1` | `try_retire` | `guard.rs:1408-1410` (`j = 2`) | first.load_lo (helper slot) |
-| `TG2` | `try_retire` | `guard.rs:1412-1428` | epoch.load_lo; a node assigned, or [Pad] a filler |
-| `TN1` | `try_retire` | `guard.rs:1431-1441` | [PadMark] the refs-node's mark set to the new first node |
-| `TN2` | `try_retire` | `guard.rs:1450-1463` | slot info, next null; first.load_lo |
-| `TN3` | `try_retire` | `guard.rs:1467-1470` | epoch re-checked (era_covers: a tagged word is below every birth) |
-| `TN4` | `try_retire` | `guard.rs:1475` | exchange_lo(curr); (ghost) the node is in a list |
-| `InsertRollback` | `try_retire` | `guard.rs:1479-1501` | compare_exchange_lo(curr, INVPTR); a node the owner's activation took counts |
-| `TL1` | `try_retire` | `guard.rs:1503-1520` | next CAS null -> prev |
-| `TL2` | `try_retire` | `guard.rs:1518`, `1567-1574` | the list it displaced traversed and freed (traverse_and_free) |
-| `TL3` | `try_retire` | `guard.rs:1519` | the displaced list handled; on to the re-check |
-| `TN5` | `try_retire` | `guard.rs:1524-1533` | [InsertCheck] the era word read after the exchange: untagged, the node counts |
-| `TN6` | `try_retire` | `guard.rs:1533-1535` | [InsertUndo] compare_exchange_lo(curr, INVPTR); a failed one counts |
-| `TN7` | `try_retire` | `guard.rs:1536-1538`, `1567-1574` | the list the node displaced walked and freed |
-| `TN8` | `try_retire` | `guard.rs:1539-1541` | the node taken back, not counted; next node |
-| `TF1` | `try_retire` | `guard.rs:1548-1555` | refs fetch_add(adjs); zero frees the batch; (ghost) submitted |
-| `TF2` | `try_retire` | `guard.rs:1557` | placed |
-| `RE1` | `enqueue_node` | `guard.rs:1117-1155` | the node linked into the batch, the count (nightly: a thread with no tid registers its cleanup sentinel, `1123-1125`, not modelled) |
-| `RE2` | `enqueue_node` | `guard.rs:1155-1170` | in_reclaim; take_batch (`1256-1272`), try_retire (whether it placed the batch) |
-| `RE3` | `enqueue_node` | `guard.rs:1171-1178` | merge_batch (`1288-1330`); in_reclaim restored |
-| `RE4` | `enqueue_node` | `guard.rs:1196-1199` | alloc_counter, checked before it is raised, or a placed batch; tid() |
-| `RE5` | `increment_era` | `guard.rs:1211-1214` | in_reclaim; help_read |
-| `RE6` | `increment_era` | `guard.rs:1215` | advance_epoch (`slot.rs:536`); the birth stamp |
-| `PN1` | `pin` | `guard.rs:606-616`, `636` | the count; an outermost pin enters (tid claimed on a thread's first pin, `slots()` at `270-285`) |
-| `PNE` | `enter`, `ThreadSlots::activate` | `guard.rs:636`, `slot.rs:479-480` | the era word's load_lo (pin_skips_activation: nothing when the epoch did not move) |
+| `HelperLeave2` | `help_thread`, `ThreadSlots::leave` | `guard.rs:1076-1079`, `slot.rs:500` | the helper slot's first.exchange_lo(INVPTR); traversed |
+| `HT20` | `help_thread` | `guard.rs:1082-1104` | the parent words (no parent); drain_free_list |
+| `TR1` | `try_retire` | `guard.rs:1392-1405` | max_threads, min_epoch, the fence |
+| `TS2` | `try_retire` | `guard.rs:1409` | first.load_lo (reservation slot) |
+| `TS3` | `try_retire` | `guard.rs:1414` | first.load_hi odd |
+| `TS4` | `try_retire` | `guard.rs:1417-1418` | epoch.load_lo |
+| `TS5` | `try_retire` | `guard.rs:1422-1438` | epoch.load_hi odd; a node assigned, or [Pad] a filler made (`filler`, `1603`) and assigned |
+| `TG0` | `try_retire` | `guard.rs:1443-1445` (`j = 1`) | first.load_lo of the parent slot: INVPTR in every state, so the scan skips it |
+| `TG1` | `try_retire` | `guard.rs:1443-1445` (`j = 2`) | first.load_lo (helper slot) |
+| `TG2` | `try_retire` | `guard.rs:1447-1463` | epoch.load_lo; a node assigned, or [Pad] a filler |
+| `TN1` | `try_retire` | `guard.rs:1466-1476` | [PadMark] the refs-node's mark set to the new first node |
+| `TN2` | `try_retire` | `guard.rs:1485-1498` | slot info, next null; first.load_lo |
+| `TN3` | `try_retire` | `guard.rs:1502-1505` | epoch re-checked (era_covers: a tagged word is below every birth) |
+| `TN4` | `try_retire` | `guard.rs:1510` | exchange_lo(curr); (ghost) the node is in a list |
+| `InsertRollback` | `try_retire` | `guard.rs:1514-1536` | compare_exchange_lo(curr, INVPTR); a node the owner's activation took counts |
+| `TL1` | `try_retire` | `guard.rs:1538-1556` | next CAS null -> prev |
+| `TL2` | `try_retire` | `guard.rs:1552-1556` | the list it displaced traversed onto the cache (traverse_onto_cache); on to the re-check |
+| `TN5` | `try_retire` | `guard.rs:1560-1569` | [InsertCheck] the era word read after the exchange: untagged, the node counts |
+| `TN6` | `try_retire` | `guard.rs:1569-1574` | [InsertUndo] compare_exchange_lo(curr, INVPTR); the list the node displaced walked onto the cache; a failed one counts |
+| `TN7` | `try_retire` | `guard.rs:1575-1576` | the node taken back, not counted; next node |
+| `TF1` | `try_retire` | `guard.rs:1583-1593` | refs fetch_add(adjs); zero puts the batch on the cache (`reclaim::traverse`'s push); (ghost) submitted |
+| `TF2` | `try_retire` | `guard.rs:1594` | placed |
+| `RE1` | `enqueue_node` | `guard.rs:1137-1175` | the node linked into the batch, the count (nightly: a thread with no tid registers its cleanup sentinel, `1143-1145`, not modelled) |
+| `RE2` | `enqueue_node` | `guard.rs:1175-1190` | in_reclaim; take_batch (`1283-1299`), try_retire (whether it placed the batch) |
+| `RE3` | `enqueue_node` | `guard.rs:1191-1198` | merge_batch (`1315-1357`); in_reclaim restored |
+| `RE4` | `enqueue_node` | `guard.rs:1216-1219` | alloc_counter, checked before it is raised, or a placed batch; tid() |
+| `RE5` | `increment_era` | `guard.rs:1238-1241` | in_reclaim; help_read |
+| `RE6` | `increment_era` | `guard.rs:1242` | advance_epoch (`slot.rs:536`); the birth stamp |
+| `RE7` | `enqueue_node` | `guard.rs:1222-1227` | a retire outside every reclamation drains the cache (what its submission released); a nested one leaves it to the reclamation it runs in |
+| `PN1` | `pin` | `guard.rs:622-632`, `652` | the count; an outermost pin enters (tid claimed on a thread's first pin, `slots()` at `270-285`) |
+| `PNE` | `enter`, `ThreadSlots::activate` | `guard.rs:652`, `slot.rs:479-480` | the era word's load_lo (pin_skips_activation: nothing when the epoch did not move) |
 | `PNE2` | `ThreadSlots::activate` | `slot.rs:482` | store_lo of the era without the tag, only when tagged (tag_clear_late: skipped, done at `PNX2`) |
-| `PNX` | `enter`, `ThreadSlots::activate` | `guard.rs:636`, `slot.rs:484` | the one exchange_lo(0) of the list word, SeqCst |
+| `PNX` | `enter`, `ThreadSlots::activate` | `guard.rs:652`, `slot.rs:484` | the one exchange_lo(0) of the list word, SeqCst |
 | `PNX2` | (model) | | (tag_clear_late only: the tag cleared here; a no-op otherwise) |
-| `PNG` | `enter` | `guard.rs:637-638` | the publish fence, epoch() read after the activation |
-| `PNT` | `enter_cold` | `guard.rs:649-654` | what the activation took traversed onto the cache |
-| `PNF` | `enter`, `enter_cold` | `guard.rs:639-662` | the epoch against cached_epoch: equal, nothing published (the birth cache set); moved, the transition |
-| `PNU` | `transition` | `guard.rs:665-676` | do_update |
-| `PNC` | `transition` | `guard.rs:674-685` | attempts; epoch() compared; slow_path |
-| `UP1` | `unpin` | `guard.rs:422-431` | the count lowered; the outermost drop leaves |
-| `LeaveMark` | `leave_slot`, `ThreadSlots::leave` | `guard.rs:496`, `slot.rs:495` | the era word's load_lo |
+| `PNG` | `enter` | `guard.rs:653-654` | the publish fence, epoch() read after the activation |
+| `PNT` | `enter_cold` | `guard.rs:665-670` | what the activation took traversed onto the cache |
+| `PNF` | `enter`, `enter_cold` | `guard.rs:655-678` | the epoch against cached_epoch: equal, nothing published (the birth cache set); moved, the transition |
+| `PNU` | `transition` | `guard.rs:681-692` | do_update |
+| `PNC` | `transition` | `guard.rs:690-701` | attempts; epoch() compared; slow_path |
+| `UP1` | `unpin` | `guard.rs:428-437` | the count lowered; the outermost drop leaves |
+| `LeaveMark` | `leave_slot`, `ThreadSlots::leave` | `guard.rs:512`, `slot.rs:495` | the era word's load_lo |
 | `LeaveMarkS` | `leave_slot`, `ThreadSlots::leave` | `slot.rs:496-499` | store_lo(kept, tagged left; an escalated era reset to 0) |
-| `Leave` | `leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:467-476`, `496-503`, `slot.rs:500` | first.exchange_lo(INVPTR); the cached epoch reset (`497-499`); [LeaveTraverse] the captured list onto the cache |
-| `LeaveDrain` | `leave_cold` | `guard.rs:482-488` | drain_free_list with the slot inactive and the count 0 |
-| `LD1` | `protect_load` | `guard.rs:342` | data.load |
-| `LD2` | `protect_load` | `guard.rs:345-360` | epoch() vs cached_epoch |
-| `LD3` | `protect_load_cold` | `guard.rs:374-388` | attempts; escalate (`408-413`), or store_lo, fence, cached_epoch |
-| `LD4` | `protect_load_cold` | `guard.rs:391` | data.load |
-| `LD5` | `protect_load_cold` | `guard.rs:394-399` | epoch() compared |
-| `LD6` | `protect_load_cold` | `guard.rs:380` | the load after escalating |
+| `Leave` | `leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:473-482`, `512-519`, `slot.rs:500` | first.exchange_lo(INVPTR); the cached epoch reset (`497-499`); [LeaveTraverse] the captured list onto the cache |
+| `LeaveDrain` | `leave_cold` | `guard.rs:496-504` | drain_free_list with the slot inactive and the count 0; skipped inside a reclamation (in_reclaim), the running drain's loop frees what the leave added |
+| `LD1` | `protect_load` | `guard.rs:348` | data.load |
+| `LD2` | `protect_load` | `guard.rs:351-366` | epoch() vs cached_epoch |
+| `LD3` | `protect_load_cold` | `guard.rs:380-394` | attempts; escalate (`408-413`), or store_lo, fence, cached_epoch |
+| `LD4` | `protect_load_cold` | `guard.rs:397` | data.load |
+| `LD5` | `protect_load_cold` | `guard.rs:400-405` | epoch() compared |
+| `LD6` | `protect_load_cold` | `guard.rs:386` | the load after escalating |
 | `LU1` | `Atomic::load_unprotected` | `atomic.rs:149` | data.load, no era check |
 | `WR1` | `Atomic::swap` | `atomic.rs:256` | the swap (after RetiredNode::new; then retire); with Recycle and a node in the pool, the take (the recycler's code) |
 | `WR2` | `RetiredNode::new`, `Atomic::swap` | `retired.rs:113-120`, `atomic.rs:256` | (Recycle) the taken node's header rewritten, the swap (then retire) |
 | `WR3` | (model) | | the pool's lock released after the retire (pool_lock_held only) |
 | `RN1` | `RetiredNode::new` | `retired.rs:113-120` | a node allocated, its birth stamped (then retire); with Recycle and a node in the pool, the take |
 | `RN2` | `RetiredNode::new` | `retired.rs:113-120` | (Recycle) the taken node's header rewritten (then retire) |
-| `FL1` | `flush` | `guard.rs:1705-1724` | tid; with none, the own batch; in_reclaim; with none, tid() claims one |
-| `FL4` | `place_all` | `guard.rs:1734-1735` | [FlushPlace] take_batch, try_retire padded |
-| `FL6` | `place_all`, `increment_era` | `guard.rs:1741`, `1211-1214` | [FlushAdvance] help_read |
-| `FL7` | `increment_era` | `guard.rs:1215` | advance_epoch, the birth stamp |
-| `FL8` | `place_all` | `guard.rs:1742` | [FlushDrain] drain_free_list |
-| `FL8b` | `place_all` | `guard.rs:1743-1745` | another round while the batch holds a value |
-| `FL9` | `flush` | `guard.rs:1725` | in_reclaim restored |
-| `EX1` | `cleanup` | `guard.rs:1753-1769` | with no tid and a batch, claim_tid (`1760`); in_reclaim; the pin count 0 |
-| `ExitMark` | `cleanup`, `leave_slot` | `guard.rs:1773`, `496` | [ExitLeave] the era word's load_lo, as the outermost drop does |
+| `FL1` | `flush` | `guard.rs:1726-1745` | tid; with none, the own batch; in_reclaim; with none, tid() claims one |
+| `FL4` | `place_all` | `guard.rs:1755-1756` | [FlushPlace] take_batch, try_retire padded |
+| `FL6` | `place_all`, `increment_era` | `guard.rs:1762`, `1238-1241` | [FlushAdvance] help_read |
+| `FL7` | `increment_era` | `guard.rs:1242` | advance_epoch, the birth stamp |
+| `FL8` | `place_all` | `guard.rs:1763` | [FlushDrain] drain_free_list |
+| `FL8b` | `place_all` | `guard.rs:1764-1766` | another round while the batch holds a value |
+| `FL9` | `flush` | `guard.rs:1746` | in_reclaim restored |
+| `EX1` | `cleanup` | `guard.rs:1774-1790` | with no tid and a batch, claim_tid (`1760`); in_reclaim; the pin count 0 |
+| `ExitMark` | `cleanup`, `leave_slot` | `guard.rs:1794`, `512` | [ExitLeave] the era word's load_lo, as the outermost drop does |
 | `ExitMarkS` | `cleanup`, `leave_slot` | `slot.rs:496-499` | the era word stored tagged left |
-| `ExitLeave` | `cleanup`, `leave_slot` | `guard.rs:1773-1777`, `slot.rs:500` | first.exchange_lo(INVPTR); the captured list onto the cache |
+| `ExitLeave` | `cleanup`, `leave_slot` | `guard.rs:1794-1798`, `slot.rs:500` | first.exchange_lo(INVPTR); the captured list onto the cache |
 | `ExitLeave2` | (model) | | (tid_released_early only: the tid released here; a no-op otherwise) |
-| `ExitPlace` | `place_all` | `guard.rs:1791`, `1734-1735` | [ExitPlace] take_batch, try_retire padded |
-| `ExitHelp` | `increment_era` | `guard.rs:1741`, `1211-1214` | help_read |
-| `ExitAdvance` | `increment_era` | `guard.rs:1215` | advance_epoch, the birth stamp |
-| `ExitFree` | `place_all` | `guard.rs:1742` | drain_free_list |
-| `ExitRound` | `place_all` | `guard.rs:1743-1745` | another round while the batch holds a value |
-| `EX12b` | `cleanup` | `guard.rs:1798` | release_tid |
-| `EX13` | `cleanup` | `guard.rs:1800-1810` | in_reclaim restored, the tid unset |
+| `ExitPlace` | `place_all` | `guard.rs:1812`, `1755-1756` | [ExitPlace] take_batch, try_retire padded |
+| `ExitHelp` | `increment_era` | `guard.rs:1762`, `1238-1241` | help_read |
+| `ExitAdvance` | `increment_era` | `guard.rs:1242` | advance_epoch, the birth stamp |
+| `ExitFree` | `place_all` | `guard.rs:1763` | drain_free_list |
+| `ExitRound` | `place_all` | `guard.rs:1764-1766` | another round while the batch holds a value |
+| `EX12b` | `cleanup` | `guard.rs:1819` | release_tid |
+| `EX13` | `cleanup` | `guard.rs:1821-1831` | in_reclaim restored, the tid unset |
 | `SK1`, `SK2`, `SK3` | (model) | | the spin lock's test, test-and-set, taken (ttas_locks only) |
 | `TC3` | (model) | | the copies written back (cache_copied, cache_overwritten only) |
 | `DN2` | (model) | | the detached list traversed into the cache before the republication (slow_path_frees only) |
@@ -785,15 +795,15 @@ only when the loaded word is tagged, so `PNE2` and `DU2s` run only then; `leave`
 Each is an access that no interleaving can tell from its absence, and each is named here so the
 model's omission is a stated fact, not a gap:
 
-- `slow_path` stores 0 to `state[0].pointer`, `.parent` and `.epoch` (`guard.rs:729-731`) and
-  `help_thread` loads them (`964-965`, `978`): kovan's pin always requests with `pointer = 0` and
+- `slow_path` stores 0 to `state[0].pointer`, `.parent` and `.epoch` (`guard.rs:745-747`) and
+  `help_thread` loads them (`980-981`, `994`): kovan's pin always requests with `pointer = 0` and
   `parent = 0`, no other code writes the three words, so they hold 0 in every state; the
   `parent != 0` branches never run.
 - `thread_slots` loads `pages[page_idx]` (`slot.rs:592-597`): the page is published before
   `next_tid` covers its ids, so every load that follows a `next_tid` read finds it set.
 - `ensure_page`'s load and compare-exchange (`slot.rs:568-580`): allocation, not modelled.
-- `cleanup`'s `debug_assert` loads of the helper slots (`guard.rs:1781`): debug builds only.
-- `flush_pending` (`guard.rs:1674`) is a thread-local read of the batch count in front of
+- `cleanup`'s `debug_assert` loads of the helper slots (`guard.rs:1802`): debug builds only.
+- `flush_pending` (`guard.rs:1695`) is a thread-local read of the batch count in front of
   `flush`; a skipped flush is a step `flush` with an empty batch also leaves undone, so `Fl`
   covers it.
 
@@ -924,7 +934,7 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_recycle_stale_link_next` | `RC_recycle` with stale_reuse_link_next: no `RetiredNode::new`, and the pool links its nodes through the header's first word (`next`), which the reuse keeps. Every invariant but `BirthFresh`. | nodes 12, recycle | pass |
 | `RC_recycle_stale_lag` | stale_reuse on a lagging thread: thread 1 pins at the first epoch and waits while thread 2's flushes advance the epoch and free a node it stamped later into the pool; thread 1 takes that node back with a write and flushes while thread 2 loads the cell. Every invariant but `BirthFresh`. | nodes 13, recycle | pass |
 | `RC_mut_reuse_retired` | reuse_retired: the recycler takes a node still in a retirement batch, its destructor not yet run. | nodes 12, recycle | `NoUseAfterFree` broken |
-| `RC_mut_read_after_dealloc` | read_after_dealloc: the reclamation walk reads a node's batch_next after its destructor handed the node to the pool. | nodes 12, recycle | `NoUseAfterFree` broken |
+| `RC_mut_read_after_dealloc` | read_after_dealloc: the reclamation walk reads a node's batch_next after its destructor handed the node to the pool. | nodes 10, EF 1, recycle (P_recycle_walk) | `NoUseAfterFree` broken |
 | `RC_mut_stale_link_birth` | stale_reuse_link_birth: no `RetiredNode::new`, and the pool links its nodes through the word of `birth_epoch`, so a reused node goes out with a pointer for its birth epoch. | nodes 12, recycle | `NoUseAfterFree` broken |
 | `RC_mut_pool_lock_held` | pool_lock_held: a recycler holds its pool's lock from a write's take until the retire of the old value returns; that retire frees the value's batch at once, and the destructor, on the same thread, waits for the lock. | threads 1, tids 1, nodes 3, recycle | deadlock |
 | `RC_mut_cache_ahead` | cache_ahead, the programs of `RC_two_loads`: the reader's raise caches the epoch it read and leaves its slot's word as it was. | as `RC_two_loads` | `CacheBelowPublished` broken |

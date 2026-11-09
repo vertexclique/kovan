@@ -182,8 +182,14 @@ impl Counted {
     }
 }
 
+/// Set by a `Counted` destructor that ran inside a `try_retire`.
+static DESTRUCTOR_IN_TRY_RETIRE: AtomicBool = AtomicBool::new(false);
+
 impl Drop for Counted {
     fn drop(&mut self) {
+        if with_handle(|h| h.in_try_retire.get() > 0) {
+            DESTRUCTOR_IN_TRY_RETIRE.store(true, Ordering::SeqCst);
+        }
         self.live.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -884,6 +890,7 @@ fn flush_without_a_tid_or_a_batch_claims_none() {
 
 mod era;
 mod late;
+mod nesting;
 mod progress;
 mod tag;
 

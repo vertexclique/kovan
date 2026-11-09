@@ -158,6 +158,10 @@ struct Handle {
     /// Fillers this thread added to padded batches (see `try_retire`).
     #[cfg(test)]
     fillers: Cell<usize>,
+    /// Calls of `try_retire` live on this thread, for the test that no
+    /// destructor runs inside one.
+    #[cfg(test)]
+    in_try_retire: Cell<u32>,
     /// The handle runs a critical section that began after this thread's
     /// exit was over (a thread-local destructor that runs after kovan's):
     /// the section holds a reservation under an ID of its own, and its end
@@ -191,6 +195,8 @@ impl Handle {
             in_reclaim: Cell::new(false),
             #[cfg(test)]
             fillers: Cell::new(0),
+            #[cfg(test)]
+            in_try_retire: Cell::new(0),
             late: Cell::new(false),
             exited: Cell::new(false),
         }
@@ -478,13 +484,23 @@ impl Handle {
 
     /// [LeaveTraverse] and [LeaveDrain], out of the line of the common
     /// leave, whose exchange took nothing and whose cache is empty.
+    ///
+    /// A leave inside a reclamation (a destructor's own section, run by a
+    /// drain, a retire or an exit) only adds to the cache and leaves the
+    /// freeing to the reclamation that is running, whose loop takes what the
+    /// destructors added (`drain_free_list`): a destructor that pins would
+    /// otherwise free the next batches inside its own frame, and the next
+    /// destructor's leave inside that one, one frame deeper for every batch
+    /// other threads placed meanwhile.
     #[cold]
     fn leave_cold(&self, first: u64) {
         if is_list(first) {
             // SAFETY: `first` is the list head the leave's exchange captured.
             unsafe { self.traverse_onto_cache(first as *mut RetiredNode) };
         }
-        self.drain_free_list();
+        if !self.in_reclaim.get() {
+            self.drain_free_list();
+        }
     }
 
     /// [LeaveMark] and [Leave]: the tagged store and the exchange that leave
@@ -1106,6 +1122,10 @@ impl Handle {
     /// - `birth_epoch` must already be set correctly.
     /// - The node must not be enqueued more than once.
     unsafe fn enqueue_node(&self, node_ptr: *mut RetiredNode) {
+        // A retire outside every reclamation frees what its submission and
+        // its helping released itself, once they are done; a nested one
+        // (a destructor's) leaves it to the reclamation it runs in.
+        let outermost = !self.in_reclaim.get();
         // Relaxed stores throughout: the batch is this thread's alone until
         // `try_retire` publishes it, and another thread reads these words
         // only after reaching the batch through a slot list, with an acquire
@@ -1153,8 +1173,8 @@ impl Handle {
 
         let mut placed = false;
         if count.is_multiple_of(RETIRE_FREQ) {
-            // Set in_reclaim: try_retire -> free_batch_list can call
-            // destructors which drop Atoms triggering flush().
+            // Set in_reclaim: a destructor a drain runs from here (a batch
+            // the submission freed) may drop an Atom that calls flush().
             let was_reclaiming = self.in_reclaim.get();
             self.in_reclaim.set(true);
 
@@ -1198,6 +1218,13 @@ impl Handle {
         if placed || alloc_count.is_multiple_of(EPOCH_FREQ) {
             self.increment_era(self.tid());
         }
+
+        // The batches the submission released wait on the cache: no
+        // destructor runs inside `try_retire`, so one that retires never
+        // nests in it.
+        if outermost && !self.free_list.get().is_null() {
+            self.drain_free_list();
+        }
     }
 
     /// Advance the global epoch [IncrementEra]: help the pending slow-path
@@ -1206,7 +1233,7 @@ impl Handle {
     /// the epoch it advanced to, as fresh a birth as the epoch it just made.
     fn increment_era(&self, tid: usize) {
         // Set in_reclaim: help_read -> help_thread -> do_update ->
-        // traverse_into_cache -> free_batch_list can call destructors which
+        // traverse_into_cache can free a full cache, whose destructors
         // drop Atoms triggering flush(). The flag prevents re-entrant
         // flush from reading stale free_list Cell state.
         let was_reclaiming = self.in_reclaim.replace(true);
@@ -1248,10 +1275,10 @@ impl Handle {
     /// `(batch_first, refs)`.
     ///
     /// The batch cells are left empty before the caller submits: destructors
-    /// running inside try_retire (via free_batch_list) may re-enter
-    /// retire()/flush() and must see empty batch cells, never the batch
-    /// being submitted (re-submitting it would double-insert and double-free
-    /// the whole batch).
+    /// the caller runs afterwards (the drain of what the submission freed)
+    /// may re-enter retire()/flush() and must see empty batch cells, never
+    /// the batch being submitted (re-submitting it would double-insert and
+    /// double-free the whole batch).
     #[inline]
     fn take_batch(&self) -> Option<(*mut RetiredNode, *mut RetiredNode)> {
         let first = self.batch_first.get();
@@ -1342,6 +1369,12 @@ impl Handle {
     /// destructor frees it, freed with its batch; `free_batch_list` calls it
     /// as it calls every destructor, so a filler never runs a user's.
     ///
+    /// No destructor runs inside: a batch the submission frees (its count
+    /// reached zero, or a displaced list a take-back walked) goes onto the
+    /// thread's cache, and the caller drains the cache after it
+    /// (`enqueue_node`, `place_all`). A destructor that retires therefore
+    /// never nests in a submission, however many batches that frees.
+    ///
     /// # Wait-free bound: O(T + batch_size) where T = number of active threads
     ///
     /// Two phases, both bounded:
@@ -1354,6 +1387,8 @@ impl Handle {
     ///   native platforms). Contention handling (INVPTR rollback, list tainting)
     ///   is O(1) per node.
     fn try_retire(&self, batch_first: *mut RetiredNode, refs: *mut RetiredNode, pad: bool) -> bool {
+        #[cfg(test)]
+        let _scope = TryRetireScope::enter(self);
         let global = self.global();
         let max_threads = global.max_threads();
         let hr_num = global.hr_num();
@@ -1515,8 +1550,9 @@ impl Handle {
                 }
                 .is_err()
                 {
-                    // Someone already set next (concurrent traverse)
-                    unsafe { self.traverse_and_free(behind) };
+                    // Someone already set next (concurrent traverse): the
+                    // list goes onto the cache, freed after the submission.
+                    unsafe { self.traverse_onto_cache(behind) };
                     behind = core::ptr::null_mut();
                 }
             }
@@ -1534,7 +1570,7 @@ impl Handle {
                 && slot_first_ref.compare_exchange_lo(curr as u64, INVPTR as u64)
             {
                 if !behind.is_null() {
-                    unsafe { self.traverse_and_free(behind) };
+                    unsafe { self.traverse_onto_cache(behind) };
                 }
                 curr = unsafe { (*curr).batch_next() };
                 continue;
@@ -1547,29 +1583,14 @@ impl Handle {
         // Adjust reference count
         let old = unsafe { (*refs).refs_or_next.fetch_add(adjs, Ordering::AcqRel) };
         if old == adjs.wrapping_neg() {
-            // refs reached 0 - free immediately
+            // refs reached 0: the batch is free, and goes onto the cache as
+            // a traversal's last decrement pushes one (`reclaim::traverse`).
             unsafe {
-                (*refs).next.store(core::ptr::null_mut(), Ordering::Relaxed);
-                crate::reclaim::free_batch_list(refs);
+                (*refs).next.store(self.free_list.get(), Ordering::Relaxed);
             }
+            self.free_list.set(refs);
         }
         true
-    }
-
-    /// Traverse a slot list a retire took out of a slot (see `try_retire`)
-    /// and free the batches that released, destructors included, as the
-    /// slot's owner would have.
-    ///
-    /// # Safety
-    ///
-    /// `first` must be a slot list head taken by an exchange (not null, not
-    /// INVPTR), as `reclaim::traverse` requires.
-    unsafe fn traverse_and_free(&self, first: *mut RetiredNode) {
-        let mut free_list: *mut RetiredNode = core::ptr::null_mut();
-        unsafe {
-            crate::reclaim::traverse(&mut free_list, first);
-            crate::reclaim::free_batch_list(free_list);
-        }
     }
 
     /// A filler for a padded batch (see `try_retire`): a bare node, linked
@@ -1824,6 +1845,25 @@ static HANDLE: Handle = Handle::new();
 #[cfg(not(feature = "nightly"))]
 thread_local! {
     static HANDLE: Handle = const { Handle::new() };
+}
+
+/// Counts the `try_retire` calls live on a thread (tests only).
+#[cfg(test)]
+struct TryRetireScope<'a>(&'a Handle);
+
+#[cfg(test)]
+impl<'a> TryRetireScope<'a> {
+    fn enter(handle: &'a Handle) -> Self {
+        handle.in_try_retire.set(handle.in_try_retire.get() + 1);
+        Self(handle)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TryRetireScope<'_> {
+    fn drop(&mut self) {
+        self.0.in_try_retire.set(self.0.in_try_retire.get() - 1);
+    }
 }
 
 /// Run `f` on this thread's handle.

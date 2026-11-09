@@ -117,7 +117,7 @@ RC_live_exits_park                 MC_Reclaim         pass
 RC_live_flush_chain                MC_Reclaim         pass
 RC_mut_no_leave                    MC_Reclaim         violated:DrainLive
 RC_mut_no_leave_active             MC_Reclaim         violated:ActiveOnlyPinned
-RC_mut_leave_store                 MC_Reclaim         violated:NoLoss
+RC_mut_leave_store                 MC_Reclaim         violated:CountExact
 RC_mut_leave_pinned                MC_Reclaim         violated:NoUseAfterFree
 RC_mut_no_rollback                 MC_Reclaim         violated:ActiveOnlyPinned
 RC_mut_no_rollback_live            MC_Reclaim         violated:DrainLive

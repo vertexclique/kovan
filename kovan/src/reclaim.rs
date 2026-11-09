@@ -308,6 +308,8 @@ pub(crate) unsafe fn traverse(free_list: &mut *mut RetiredNode, mut next: *mut R
 ///
 /// All refs-nodes in the list must have refs == 0.
 pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
+    #[cfg(test)]
+    let _depth = depth::Scope::enter();
     // One pass over the batches of the list, and over each batch's nodes:
     // the list is the caller's, taken out of any cell others reach.
     while !list.is_null() {
@@ -346,5 +348,47 @@ pub(crate) unsafe fn free_batch_list(mut list: *mut RetiredNode) {
             }
             curr = next;
         }
+    }
+}
+
+/// How deep `free_batch_list` nests on a thread, for the tests that a
+/// destructor never frees inside a free (tests only).
+#[cfg(test)]
+pub(crate) mod depth {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static NOW: Cell<usize> = const { Cell::new(0) };
+        static MAX: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// One live `free_batch_list` call.
+    pub(super) struct Scope;
+
+    impl Scope {
+        pub(super) fn enter() -> Self {
+            let now = NOW.with(|n| {
+                n.set(n.get() + 1);
+                n.get()
+            });
+            MAX.with(|m| m.set(m.get().max(now)));
+            Scope
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            NOW.with(|n| n.set(n.get() - 1));
+        }
+    }
+
+    /// The deepest nesting this thread reached since the last `reset`.
+    pub(crate) fn max() -> usize {
+        MAX.with(Cell::get)
+    }
+
+    /// Forget the nesting reached so far.
+    pub(crate) fn reset() {
+        MAX.with(|m| m.set(0));
     }
 }

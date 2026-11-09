@@ -194,13 +194,13 @@ at once in it.
 | label | function | code | step |
 |---|---|---|---|
 | `OP` | every operation | | the operation's first step, as below |
-| `OP` (`load`) | `Atom::load`, `AtomOption::load`, `AtomMap::load` | `atom.rs:341`, `709`, `857`; `guard.rs:526-542` | `guard::pin()` |
-| `LD2` | `Atomic::load`, `protect_load`, `protect_load_cold` | `atom.rs:342`, `710-719`; `atomic.rs:101-107`; `guard.rs:289-354` | the word loaded, the published epoch raised; `None` on a null word |
-| `OP` (`drop`, `dropc`) | `Guard::drop`, `unpin` | `guard.rs:73-89`, `376-388` | the pin count lowered, saturating; the section ends at 0 |
+| `OP` (`load`) | `Atom::load`, `AtomOption::load`, `AtomMap::load` | `atom.rs:341`, `709`, `857`; `guard.rs:542-558` | `guard::pin()` |
+| `LD2` | `Atomic::load`, `protect_load`, `protect_load_cold` | `atom.rs:342`, `710-719`; `atomic.rs:101-107`; `guard.rs:295-360` | the word loaded, the published epoch raised; `None` on a null word |
+| `OP` (`drop`, `dropc`) | `Guard::drop`, `unpin` | `guard.rs:73-89`, `382-394` | the pin count lowered, saturating; the section ends at 0 |
 | `OP` (`store`, `swap`) | `Atom::store`, `Atom::swap`, `AtomOption::store_some` | `atom.rs:411-412`, `445-446`, `738-739`; `node.rs:78-83`; `retired.rs:113-121` | `AtomNode::boxed`, stamped with `current_birth_epoch`, then `guard::pin()` |
 | `ST2` | `Atomic::swap` | `atom.rs:415`, `741`; `atomic.rs:246-252` | the word swapped to the new node |
 | `SN2` | `AtomOption::store_none` | `atom.rs:752-754` | the word swapped to null |
-| `ST3` | `retire_node`, `enqueue_node`, the guard's drop | `atom.rs:416-421`, `742-746`, `755-759`; `node.rs:149-159`; `guard.rs:987-1088` | the old node retired with the value's destructor (any retire may advance the epoch), the guard dropped |
+| `ST3` | `retire_node`, `enqueue_node`, the guard's drop | `atom.rs:416-421`, `742-746`, `755-759`; `node.rs:149-159`; `guard.rs:1003-1104` | the old node retired with the value's destructor (any retire may advance the epoch), the guard dropped |
 | `OP` (`take`) | `AtomOption::take` | `atom.rs:768` | `guard::pin()` |
 | `SW2` | `Atomic::swap` | `atom.rs:449`, `770` | the word swapped |
 | `SW3` | `swap`, `take` | `atom.rs:449-452`, `770-776` | the `Removed` made of the old node, left as it is, the guard dropped |
@@ -215,9 +215,9 @@ at once in it.
 | `RU3` | `Atom::rcu` | `atom.rs:552-562`, `571-574` | `AtomNode::boxed`, the compare-and-swap; on failure `drop_node` and the guard's drop |
 | `RU4` | `Atom::rcu` | `atom.rs:563-569` | the old node retired, the guard dropped |
 | `OP` (`into_inner`) | `Atom::into_inner`, `AtomNode::into_val` | `atom.rs:304-313`, `84-90` | pin, load, the node freed now, the value to the caller |
-| `OP` (`dropatom`) | `Drop for Atom`, `Drop for AtomOption`, `flush` | `atom.rs:614-626`, `782-792`; `guard.rs:1531-1637` | the last node's value dropped and the node freed, the epoch advanced |
+| `OP` (`dropatom`) | `Drop for Atom`, `Drop for AtomOption`, `flush` | `atom.rs:614-626`, `782-792`; `guard.rs:1567-1658` | the last node's value dropped and the node freed, the epoch advanced |
 | `OP` (`is_none`) | `AtomOption::is_none`, `is_some` | `atom.rs:724-733` | pin, load, the null check, the guard's drop |
-| `RC1` | kovan's reclamation | `guard.rs:1265-1345` (`try_retire`'s scan); `node.rs:167-171` (the destructors) | a retired node freed once its sections have ended; `drop_node` or `free_node` |
+| `RC1` | kovan's reclamation | `guard.rs:1292-1378` (`try_retire`'s scan); `node.rs:167-171` (the destructors) | a retired node freed once its sections have ended; `drop_node` or `free_node` |
 | `ST2r`, `ST2w`, `RU2b`, `II2`; `OP` (`send`, `recv`) | (mutations) | | the steps a wrong rule adds |
 
 ## TLC results
