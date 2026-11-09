@@ -28,12 +28,25 @@ Every crate goes to 0.2.4.
   `tests/shuttle_leave.rs` (the leave against an insert, under shuttle), the TLA+ configurations
   `RC_park`, `RC_live_park`, `RC_nested`, `RC_leave_race`, `RC_leave_race2_safe` and the mutations
   `RC_mut_no_leave`, `RC_mut_leave_store`, `RC_mut_leave_pinned`, `RC_mut_no_rollback`
-  (`proofs/tla/reclaim`), and the Lean proofs `Kovan.Leave` (`proofs/lean`). One case stays open
-  in the algorithm's insert, which the model exhibits (`RC_find_reanimated`,
-  `RC_find_reanimated_live`): two inserts racing one leave, the second landing on the first's node
-  before its rollback, leave the left slot a list nobody traverses until the thread's next pin or
-  exit; the batches it holds are those whose values were born no later than the slot's published
-  epoch.
+  (`proofs/tla/reclaim`), and the Lean proofs `Kovan.Leave` (`proofs/lean`).
+- kovan: two retires racing one leave leave the slot empty. The algorithm's insert exchanges its
+  node into a slot and, finding the inactive marker behind it, takes the node back with a
+  compare-exchange that fails when another exchange took the node first; a second insert landing
+  on the node before that is such an exchange, and the model showed the left slot keeping the two
+  nodes, read as active, until the thread's next pin or exit, with both batches waiting. Now the
+  leave tags the slot's era word (one plain store, before its exchange) and the activation clears
+  the tag; a scan skips a tagged slot, and an insert reads the era word after its exchange: tagged,
+  it takes its node and what it displaced out together and traverses the latter, so the left slot
+  holds a list only while such an insert is between its two exchanges. The one addition to the
+  algorithm's insert, with its proof: `guard::tests::two_retires_racing_a_leave_leave_the_slot_empty`
+  (the race scheduled step by step), the TLA+ configurations `RC_leave_race2`, `RC_leave_race2w`
+  and `RC_live_leave_race2` (the scenarios that exhibited the list, now passing every safety and
+  liveness property, `ActiveOnlyPinned` without an exception and `LeftSlotsEmpty`), the mutations
+  `RC_mut_leave_untagged` and `RC_mut_insert_unchecked` (the tag not stored, the era not read:
+  the list is back) and the Lean bounds `insertSteps_le`, `insertsSteps_le` (`Kovan.Bounds`).
+- kovan: `guard::tests::flush_without_a_tid_or_a_batch_claims_none` counts the thread's own ID
+  claims instead of reading the global table's released bits, which the threads of earlier tests
+  flip as they exit (the test failed on macOS and Windows CI).
 - kovan: `flush()` and a thread's exit place their partial batch whatever other threads reserve:
   a batch with fewer nodes than there are eligible slots is padded with fillers (bare nodes freed
   with the batch, one per eligible slot beyond the batch's nodes), so neither keeps a batch back
@@ -67,7 +80,8 @@ Every crate goes to 0.2.4.
   `guard::tests::an_epoch_advance_refreshes_the_birth_stamp`.
 - kovan: every operation is wait-free with no helping: the pin is one exchange, the load makes
   at most 16 attempts and escalates, the scan visits every slot once, an insert makes one
-  exchange and at most one compare-exchange, the drop one exchange, a walk and a drain, a flush
+  exchange, one read of the era word and at most one compare-exchange, the drop one exchange, a
+  walk and a drain, a flush
   or an exit one placement per destructor round. The TLA+ model counts every operation's steps
   (`RC_wf_pin`, `RC_wf_load`, `RC_wf_mix`, `RC_wf_leave_race`, `RC_wf_exit`, `RC_wf_unpinned_*`,
   `RC_wf_recycle*`; `RC_mut_no_escalate` and `RC_mut_ttas_locks` break the bounds) and the Lean
@@ -80,6 +94,18 @@ Every crate goes to 0.2.4.
   `+cmpxchg16b` target feature and the lock-based fallback: reclamation is lock-free and wait-free
   on every target with 64-bit atomics, 32-bit ones (`i686`, `wasm32`) included. `.cargo/config.toml`
   and the workflows set no target feature any more.
+- kovan: the thread handle is a thread-local with no destructor, so every `pin()`, guard drop,
+  protected load, retire and flush reaches it with one address and no state check, during every
+  thread-local destructor too; the exit runs from a cleanup sentinel on every build (as it did on
+  nightly), a section a thread-local destructor opens after the exit uses the handle itself, and
+  the exiting-handle and late-handle fallbacks of the stable build are gone. The handle caches its
+  slot's address, and the pin and the drop inline into the caller with their traversal and drain
+  out of line: an outermost `pin()` and its drop are 44 instructions together, the two exchanges
+  and the two era stores included (58 before this change, 24 on 0.2.3 without the leave), 4.3 ns
+  on an EPYC 7R13 (5.6 ns before, 1.4 ns on 0.2.3); a nested pin and its drop are counter
+  updates again, inline. The single-thread map operations of `kovan-map` are back at 0.2.3's
+  cost within the two exchanges (its `HopscotchMap::get` of a `u64` key in a 10 thousand entry
+  table: 16.7 ns against 17.5 ns, 134 instructions against 124).
 - kovan: `flush()` returns at once with nothing retired, as `flush_pending` did, and needs no
   thread ID: a placement goes to the reservations that hold one. It no longer drains or deactivates
   the thread's own slot, which the guard's drop now does. Test:

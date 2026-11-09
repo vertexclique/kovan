@@ -9,9 +9,9 @@
 //! the tests are serialized: the slots of every thread in the process
 //! decide which batches wait for which traversal.
 
-use super::{HANDLE, Handle, flush, pin, retire};
+use super::{Handle, flush, pin, retire, with_handle};
 use crate::retired::{INVPTR, RetiredNode};
-use crate::slot::{EPOCH_FREQ, RETIRE_FREQ};
+use crate::slot::{EPOCH_FREQ, ERA_INACTIVE, RETIRE_FREQ};
 use crate::stall::{self, Step};
 use std::boxed::Box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,28 +25,10 @@ fn lock() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn with_handle<R>(f: impl FnOnce(&Handle) -> R) -> R {
-    #[cfg(feature = "nightly")]
-    {
-        f(&HANDLE)
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        HANDLE.with(f)
-    }
-}
-
-/// Whether this thread's exit has run and is over: neither the handle nor
-/// the exiting handle takes a retire, which goes through a handle of its own.
+/// Whether this thread's exit has run and is over: the handle takes no
+/// retire, which goes through a handle of its own.
 fn exit_over() -> bool {
-    #[cfg(feature = "nightly")]
-    {
-        !super::exit_pending() && !HANDLE.in_reclaim.get()
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        HANDLE.try_with(|_| ()).is_err() && super::on_exiting_handle(|_| ()).is_none()
-    }
+    with_handle(Handle::exit_over)
 }
 
 /// The epoch this thread's reservation slot publishes.
@@ -239,9 +221,10 @@ fn an_escalated_destructor_section_ends_with_its_drop() {
         // once, running the destructor inside flush().
         flush();
         assert!(slot_inactive(tid), "flush returned with its slot active");
-        // The leave of the escalated section reset the era word to 0; the
-        // next section's first protected load publishes a real epoch.
-        assert_eq!(published_epoch(), 0);
+        // The leave of the escalated section reset the era to 0 (tagged,
+        // the slot left); the next section's first protected load publishes
+        // a real epoch.
+        assert_eq!(published_epoch(), ERA_INACTIVE);
         assert_eq!(with_handle(|h| h.cached_epoch.get()), 0);
         let guard = pin();
         assert_eq!(published_epoch(), 0);
@@ -735,14 +718,14 @@ fn a_nested_drop_leaves_the_slot_active() {
 /// Thread B has never pinned and has retired nothing: its `flush()` has
 /// nothing to submit, so it must not claim a thread ID, which it would hold,
 /// for nothing, until it exits. The test checks that B still has no ID
-/// after two flushes, and that no ID was taken (none handed out anew, no
-/// released one taken back).
+/// after two flushes and that its handle claimed none meanwhile (a claim
+/// let go again would leave the handle without an ID too). The handle's
+/// own count, not the global table's released bits: the threads of the
+/// tests before this one release their IDs as they exit, after their
+/// test's lock is gone, so a released bit may flip under any test.
 #[test]
 fn flush_without_a_tid_or_a_batch_claims_none() {
     let _l = lock();
-    let global = crate::slot::global();
-    let handed_out = global.max_threads();
-    let released: Vec<bool> = (0..handed_out).map(|t| global.tid_is_released(t)).collect();
     thread::spawn(|| {
         flush();
         flush();
@@ -751,18 +734,124 @@ fn flush_without_a_tid_or_a_batch_claims_none() {
             None,
             "a flush with nothing to submit claimed a tid"
         );
+        assert_eq!(
+            with_handle(|h| h.claims.get()),
+            0,
+            "a flush with nothing to submit claimed a tid and let it go"
+        );
     })
     .join()
     .unwrap();
-    assert_eq!(
-        global.max_threads(),
-        handed_out,
-        "a flush with nothing to submit took a fresh tid"
-    );
+}
+
+/// Two retires that scanned a reader's slot active exchange their nodes
+/// into it after the reader's drop left it: the first is held before its
+/// rollback, the second lands on its node. The second reads the tag the
+/// leave stored and takes both nodes out (`InsertUndo`), so the left slot
+/// holds no list while the reader stays parked and both batches are
+/// freed; the first's rollback fails and counts its node, which the
+/// second traversed. Without the undo the slot kept the two nodes, read as
+/// active, until the reader's next pin, and neither batch was freed.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
+fn two_retires_racing_a_leave_leave_the_slot_empty() {
+    /// A thread that claims its ID, reports it and waits to be let go.
+    fn retirer(
+        live: &Arc<AtomicUsize>,
+        value: usize,
+    ) -> (Arc<AtomicUsize>, Hold, thread::JoinHandle<()>) {
+        let tid = Arc::new(AtomicUsize::new(usize::MAX));
+        let hold = Hold::new();
+        let (t, h) = (Arc::clone(&tid), hold.clone());
+        let live = Arc::clone(live);
+        let thread = thread::spawn(move || {
+            t.store(own_tid(), Ordering::SeqCst);
+            h.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| h.go.load(Ordering::SeqCst)));
+            // Born before the reader's reservation, so its batch needs the
+            // reader's slot; placed padded by the flush.
+            unsafe { retire(value as *mut Counted) };
+            flush();
+            drop(live);
+        });
+        hold.reached("the retirer");
+        (tid, hold, thread)
+    }
+
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let values: Vec<usize> = (0..2)
+        .map(|_| {
+            live.fetch_add(1, Ordering::SeqCst);
+            Box::into_raw(Box::new(Counted {
+                retired: RetiredNode::new(),
+                live: Arc::clone(&live),
+            })) as usize
+        })
+        .collect();
+    // The reader: pins and loads (its slot active, its era current), drops
+    // its guard when told to, then parks until the end.
+    let reader_tid = Arc::new(AtomicUsize::new(usize::MAX));
+    let (to_drop, parked) = (Hold::new(), Hold::new());
+    let left = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (tid, to_drop, parked, left) = (
+            Arc::clone(&reader_tid),
+            to_drop.clone(),
+            parked.clone(),
+            Arc::clone(&left),
+        );
+        thread::spawn(move || {
+            let guard = pin();
+            reserve(&guard);
+            tid.store(with_handle(|h| h.tid()), Ordering::SeqCst);
+            to_drop.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| to_drop.go.load(Ordering::SeqCst)));
+            drop(guard);
+            left.store(true, Ordering::SeqCst);
+            assert!(eventually(|| parked.go.load(Ordering::SeqCst)));
+        })
+    };
+    to_drop.reached("the reader");
+    let reader_tid = reader_tid.load(Ordering::SeqCst);
+
+    // Both retirers scan the reader's slot active and stop before their
+    // exchange.
+    let (tid_a, go_a, a) = retirer(&live, values[0]);
+    let (tid_b, go_b, b) = retirer(&live, values[1]);
+    let (tid_a, tid_b) = (tid_a.load(Ordering::SeqCst), tid_b.load(Ordering::SeqCst));
+    let (ready_a, ready_b) = (Hold::new(), Hold::new());
+    ready_a.arm(Step::InsertReady, tid_a);
+    ready_b.arm(Step::InsertReady, tid_b);
+    go_a.release();
+    go_b.release();
+    ready_a.reached("retirer A");
+    ready_b.reached("retirer B");
+
+    // The reader leaves; A exchanges its node in (INVPTR behind it) and is
+    // held before its rollback; B lands on A's node and completes.
+    to_drop.release();
+    assert!(eventually(|| left.load(Ordering::SeqCst)));
+    let exchanged_a = Hold::new();
+    exchanged_a.arm(Step::InsertExchanged, tid_a);
+    ready_a.release();
+    exchanged_a.reached("retirer A's exchange");
+    ready_b.release();
+    join_within(b, "retirer B");
+    exchanged_a.release();
+    join_within(a, "retirer A");
+
     assert!(
-        (0..handed_out).all(|t| global.tid_is_released(t) == released[t]),
-        "a flush with nothing to submit took a released tid"
+        slot_inactive(reader_tid),
+        "the left slot of a parked reader holds the nodes of two retires"
     );
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "the batches of two retires that raced a leave wait for the parked reader"
+    );
+    parked.release();
+    reader.join().unwrap();
 }
 
 mod era;

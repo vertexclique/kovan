@@ -11,16 +11,18 @@ The steps are the model's labels, one atomic step of the code each (`README.md`,
 
 * a protected load: `LD1`, `LD2`, then per failing attempt `LD3`, `LD4`, `LD5`, and the
   escalation `LD3`, `LD6` once `LoadAttempts` attempts are spent;
-* an outermost pin: `PN1` (with the tid claim at a thread's first pin), `Enter` (one exchange),
-  the traversal of what the exchange took (`TV1`, `TV2`, `TV3` per node, `TV1` once more), `PN2`;
-* an outermost drop: `UP1`, `Leave` (one exchange), `LeaveReset`, the traversal, `LeaveDrain`
-  and the drain (`DF1`, `DF2`, one free per batch);
+* an outermost pin: `PN1` (with the tid claim at a thread's first pin), `EnterMark` (one store
+  of the era word), `Enter` (one exchange), the traversal of what the exchange took (`TV1`,
+  `TV2`, `TV3` per node, `TV1` once more), `PN2`;
+* an outermost drop: `UP1`, `LeaveMark` (one store), `Leave` (one exchange), `LeaveTraverse`,
+  the traversal, `LeaveDrain` and the drain (`DF1`, `DF2`, one free per batch);
 * a submission (`try_retire`): `TR1`, the scan (`TS2`, `TS4`, `TS5`: one to three steps per
-  slot), `TN1`, per node assigned `TN2`, `TN3`, `TN4` and `InsertRollback`, or `TL1`, `TL2`,
-  `TL3` (at most four), `TF1`, `TF2`;
+  slot), `TN1`, per node assigned `TN2`, `TN3`, `TN4` and then `InsertRollback`, or `TL1`
+  (with `TL2`, `TL3` when a traversal passed the node first), `TN5` and, the slot found left,
+  `InsertUndo` (with `IU2`, `IU3` when it takes a list out): at most eight; `TF1`, `TF2`;
 * a flush: `FL1`, per round `FL4` with a submission, `FL8` with a drain, `FL8b`, then `FL9`;
-* an exit: `EX1`, `ExitLeave`, `ExitLeaveReset`, the traversal, `ExitLeave2`, the rounds,
-  `EX12b` with the release (`RL0`, `TidRelease`), `EX13`.
+* an exit: `EX1`, `ExitLeaveMark`, `ExitLeave`, `ExitLeaveTraverse`, the traversal,
+  `ExitLeave2`, the rounds, `EX12b` with the release (`RL0`, `TidRelease`), `EX13`.
 
 Every function below is total and the theorems quantify over every size (`Nat`), so they hold
 for every thread count, list length and attempt count, not only the ones TLC enumerates.
@@ -94,33 +96,33 @@ free per batch (the per-node steps of each free are counted with the node, see `
 def drainSteps (b : Nat) : Nat :=
   2 + b
 
-/-- An outermost pin: `PN1`, the tid claim's steps `claim` (0 after the first pin), `Enter`,
-the traversal of the `n` nodes the exchange took, `PN2`. -/
+/-- An outermost pin: `PN1`, the tid claim's steps `claim` (0 after the first pin), `EnterMark`,
+`Enter`, the traversal of the `n` nodes the exchange took, `PN2`. -/
 def pinSteps (claim n : Nat) : Nat :=
-  3 + claim + traverseSteps n
+  4 + claim + traverseSteps n
 
 /-- The pin's steps are `PinCtl` plus three per node taken, where `PinCtl` is
-`3 + TidCtl + TravCtl`: the per-node steps belong to the per-node term of the bound. -/
-theorem pinSteps_eq (claim n : Nat) : pinSteps claim n = (3 + claim + 1) + 3 * n := by
+`4 + TidCtl + TravCtl`: the per-node steps belong to the per-node term of the bound. -/
+theorem pinSteps_eq (claim n : Nat) : pinSteps claim n = (4 + claim + 1) + 3 * n := by
   unfold pinSteps traverseSteps
   omega
 
-/-- The list an enter takes was left in the slot since it was left: the node of an insert that
-found INVPTR behind its exchange and has not rolled back yet, and the nodes of the inserts that
-landed on it since (one per batch, the re-animated slot of the model's `RC_find_reanimated`).
-With at most `m` such nodes the pin takes at most `4 + 3 m` steps. -/
-theorem pinSteps_le_of_le (m n : Nat) (h : n ≤ m) : pinSteps 0 n ≤ 4 + 3 * m := by
+/-- The list an enter takes was left in the slot since it was left: the nodes of the inserts
+that exchanged them in and are between that exchange and the compare-exchange that takes them
+out (one per such retire, each a different thread's, so at most `T - 1`). With at most `m`
+such nodes the pin takes at most `5 + 3 m` steps. -/
+theorem pinSteps_le_of_le (m n : Nat) (h : n ≤ m) : pinSteps 0 n ≤ 5 + 3 * m := by
   rw [pinSteps_eq]
   omega
 
-/-- An outermost drop: `UP1`, `Leave`, `LeaveReset`, the traversal of the `n` nodes the exchange
-took, `LeaveDrain` and the drain of `b` batches. -/
+/-- An outermost drop: `UP1`, `LeaveMark`, `Leave`, `LeaveTraverse`, the traversal of the `n`
+nodes the exchange took, `LeaveDrain` and the drain of `b` batches. -/
 def leaveSteps (n b : Nat) : Nat :=
-  4 + traverseSteps n + drainSteps b
+  5 + traverseSteps n + drainSteps b
 
-/-- The drop's steps are `LeaveCtl` (`4 + TravCtl + DrainCtl`) plus three per node of the list
+/-- The drop's steps are `LeaveCtl` (`5 + TravCtl + DrainCtl`) plus three per node of the list
 and one per batch freed, the per-node and per-batch work of `OpBound`'s history term. -/
-theorem leaveSteps_eq (n b : Nat) : leaveSteps n b = (4 + 1 + 2) + 3 * n + b := by
+theorem leaveSteps_eq (n b : Nat) : leaveSteps n b = (5 + 1 + 2) + 3 * n + b := by
   unfold leaveSteps traverseSteps drainSteps
   omega
 
@@ -169,28 +171,38 @@ theorem fillers_le (slots : List Slot) (n : Nat) : fillers slots n ≤ slots.len
     | cons s rest ih => cases s <;> simp only [eligibleCount, List.length_cons] <;> omega
   omega
 
-/-- One insert's steps, by what the exchange found behind it: an empty list (`TN2`, `TN3`,
-`TN4`: three), INVPTR and a rollback (four, `InsertRollback` more), a list to link (four,
-`TL1` more) or one a traversal already took (six: `TL1`, `TL2`, `TL3`), a slot found left or
-below the minimum birth at the re-check (one or two). -/
+/-- One insert's steps, by what the exchange found behind it and what the era word read after
+it says: an empty list and the era untagged (`TN2`, `TN3`, `TN4`, `TN5`: four), INVPTR and a
+rollback (four, `InsertRollback` for `TN5`), a list to link (five, `TL1` more) or one a
+traversal already took (seven: `TL1`, `TL2`, `TL3`), the era tagged behind an empty list (five,
+`InsertUndo` more), tagged behind a list (eight: `InsertUndo`, `IU2`, `IU3`, the list walked
+counting on its own nodes) or tagged behind a list a traversal took (eight: the undo fails and
+counts), a slot found left or below the minimum birth at the re-check (one or two). -/
 inductive Found where
   | empty
   | invptr
   | list
   | taken
+  | emptyLeft
+  | listLeft
+  | takenLeft
   | left
   | below
 
 def insertSteps : Found → Nat
-  | .empty => 3
+  | .empty => 4
   | .invptr => 4
-  | .list => 4
-  | .taken => 6
+  | .list => 5
+  | .taken => 7
+  | .emptyLeft => 5
+  | .listLeft => 8
+  | .takenLeft => 8
   | .left => 1
   | .below => 2
 
-/-- Every insert takes at most six steps, whatever it finds. -/
-theorem insertSteps_le (f : Found) : insertSteps f ≤ 6 := by
+/-- Every insert takes at most eight steps, whatever it finds: one exchange, one read of the
+era word, at most one compare-exchange, none retried. -/
+theorem insertSteps_le (f : Found) : insertSteps f ≤ 8 := by
   cases f <;> simp [insertSteps]
 
 /-- The inserts' steps over the nodes assigned. -/
@@ -198,7 +210,7 @@ def insertsSteps : List Found → Nat
   | [] => 0
   | f :: rest => insertSteps f + insertsSteps rest
 
-theorem insertsSteps_le (fs : List Found) : insertsSteps fs ≤ 6 * fs.length := by
+theorem insertsSteps_le (fs : List Found) : insertsSteps fs ≤ 8 * fs.length := by
   induction fs with
   | nil => simp [insertsSteps]
   | cons f rest ih =>
@@ -210,10 +222,10 @@ theorem insertsSteps_le (fs : List Found) : insertsSteps fs ≤ 6 * fs.length :=
 def tryRetireSteps (slots : List Slot) (inserts : List Found) : Nat :=
   1 + scanSteps slots + 1 + insertsSteps inserts + 2
 
-/-- At most `4 + 3 * T` steps outside the inserts, and six per node inserted: the model's
+/-- At most `4 + 3 * T` steps outside the inserts, and eight per node inserted: the model's
 `TryCtl` (`6 + 3 * MaxTid`, two steps of slack) plus the per-node history term. -/
 theorem tryRetireSteps_le (slots : List Slot) (inserts : List Found) :
-    tryRetireSteps slots inserts ≤ (6 + 3 * slots.length) + 6 * inserts.length := by
+    tryRetireSteps slots inserts ≤ (6 + 3 * slots.length) + 8 * inserts.length := by
   have hs := scanSteps_le slots
   have hi := insertsSteps_le inserts
   unfold tryRetireSteps
@@ -224,7 +236,7 @@ def retireSteps (boundary : Bool) (slots : List Slot) (inserts : List Found) : N
   if boundary then 1 + 1 + tryRetireSteps slots inserts + 1 else 1
 
 theorem retireSteps_le (boundary : Bool) (slots : List Slot) (inserts : List Found) :
-    retireSteps boundary slots inserts ≤ (3 + 6 + 3 * slots.length) + 6 * inserts.length := by
+    retireSteps boundary slots inserts ≤ (3 + 6 + 3 * slots.length) + 8 * inserts.length := by
   have := tryRetireSteps_le slots inserts
   cases boundary <;> simp only [retireSteps, Bool.false_eq_true, ↓reduceIte] <;> omega
 
@@ -241,15 +253,15 @@ cache. -/
 def flushSteps (rounds : List (List Slot × List Found × Nat)) : Nat :=
   2 + (rounds.map fun r => roundSteps r.1 r.2.1 r.2.2).sum
 
-/-- An exit: `EX1`, `ExitLeave`, `ExitLeaveReset`, the traversal of the `n` nodes taken,
-`ExitLeave2`, its rounds, the release (two steps) and `EX13`. -/
+/-- An exit: `EX1`, `ExitLeaveMark`, `ExitLeave`, `ExitLeaveTraverse`, the traversal of the
+`n` nodes taken, `ExitLeave2`, its rounds, the release (two steps) and `EX13`. -/
 def exitSteps (n : Nat) (rounds : List (List Slot × List Found × Nat)) : Nat :=
-  4 + traverseSteps n + (rounds.map fun r => roundSteps r.1 r.2.1 r.2.2).sum + 3 + 1
+  5 + traverseSteps n + (rounds.map fun r => roundSteps r.1 r.2.1 r.2.2).sum + 3 + 1
 
 /-- A round over `T` slots is at most `RoundCtl` (`3 + TryCtl + DrainCtl`) plus the per-node
-and per-batch work: six per node inserted and one per batch freed. -/
+and per-batch work: eight per node inserted and one per batch freed. -/
 theorem roundSteps_le (slots : List Slot) (inserts : List Found) (b : Nat) :
-    roundSteps slots inserts b ≤ (3 + (6 + 3 * slots.length) + 3) + 6 * inserts.length + b := by
+    roundSteps slots inserts b ≤ (3 + (6 + 3 * slots.length) + 3) + 8 * inserts.length + b := by
   have := tryRetireSteps_le slots inserts
   unfold roundSteps drainSteps
   omega
@@ -259,7 +271,7 @@ every round over at most `T` slots), plus the per-node and per-batch work summed
 theorem rounds_le (T : Nat) (rounds : List (List Slot × List Found × Nat))
     (hT : ∀ r ∈ rounds, r.1.length ≤ T) :
     (rounds.map fun r => roundSteps r.1 r.2.1 r.2.2).sum
-      ≤ rounds.length * (12 + 3 * T) + (rounds.map fun r => 6 * r.2.1.length + r.2.2).sum := by
+      ≤ rounds.length * (12 + 3 * T) + (rounds.map fun r => 8 * r.2.1.length + r.2.2).sum := by
   induction rounds with
   | nil => simp
   | cons r rest ih =>
@@ -277,18 +289,18 @@ theorem rounds_le (T : Nat) (rounds : List (List Slot × List Found × Nat))
 theorem flushSteps_le (T : Nat) (rounds : List (List Slot × List Found × Nat))
     (hT : ∀ r ∈ rounds, r.1.length ≤ T) :
     flushSteps rounds
-      ≤ 2 + rounds.length * (12 + 3 * T) + (rounds.map fun r => 6 * r.2.1.length + r.2.2).sum := by
+      ≤ 2 + rounds.length * (12 + 3 * T) + (rounds.map fun r => 8 * r.2.1.length + r.2.2).sum := by
   have := rounds_le T rounds hT
   unfold flushSteps
   omega
 
-/-- An exit's steps: `ExitCtl` (`4 + TravCtl + Rounds * RoundCtl + 3 + 1`) plus the per-node
+/-- An exit's steps: `ExitCtl` (`5 + TravCtl + Rounds * RoundCtl + 3 + 1`) plus the per-node
 work of the list it took and of its rounds. -/
 theorem exitSteps_le (T n : Nat) (rounds : List (List Slot × List Found × Nat))
     (hT : ∀ r ∈ rounds, r.1.length ≤ T) :
     exitSteps n rounds
-      ≤ (4 + 1 + 3 + 1) + 3 * n + rounds.length * (12 + 3 * T)
-        + (rounds.map fun r => 6 * r.2.1.length + r.2.2).sum := by
+      ≤ (5 + 1 + 3 + 1) + 3 * n + rounds.length * (12 + 3 * T)
+        + (rounds.map fun r => 8 * r.2.1.length + r.2.2).sum := by
   have := rounds_le T rounds hT
   unfold exitSteps traverseSteps
   omega

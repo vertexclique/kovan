@@ -12,7 +12,7 @@ use super::{
 };
 use crate::guard::pin;
 use crate::retired::{INVPTR, RetiredNode};
-use crate::slot::{EPOCH_FREQ, RETIRE_FREQ};
+use crate::slot::{EPOCH_FREQ, ERA_INACTIVE, RETIRE_FREQ};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -188,8 +188,12 @@ fn every_outermost_pin_enters() {
         let guard = pin();
         let _ = cell.load(Ordering::Acquire, &guard);
         drop(guard);
-        let published = published_epoch();
-        assert_eq!(published, crate::slot::epoch());
+        let published = crate::slot::epoch();
+        assert_eq!(
+            published_epoch(),
+            published | ERA_INACTIVE,
+            "the drop did not tag the era word"
+        );
         for _ in 0..1_000 {
             let guard = pin();
             assert!(

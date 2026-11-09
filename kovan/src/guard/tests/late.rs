@@ -1,12 +1,12 @@
 //! Critical sections a thread-local destructor opens after its thread's exit
-//! is over (see `late_pin`): the guard protects what it loads, nested pins
+//! is over (see `Handle::late`): the guard protects what it loads, nested pins
 //! share the section, and the section leaves the protocol as an exit does
 //! when its last guard drops, giving its thread ID back.
 //!
 //! Each test sets a thread-local before the thread's first pin, so that its
 //! destructor runs after kovan's own, then checks from inside it.
 
-use super::{Counted, DEADLINE, exit_over, join_within, lock};
+use super::{Counted, DEADLINE, exit_over, join_within, lock, reserve, with_handle};
 use crate::guard::{flush, pin, retire};
 use crate::retired::RetiredNode;
 use std::boxed::Box;
@@ -24,36 +24,21 @@ fn late_section() -> Option<(usize, u64)> {
             .epoch
             .load(Ordering::Acquire)
     };
-    #[cfg(feature = "nightly")]
-    {
-        let handle = &super::HANDLE;
+    with_handle(|handle| {
         if !handle.late.get() {
             return None;
         }
         handle.tid.get().map(|tid| (tid, epoch_of(tid)))
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        crate::guard::on_late_handle(|handle| handle.tid.get().map(|tid| (tid, epoch_of(tid))))
-            .flatten()
-    }
+    })
 }
 
-/// Whether this thread's handles hold no thread ID any more: on nightly the
-/// handle's own is cleared and the handle no longer marked late; elsewhere
-/// no late section's handle is left (its drop, the section's exit, released
-/// the ID). The exit clears the ID only after releasing it. Read on the
-/// thread itself, not through the global ID table, where a released ID may
-/// already belong to another test's thread.
+/// Whether this thread's handle holds no thread ID any more and is no
+/// longer marked late (the section's end, its exit, released the ID; the
+/// exit clears the ID only after releasing it). Read on the thread itself,
+/// not through the global ID table, where a released ID may already belong
+/// to another test's thread.
 fn holds_no_tid() -> bool {
-    #[cfg(feature = "nightly")]
-    {
-        super::HANDLE.tid.get().is_none() && !super::HANDLE.late.get()
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        crate::guard::on_late_handle(|_| ()).is_none()
-    }
+    with_handle(|handle| handle.tid.get().is_none() && !handle.late.get())
 }
 
 /// Runs `body` in a thread-local destructor of a fresh thread that runs
@@ -105,12 +90,19 @@ fn a_pin_after_the_exit_reserves_until_its_guard_drops() {
     let _l = lock();
     let (during, after, released) = after_exit(|| {
         let guard = pin();
+        // The section's first protected load publishes the epoch, as any
+        // section's does.
+        reserve(&guard);
         let during = late_section();
         drop(guard);
         (during, late_section(), holds_no_tid())
     });
     let (_, epoch) = during.expect("the pin after the exit holds no reservation");
-    assert_ne!(epoch, 0, "the section after the exit publishes no epoch");
+    assert_eq!(
+        epoch,
+        crate::slot::epoch(),
+        "the section after the exit did not publish the epoch its load read"
+    );
     assert!(
         after.is_none(),
         "the section after the exit outlived its guard"

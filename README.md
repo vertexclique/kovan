@@ -30,11 +30,10 @@ Kovan tracks this automatically with near-zero overhead on reads.
   64-bit atomics, see Supported Platforms).
 - **Bounded memory**: Never grows unbounded like epoch-based schemes. A thread's
   reservation ends with the drop of its outermost guard, so a thread with no
-  live guard (idle, parked, between tasks) holds no retired value back (one
-  race of the algorithm's insert with that drop can leave the slot a list the
-  thread's next pin or exit takes; see the crate documentation); a `flush()`
-  or a thread exit places what the thread retired whatever other threads
-  reserve, never keeping a batch, even across thread exit.
+  live guard (idle, parked, between tasks) holds no retired value back, whatever
+  retires race that drop; a `flush()` or a thread exit places what the thread
+  retired whatever other threads reserve, never keeping a batch, even across
+  thread exit.
 - **Simple API**: `Atom<T>` for safe usage, `pin()`/`load()`/`retire()` for low-level control
 
 ## Quick Start
@@ -122,8 +121,8 @@ docs give the contract and a complete example.
 
 ## How It Works
 
-1. **`pin()`** - Enter critical section, get a guard: one exchange activates
-   the thread's reservation
+1. **`pin()`** - Enter critical section, get a guard: one store and one
+   exchange activate the thread's reservation
 2. **`load()`** - Read pointer with epoch tracking: one load and one compare
    with the epoch the reservation publishes; when the epoch moved, the load
    publishes it and loads again
@@ -131,9 +130,9 @@ docs give the contract and a complete example.
    nodes are placed in the reservations that may still hold them
 
 The guard ensures any pointers you load stay valid. The drop of a thread's
-outermost guard leaves its reservation (one exchange) and frees the retired
-memory that reservation held back; a thread with no live guard delays no
-reclamation. The epoch advances with allocations (every 128th of a thread),
+outermost guard leaves its reservation (one store and one exchange) and frees
+the retired memory that reservation held back; a thread with no live guard
+delays no reclamation, whatever retires race the drop. The epoch advances with allocations (every 128th of a thread),
 and a reservation covers the nodes born up to the epoch it published.
 
 ## Examples
@@ -151,6 +150,12 @@ Comparison against the major memory reclamation approaches: epoch-based (crossbe
 | | kovan | crossbeam | seize | haphazard |
 |---|---|---|---|---|
 | pin + drop | **2.79 ns** | 13.66 ns | 9.70 ns | 18.09 ns |
+
+Measured on kovan 0.2.3, whose pin and drop left the reservation in place. Since 0.2.4 the
+drop of the outermost guard leaves the reservation (so a thread with no live guard holds no
+retired value back) and the pair is two exchanges and two stores: 4.50 ns on an AMD EPYC 7R13
+(0.2.3 on the same machine: 1.18 ns; `tools/bench-ab.py`, `pin_unpin/single_thread`). The other
+crates were not re-measured there.
 
 ### Treiber Stack (push+pop, 5k ops/thread)
 

@@ -1,24 +1,29 @@
 //! Guard and Handle for critical section management.
 //!
 //! The reservation protocol, one slot per thread:
-//! - Pin: an outermost pin activates the thread's slot (one exchange of the
-//!   list word to 0, what a retire left in it taken and traversed); it
-//!   publishes no epoch
+//! - Pin: an outermost pin activates the thread's slot (one store of the era
+//!   word clearing the left tag, one exchange of the list word to 0, what a
+//!   retire left in it taken and traversed); it publishes no epoch
 //! - Protected load: one pointer load, one read of the global epoch, one
 //!   compare with the published epoch; when the epoch moved, the load
 //!   publishes it and loads again, a bounded number of times, then
 //!   reserves unconditionally
-//! - Guard drop: an outermost drop leaves the slot (one exchange of the list
-//!   word to INVPTR), traverses what it held and frees what that released
+//! - Guard drop: an outermost drop leaves the slot (one store tagging the
+//!   era word, one exchange of the list word to INVPTR), traverses what it
+//!   held and frees what that released
 //! - Allocation: every `EPOCH_FREQ`th allocation of a thread advances the
 //!   global epoch; a node's birth is the epoch read after
-//! - Retire: batch construction, try_retire with epoch-based slot scanning;
-//!   a flush or an exit pads its batch so it is always placed
+//! - Retire: batch construction, try_retire with epoch-based slot scanning
+//!   (a tagged slot skipped), one exchange per insert and, the era word
+//!   read tagged after it, the node taken out again; a flush or an exit
+//!   pads its batch so it is always placed
 
 use crate::atomic::AtomicUsize;
 use crate::reclaim::Reclaimable;
 use crate::retired::{DestructorFn, INVPTR, REFC_PROTECT, RetiredNode, rnode_mark};
-use crate::slot::{self, ASMRState, EPOCH_FREQ, EPOCH_UNCONDITIONAL, RETIRE_FREQ};
+use crate::slot::{
+    self, ASMRState, EPOCH_FREQ, EPOCH_UNCONDITIONAL, ERA_INACTIVE, RETIRE_FREQ, ThreadSlots,
+};
 use alloc::boxed::Box;
 use core::cell::Cell;
 use core::marker::PhantomData as marker;
@@ -69,10 +74,9 @@ const MAX_LOAD_ATTEMPTS: usize = 16;
 /// delays no reclamation, however many values other threads retire
 /// meanwhile and whatever their birth epochs. Nothing has to be flushed
 /// before idling; [`flush()`](crate::flush) is for what the thread itself
-/// retired and has not submitted yet. The one exception is a race of two
-/// inserts with the drop's exchange (the crate documentation, Quiescence):
-/// the list it leaves in the slot is taken by the thread's next `pin()` or
-/// exit.
+/// retired and has not submitted yet. An insert that races the drop takes
+/// its node out again, whether it found the slot left or landed on such a
+/// node (the crate documentation, Quiescence).
 ///
 /// The destructors of the values a drop frees run inside the drop, with
 /// the slot already inactive and no guard live: a destructor may pin
@@ -95,33 +99,31 @@ pub struct Guard {
 }
 
 impl Drop for Guard {
-    #[inline]
+    #[inline(always)]
     fn drop(&mut self) {
         // Decrement the pin count; the outermost drop leaves the slot.
-        #[cfg(feature = "nightly")]
-        {
-            HANDLE.unpin();
-        }
-        #[cfg(not(feature = "nightly"))]
-        {
-            // Through the handle; through the exiting handle while the exit
-            // runs (a destructor it runs); after the exit, through the late
-            // handle the pin made (see `late_pin`).
-            if HANDLE.try_with(Handle::unpin).is_err() && on_exiting_handle(Handle::unpin).is_none()
-            {
-                late_unpin();
-            }
-        }
+        with_handle(Handle::unpin);
     }
 }
 
 /// Thread-local handle for ASMR state.
 ///
-/// Manages thread ID, batch accumulation, and cached free lists.
+/// Manages thread ID, batch accumulation, and cached free lists. A
+/// thread-local with no destructor, so every access is one address and it
+/// answers during every thread-local destructor, the exit's own included
+/// (the exit runs from the destructor of `HANDLE_CLEANUP_SENTINEL`, which a
+/// thread registers when it claims an ID or starts a batch).
 struct Handle {
     global: Cell<Option<&'static ASMRState>>,
     /// Thread ID (lazily allocated)
     tid: Cell<Option<usize>>,
+    /// This thread's reservation slot, the one of `tid`: null until the ID
+    /// is claimed, so the activation and the leave reach the slot's words
+    /// with one load and no page-table walk.
+    slots: Cell<*const ThreadSlots>,
+    /// Thread IDs this handle claimed (`claim_tid`), for the tests.
+    #[cfg(test)]
+    claims: Cell<usize>,
     /// Number of live Guard instances on this thread. Only the outermost
     /// pin() activates the slot. Guard::drop decrements this; when it
     /// reaches 0 the critical section ends and the slot is left.
@@ -159,10 +161,13 @@ struct Handle {
     /// exit was over (a thread-local destructor that runs after kovan's):
     /// the section holds a reservation under an ID of its own, and its end
     /// (the outermost drop's `leave`) runs the exit every thread runs, since
-    /// no exit runs for the thread any more. Elsewhere than nightly the
-    /// section's handle is a box of its own, dropped after that
-    /// (`late::late_unpin`), its exit already run.
+    /// no exit runs for the thread any more.
     late: Cell<bool>,
+    /// This thread's exit (`cleanup`) has run: a retire from now on, outside
+    /// a late section and the exit's own destructors, goes to a handle of
+    /// its own, whose drop places it (`retire_after_exit`), since no exit
+    /// would submit this handle's batch any more.
+    exited: Cell<bool>,
 }
 
 impl Handle {
@@ -170,6 +175,9 @@ impl Handle {
         Self {
             global: Cell::new(None),
             tid: Cell::new(None),
+            slots: Cell::new(core::ptr::null()),
+            #[cfg(test)]
+            claims: Cell::new(0),
             pin_count: Cell::new(0),
             batch_first: Cell::new(core::ptr::null_mut()),
             batch_last: Cell::new(core::ptr::null_mut()),
@@ -181,7 +189,16 @@ impl Handle {
             #[cfg(test)]
             fillers: Cell::new(0),
             late: Cell::new(false),
+            exited: Cell::new(false),
         }
+    }
+
+    /// Whether this thread's exit has run and is over: no late section is
+    /// live and no destructor of the exit is running, so nothing would
+    /// submit a retire into this handle's batch any more.
+    #[inline]
+    fn exit_over(&self) -> bool {
+        self.exited.get() && !self.in_reclaim.get() && !self.late.get()
     }
 
     /// [Alloc] The epoch clock and the birth stamp of a node this thread
@@ -218,12 +235,10 @@ impl Handle {
             Some(tid) => tid,
             None => {
                 let tid = self.claim_tid();
-                // On nightly, #[thread_local] doesn't run Drop.
-                // Register a sentinel that calls cleanup() on thread exit.
-                // Once the sentinel is gone the exit is over and runs no
-                // more: the ID is the late section's, which releases it.
-                #[cfg(feature = "nightly")]
-                if HANDLE_CLEANUP_SENTINEL.try_with(|_| {}).is_err() {
+                // Register the sentinel whose destructor runs the exit. Once
+                // the sentinel is gone the exit is over and runs no more:
+                // the ID is a late section's, which releases it at its end.
+                if !exit_pending() {
                     self.late.set(true);
                 }
                 tid
@@ -232,13 +247,33 @@ impl Handle {
     }
 
     /// Claim a thread ID for this handle (`alloc_tid`), which its exit
-    /// releases. The exit itself claims through this, not `tid()`: on
-    /// nightly it runs inside the sentinel's destructor, which `tid()`
-    /// would reach.
+    /// releases.
     fn claim_tid(&self) -> usize {
         let tid = self.global().alloc_tid();
         self.tid.set(Some(tid));
+        self.slots.set(self.global().thread_slots(tid));
+        #[cfg(test)]
+        self.claims.set(self.claims.get() + 1);
         tid
+    }
+
+    /// This thread's reservation slot, claimed with its ID at the first use.
+    #[inline(always)]
+    fn slots(&self) -> &'static ThreadSlots {
+        let slots = self.slots.get();
+        if slots.is_null() {
+            return self.claim_slots();
+        }
+        // SAFETY: set by `claim_tid` to a slot of the global table, which
+        // lives for the rest of the process.
+        unsafe { &*slots }
+    }
+
+    #[cold]
+    fn claim_slots(&self) -> &'static ThreadSlots {
+        self.tid();
+        // SAFETY: as `slots`, set by the claim above.
+        unsafe { &*self.slots.get() }
     }
 
     /// Protect: era tracking on load - **wait-free**, bounded at
@@ -290,7 +325,7 @@ impl Handle {
     /// unconditional reservation and completes with a single further load,
     /// independent of all other threads. Fast path cost: one pointer load,
     /// one epoch load, one compare against the thread-local cache.
-    #[inline]
+    #[inline(always)]
     fn protect_load(&self, data: &AtomicUsize, order: Ordering) -> usize {
         // Hot path: straight-line, no loop in the inlined body.
         // Step 1: load the pointer.
@@ -319,6 +354,7 @@ impl Handle {
     /// the hot path stays as small as the original single-load fast path.
     #[cold]
     fn protect_load_cold(&self, data: &AtomicUsize, order: Ordering, first_epoch: u64) -> usize {
+        #[cfg(test)]
         let tid = self.tid();
         let mut curr_epoch = first_epoch;
         let mut attempts = MAX_LOAD_ATTEMPTS;
@@ -337,7 +373,7 @@ impl Handle {
             // the load. Raising the published epoch never releases
             // protection of pointers loaded earlier in this critical section
             // (their batches stay in the slot list until the outermost drop).
-            self.publish(tid, curr_epoch);
+            self.publish(curr_epoch);
 
             let ptr = data.load(order);
             #[cfg(test)]
@@ -357,7 +393,7 @@ impl Handle {
     /// the next section's first protected load publishes a real epoch.
     #[cold]
     fn escalate(&self) {
-        self.publish(self.tid(), EPOCH_UNCONDITIONAL);
+        self.publish(EPOCH_UNCONDITIONAL);
     }
 
     /// [Publish] Write `epoch` to this thread's era word, ordered before
@@ -368,11 +404,8 @@ impl Handle {
     /// Acquire load may be RCpc, which no earlier write orders, so a SeqCst
     /// fence follows (`publish_fence`). Mirrored in `cached_epoch`.
     #[inline]
-    fn publish(&self, tid: usize, epoch: u64) {
-        self.global()
-            .thread_slots(tid)
-            .epoch
-            .swap(epoch, Ordering::SeqCst);
+    fn publish(&self, epoch: u64) {
+        self.slots().epoch.swap(epoch, Ordering::SeqCst);
         publish_fence();
         self.cached_epoch.set(epoch);
     }
@@ -383,7 +416,7 @@ impl Handle {
     /// A nested drop decrements, saturating: a guard that outlived its
     /// handle (kept by a thread-local destructor that runs after the exit)
     /// drops through another handle, whose count must not wrap.
-    #[inline]
+    #[inline(always)]
     fn unpin(&self) {
         let count = self.pin_count.get();
         if count == 1 {
@@ -397,86 +430,108 @@ impl Handle {
     /// The outermost drop (the count already 0): leave this thread's
     /// reservation, then free what that released.
     ///
-    /// [Leave] One exchange of the slot's list word to INVPTR, on the
+    /// [LeaveMark] One plain store tags the era word (`ERA_INACTIVE`), then
+    /// [Leave] one exchange of the slot's list word to INVPTR, on the
     /// thread's own line: the slot is inactive from this instant, so no
     /// batch retired from now on is placed in it and no retirer waits for
     /// this thread while it holds no guard. Never a plain store: an insert
     /// that landed between a load and the store would be lost, its batch
     /// counted for a node no traversal takes (a retire that finds INVPTR
     /// behind its exchange rolls its node back, or counts it when this
-    /// exchange took it first: `try_retire`). [LeaveTraverse] What the
-    /// exchange captured (the nodes every batch placed here while the slot
-    /// was active) is traversed onto the free-list cache, with no
-    /// destructor running yet. [LeaveDrain] Then the cache is drained with
-    /// the slot inactive and the pin count at 0, so a destructor that pins
-    /// enters the slot for a section of its own and leaves it at its end,
-    /// and one that retires or flushes runs as code outside any section
-    /// does. The drain takes the whole cache out of its cell before it frees
-    /// anything, so a nested drain finds it empty (`drain_free_list`).
+    /// exchange took it first: `try_retire`). The tag, stored before the
+    /// exchange, is what a retire whose exchange lands after it reads: it
+    /// takes its node out again, so the left slot holds no list once every
+    /// such retire is done, whatever other retires exchanged in meanwhile
+    /// (`try_retire`, `InsertCheck`). [LeaveTraverse] What the exchange
+    /// captured (the nodes every batch placed here while the slot was
+    /// active) is traversed onto the free-list cache, with no destructor
+    /// running yet. [LeaveDrain] Then the cache is drained with the slot
+    /// inactive and the pin count at 0, so a destructor that pins enters
+    /// the slot for a section of its own and leaves it at its end, and one
+    /// that retires or flushes runs as code outside any section does. The
+    /// drain takes the whole cache out of its cell before it frees anything,
+    /// so a nested drain finds it empty (`drain_free_list`).
     ///
-    /// [LeaveReset] A section that escalated leaves the era word at
-    /// `EPOCH_UNCONDITIONAL`; the leave resets it to 0, the era a slot
-    /// starts with, so the next section's first protected load publishes
-    /// the epoch it reads (a slot at era 0 is eligible for no batch, as at
-    /// the start). A plain store: the slot is inactive, and the next
-    /// activation's exchange orders it before the slot is read again.
+    /// [LeaveReset] A section that escalated leaves the era at
+    /// `EPOCH_UNCONDITIONAL`; the leave's tagged store carries 0 instead,
+    /// the era a slot starts with, so the next section's first protected
+    /// load publishes the epoch it reads (a slot at era 0 is eligible for
+    /// no batch, as at the start).
     ///
     /// A late section (see `late`) ends here as an exit does: no exit runs
     /// for its thread any more to submit what it retired and release its ID.
     ///
     /// # Progress: wait-free
     ///
-    /// One exchange, one walk of the list it captured (fixed in length by
-    /// the exchange, see `reclaim::traverse`), and the frees of the batches
-    /// that walk released: the destructors run are this thread's own work,
-    /// bounded by the values freed, never by other threads.
-    #[inline]
+    /// One store, one exchange, one walk of the list it captured (fixed in
+    /// length by the exchange, see `reclaim::traverse`), and the frees of
+    /// the batches that walk released: the destructors run are this
+    /// thread's own work, bounded by the values freed, never by other
+    /// threads.
+    #[inline(always)]
     fn leave(&self) {
         if self.late.get() {
             self.late.set(false);
             self.cleanup();
             return;
         }
-        let tid = self.tid();
-        let first = self.leave_slot(tid);
-        if first != 0 && first != INVPTR {
-            unsafe { self.traverse_onto_cache(first as *mut RetiredNode) };
-        }
-        if !self.free_list.get().is_null() {
-            self.drain_free_list();
+        let first = self.leave_slot();
+        if is_list(first) || !self.free_list.get().is_null() {
+            self.leave_cold(first);
         }
     }
 
-    /// [Leave] The exchange that leaves this thread's reservation slot:
-    /// returns the list word it displaced (0, INVPTR, or a list the caller
-    /// traverses), and resets the era word after an escalated section
-    /// (`LeaveReset`). Shared by the outermost drop and the exit.
-    #[inline]
-    fn leave_slot(&self, tid: usize) -> usize {
-        let slots = self.global().thread_slots(tid);
+    /// [LeaveTraverse] and [LeaveDrain], out of the line of the common
+    /// leave, whose exchange took nothing and whose cache is empty.
+    #[cold]
+    fn leave_cold(&self, first: usize) {
+        if is_list(first) {
+            // SAFETY: `first` is the list head the leave's exchange captured.
+            unsafe { self.traverse_onto_cache(first as *mut RetiredNode) };
+        }
+        self.drain_free_list();
+    }
+
+    /// [LeaveMark] and [Leave]: the tagged store of the era word (the
+    /// escalated era reset to 0, `LeaveReset`) and the exchange that leaves
+    /// this thread's reservation slot, returning the list word it displaced
+    /// (0, INVPTR, or a list the caller traverses). Shared by the outermost
+    /// drop and the exit.
+    #[inline(always)]
+    fn leave_slot(&self) -> usize {
+        let slots = self.slots();
+        let epoch = self.cached_epoch.get();
+        let kept = if epoch == EPOCH_UNCONDITIONAL {
+            0
+        } else {
+            epoch
+        };
+        self.cached_epoch.set(kept);
+        // Relaxed: the exchange that follows releases it, and a retire reads
+        // it only after an exchange of its own on the list word.
+        slots.epoch.store(kept | ERA_INACTIVE, Ordering::Relaxed);
         let first = slots.first.swap(INVPTR, Ordering::AcqRel);
         #[cfg(test)]
-        crate::stall::at(crate::stall::Step::Left, tid);
-        if self.cached_epoch.get() == EPOCH_UNCONDITIONAL {
-            slots.epoch.store(0, Ordering::Relaxed);
-            self.cached_epoch.set(0);
-        }
+        crate::stall::at(crate::stall::Step::Left, self.tid());
         first
     }
 
     /// [Enter] Activate this thread's reservation slot at an outermost
-    /// `pin()`: one exchange of the list word to 0, what it held traversed.
+    /// `pin()`: one plain store of the era word clears the tag the leave
+    /// set (the era the slot last published stays), then one exchange of
+    /// the list word to 0, what it held traversed.
     ///
     /// The exchange, never a store: the slot left INVPTR at the last drop
-    /// may hold a node a retire exchanged in since and has not rolled back
-    /// yet; the exchange takes it, the retire's rollback then fails and
-    /// counts the node, and the traversal here balances that count. A store
-    /// would lose the node. No epoch is published: the slot keeps the era
-    /// word of its last publication (0 before the first, or after an
+    /// may hold a node a retire exchanged in since and has not taken out
+    /// yet; the exchange takes it, the retire's compare-exchange then fails
+    /// and counts the node, and the traversal here balances that count. A
+    /// store would lose the node. No epoch is published: the slot keeps the
+    /// era of its last publication (0 before the first, or after an
     /// escalated section), and the first protected load that finds the
     /// global epoch moved publishes it (`protect_load`); a scan meanwhile
     /// treats the slot as reserving that era, which holds every batch it
-    /// could need.
+    /// could need. The era store comes first, so a scan that reads the list
+    /// word active reads the era untagged (the exchange releases the store).
     ///
     /// A SeqCst exchange on x86-64 is the full barrier the scan's fence
     /// pairs with: a scan that did not see the slot active completed before
@@ -501,23 +556,30 @@ impl Handle {
     ///
     /// # Progress: wait-free
     ///
-    /// One exchange and one walk of the list it captured: the list of a
-    /// slot left INVPTR holds the node of an insert that found INVPTR
-    /// behind its exchange and has not rolled back yet, and the nodes of
-    /// the inserts that landed on it since (one per batch), fixed in length
-    /// by the exchange.
-    #[inline]
+    /// One store, one exchange and one walk of the list it captured: the
+    /// list of a slot left INVPTR holds the nodes of the inserts that
+    /// exchanged in since the leave and have not taken them out yet (one
+    /// per such retire), fixed in length by the exchange.
+    #[inline(always)]
     fn enter(&self) {
-        let tid = self.tid();
-        let first = self
-            .global()
-            .thread_slots(tid)
-            .first
-            .swap(0, Ordering::SeqCst);
+        let slots = self.slots();
+        // Relaxed: the exchange that follows releases it.
+        slots
+            .epoch
+            .store(self.cached_epoch.get(), Ordering::Relaxed);
+        let first = slots.first.swap(0, Ordering::SeqCst);
         publish_fence();
-        if first != 0 && first != INVPTR {
-            unsafe { self.traverse_onto_cache(first as *mut RetiredNode) };
+        if is_list(first) {
+            self.enter_cold(first);
         }
+    }
+
+    /// The traversal of what the activation's exchange took, out of the
+    /// line of the common activation, whose exchange took nothing.
+    #[cold]
+    fn enter_cold(&self, first: usize) {
+        // SAFETY: `first` is the list head the activation's exchange captured.
+        unsafe { self.traverse_onto_cache(first as *mut RetiredNode) };
     }
 
     /// Pin: enter a critical section.
@@ -535,7 +597,7 @@ impl Handle {
     ///
     /// Plus the walk of what the exchange took (see `enter`), and at a
     /// thread's first pin the claim of a thread ID (`alloc_tid`).
-    #[inline]
+    #[inline(always)]
     fn pin(&self) -> Guard {
         let count = self.pin_count.get();
         self.pin_count.set(count + 1);
@@ -575,14 +637,12 @@ impl Handle {
         // before every such read.
         let first = self.batch_first.get();
         if first.is_null() {
-            // On nightly a thread's exit (`cleanup`) runs only from the
-            // sentinel, which a thread registers when it claims an ID. A
-            // thread with no ID that starts a batch registers it here, so
-            // its exit runs and submits the batch; without this the batch of
-            // a thread that never pinned would never be submitted on nightly.
-            #[cfg(feature = "nightly")]
+            // A thread's exit (`cleanup`) runs from the sentinel, which a
+            // thread registers when it claims an ID. A thread with no ID
+            // that starts a batch registers it here, so its exit runs and
+            // submits the batch.
             if self.tid.get().is_none() {
-                let _ = HANDLE_CLEANUP_SENTINEL.try_with(|_| {});
+                let _ = exit_pending();
             }
             // First node in batch -> becomes batch_last (refs-node)
             self.batch_last.set(node_ptr);
@@ -788,7 +848,7 @@ impl Handle {
             if slots.first.load(Ordering::Acquire) == INVPTR {
                 continue;
             }
-            if slots.epoch.load(Ordering::Acquire) < min_epoch {
+            if !slot::era_covers(slots.epoch.load(Ordering::Acquire), min_epoch) {
                 continue;
             }
             if last == refs {
@@ -822,9 +882,10 @@ impl Handle {
         let mut adjs: usize = REFC_PROTECT.wrapping_neg(); // -REFC_PROTECT
 
         // One pass over the nodes the scan assigned. Per node: at most one
-        // exchange, one rollback CAS and one link CAS, none retried; a
-        // failed link walks the list the node displaced, which the slot's
-        // owner captured together with the node: fixed in length.
+        // exchange, one read of the era word, one compare-exchange (the
+        // rollback or the undo) and one link CAS, none retried; a failed
+        // link or a successful undo walks the list the node displaced,
+        // which an exchange fixed in length.
         while curr != last {
             let slots = global.thread_slots(unsafe { (*curr).get_slot_info() });
 
@@ -840,7 +901,7 @@ impl Handle {
             }
 
             // Re-check epoch
-            if slots.epoch.load(Ordering::Acquire) < min_epoch {
+            if !slot::era_covers(slots.epoch.load(Ordering::Acquire), min_epoch) {
                 curr = unsafe { (*curr).batch_next() };
                 continue;
             }
@@ -852,56 +913,75 @@ impl Handle {
             #[cfg(test)]
             crate::stall::at(crate::stall::Step::InsertExchanged, self.tid());
 
-            if prev != 0 {
-                if prev == INVPTR {
-                    // Slot was inactive (its thread left it) - undo by
-                    // restoring the INVPTR sentinel, as in the reference
-                    // try_retire rollback. Restoring 0 here would resurrect
-                    // a dead slot as active-empty and break the `INVPTR ==
-                    // inactive` invariant.
-                    // [InsertRollback] A compare-exchange of the list word:
-                    // the node still heads the list or it does not.
-                    if slots
-                        .first
-                        .compare_exchange(
-                            curr as usize,
-                            INVPTR,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        // Undo succeeded - node removed from slot.
-                        curr = unsafe { (*curr).batch_next() };
-                        continue;
-                    }
-                    // Undo failed - node was captured by a concurrent
-                    // exchange. Count as inserted to balance refs, matching
-                    // Crystalline's cnt++ on CAS failure (Figure 9, line 66).
-                    adjs = adjs.wrapping_add(1);
+            if prev == INVPTR {
+                // Slot was inactive (its thread left it) - undo by
+                // restoring the INVPTR sentinel, as in the reference
+                // try_retire rollback. Restoring 0 here would resurrect
+                // a dead slot as active-empty and break the `INVPTR ==
+                // inactive` invariant.
+                // [InsertRollback] A compare-exchange of the list word:
+                // the node still heads the list or it does not.
+                if slots
+                    .first
+                    .compare_exchange(curr as usize, INVPTR, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    // Undo succeeded - node removed from slot.
                     curr = unsafe { (*curr).batch_next() };
                     continue;
-                } else {
-                    // Link prev as next of curr
-                    let prev_ptr = prev as *mut RetiredNode;
-                    if unsafe {
-                        (*curr).next.compare_exchange(
-                            core::ptr::null_mut(),
-                            prev_ptr,
-                            Ordering::AcqRel,
-                            Ordering::Relaxed,
-                        )
-                    }
-                    .is_err()
-                    {
-                        // Someone already set next (concurrent traverse)
-                        let mut free_list: *mut RetiredNode = core::ptr::null_mut();
-                        unsafe {
-                            crate::reclaim::traverse(&mut free_list, prev_ptr);
-                            crate::reclaim::free_batch_list(free_list);
-                        }
-                    }
                 }
+                // Undo failed - node was captured by a concurrent
+                // exchange (the owner's, or the undo of a retire that
+                // exchanged in above, `InsertUndo`), which traverses it.
+                // Count as inserted to balance refs, matching the
+                // algorithm's cnt++ on CAS failure.
+                adjs = adjs.wrapping_add(1);
+                curr = unsafe { (*curr).batch_next() };
+                continue;
+            }
+
+            // The list the node displaced, to walk here if a traversal
+            // passed the node before it was linked, or if the undo below
+            // takes the node and the list out together: once at most.
+            let mut behind = prev as *mut RetiredNode;
+            if prev != 0 {
+                // Link prev as next of curr
+                if unsafe {
+                    (*curr).next.compare_exchange(
+                        core::ptr::null_mut(),
+                        behind,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                }
+                .is_err()
+                {
+                    // Someone already set next (concurrent traverse)
+                    unsafe { self.traverse_and_free(behind) };
+                    behind = core::ptr::null_mut();
+                }
+            }
+
+            // [InsertCheck] The era word read after the exchange: tagged,
+            // the owner left since the scan (its tag store precedes the
+            // leave's exchange, which precedes ours or took our node), and
+            // nothing traverses the slot until the owner's next pin or exit.
+            // [InsertUndo] So the node is taken out again, with whatever it
+            // displaced (a retire's node that found the slot left, or the
+            // list the leave is about to find gone), which is walked here.
+            // A failed undo means an exchange took the node (the owner's,
+            // or another retire's undo), and that traverses it: counted.
+            if slot::era_left(slots.epoch.load(Ordering::Acquire))
+                && slots
+                    .first
+                    .compare_exchange(curr as usize, INVPTR, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                if !behind.is_null() {
+                    unsafe { self.traverse_and_free(behind) };
+                }
+                curr = unsafe { (*curr).batch_next() };
+                continue;
             }
 
             adjs = adjs.wrapping_add(1);
@@ -943,6 +1023,22 @@ impl Handle {
         #[cfg(test)]
         self.fillers.set(self.fillers.get() + 1);
         node
+    }
+
+    /// Traverse a slot list a retire took out of a slot (see `try_retire`)
+    /// and free the batches that released, destructors included, as the
+    /// slot's owner would have.
+    ///
+    /// # Safety
+    ///
+    /// `first` must be a slot list head taken by an exchange (not null, not
+    /// INVPTR), as `reclaim::traverse` requires.
+    unsafe fn traverse_and_free(&self, first: *mut RetiredNode) {
+        let mut free_list: *mut RetiredNode = core::ptr::null_mut();
+        unsafe {
+            crate::reclaim::traverse(&mut free_list, first);
+            crate::reclaim::free_batch_list(free_list);
+        }
     }
 
     /// Traverse a captured slot list onto this thread's free-list cache and
@@ -1058,15 +1154,12 @@ impl Handle {
     /// Cleanup thread-local state. Called on thread exit.
     /// Extracted from Drop so it can also be called by the nightly sentinel.
     fn cleanup(&self) {
+        self.exited.set(true);
         // A thread with neither an ID nor a batch holds nothing: a thread
         // that never pinned nor retired, or an exit already run.
         if self.tid.get().is_none() && self.batch_first.get().is_null() {
             return;
         }
-        // The destructors this exit runs reach this handle, `HANDLE`
-        // being the thread-local whose destructor runs it.
-        #[cfg(not(feature = "nightly"))]
-        let _ = EXITING.try_with(|exiting| exiting.set(self));
         // Prevent re-entrant flush() from destructors during cleanup.
         self.in_reclaim.set(true);
         // A guard still live here was never dropped (`mem::forget`): no
@@ -1077,9 +1170,9 @@ impl Handle {
         // [ExitLeave] The slot is left as the outermost drop leaves it:
         // one exchange, what it captured traversed onto the cache. From
         // here no batch is placed in this thread's slot.
-        if let Some(tid) = self.tid.get() {
-            let first = self.leave_slot(tid);
-            if first != 0 && first != INVPTR {
+        if self.tid.get().is_some() {
+            let first = self.leave_slot();
+            if is_list(first) {
                 unsafe { self.traverse_onto_cache(first as *mut RetiredNode) };
             }
         }
@@ -1109,100 +1202,98 @@ impl Handle {
         // this one) must allocate a tid and enter before any load is
         // protected, so no cached epoch may claim a publication.
         self.tid.set(None);
+        self.slots.set(core::ptr::null());
         self.cached_epoch.set(0);
-        #[cfg(not(feature = "nightly"))]
-        let _ = EXITING.try_with(|exiting| exiting.set(core::ptr::null()));
     }
 }
 
+#[cfg(test)]
+mod tests;
+
+/// This thread's handle: a thread-local with no destructor (see `Handle`).
+/// On nightly a `#[thread_local]` static; elsewhere a `thread_local!` with
+/// a const initializer, which for a type with no destructor is one address
+/// too, with no state to check.
+#[cfg(feature = "nightly")]
+#[thread_local]
+static HANDLE: Handle = Handle::new();
+
+#[cfg(not(feature = "nightly"))]
+thread_local! {
+    static HANDLE: Handle = const { Handle::new() };
+}
+
+/// Run `f` on this thread's handle.
+#[inline(always)]
+fn with_handle<R>(f: impl FnOnce(&Handle) -> R) -> R {
+    #[cfg(feature = "nightly")]
+    {
+        f(&HANDLE)
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        HANDLE.with(f)
+    }
+}
+
+/// The thread-local whose destructor runs the thread's exit
+/// (`Handle::cleanup`): `HANDLE` has none, so that it answers during every
+/// thread-local destructor, the exit's own included. Registered when the
+/// thread claims an ID or starts a batch (`exit_pending`).
+#[cfg(not(feature = "shuttle"))]
+struct HandleCleanupSentinel;
+
+#[cfg(not(feature = "shuttle"))]
+impl Drop for HandleCleanupSentinel {
+    fn drop(&mut self) {
+        with_handle(Handle::cleanup);
+    }
+}
+
+#[cfg(not(feature = "shuttle"))]
+thread_local! {
+    static HANDLE_CLEANUP_SENTINEL: HandleCleanupSentinel = const { HandleCleanupSentinel };
+}
+
+/// Whether this thread's exit is still to run: the sentinel whose
+/// destructor runs it is still registered (registered here if it never
+/// was). False once it has run, during the thread-local destructors that
+/// follow it.
+#[cfg(not(feature = "shuttle"))]
+#[inline]
+fn exit_pending() -> bool {
+    HANDLE_CLEANUP_SENTINEL.try_with(|_| {}).is_ok()
+}
+
+// Under shuttle a task's thread-locals cannot reach one another while they
+// are destroyed, so the handle runs its exit from a destructor of its own
+// and no task-local destructor runs after it.
+#[cfg(feature = "shuttle")]
 impl Drop for Handle {
     fn drop(&mut self) {
         self.cleanup();
     }
 }
 
-#[cfg(not(feature = "nightly"))]
-mod late;
-#[cfg(not(feature = "nightly"))]
-use late::{late_pin, late_unpin, on_late_handle};
-
-#[cfg(test)]
-mod tests;
-
-// Thread-local handle
-#[cfg(feature = "nightly")]
-#[thread_local]
-static HANDLE: Handle = Handle::new();
-
-// On nightly, #[thread_local] does not run Drop on thread exit.
-// This sentinel uses std thread_local! (which does run Drop)
-// to ensure Handle::cleanup() is called when the thread exits.
-#[cfg(feature = "nightly")]
-struct HandleCleanupSentinel;
-
-#[cfg(feature = "nightly")]
-impl Drop for HandleCleanupSentinel {
-    fn drop(&mut self) {
-        HANDLE.cleanup();
-    }
-}
-
-#[cfg(feature = "nightly")]
-thread_local! {
-    static HANDLE_CLEANUP_SENTINEL: HandleCleanupSentinel = const { HandleCleanupSentinel };
-}
-
-#[cfg(not(feature = "nightly"))]
-thread_local! {
-    static HANDLE: Handle = const { Handle::new() };
-    /// This thread's handle while its exit runs, null otherwise. `HANDLE`
-    /// no longer answers then (its destructor is the exit), yet the
-    /// destructors the exit runs are critical sections and retirers like any
-    /// others and must reach the handle: through this. It has no destructor,
-    /// so it answers during every thread-local destructor.
-    static EXITING: Cell<*const Handle> = const { Cell::new(core::ptr::null()) };
-}
-
-/// Run `f` on this thread's handle if its exit is running (see `EXITING`).
-#[cfg(not(feature = "nightly"))]
-#[cold]
-fn on_exiting_handle<R>(f: impl FnOnce(&Handle) -> R) -> Option<R> {
-    let handle = EXITING.try_with(Cell::get).unwrap_or(core::ptr::null());
-    // SAFETY: `cleanup` stores its own handle here and clears it before it
-    // returns, on this thread; the handle outlives the store.
-    (!handle.is_null()).then(|| f(unsafe { &*handle }))
-}
-
-/// Whether this thread's exit is still to run (nightly: the sentinel whose
-/// destructor runs it is still registered). A retire after the exit goes to
-/// a handle of its own, since the exit that would place it has run.
-#[cfg(feature = "nightly")]
+#[cfg(feature = "shuttle")]
 #[inline]
 fn exit_pending() -> bool {
-    HANDLE_CLEANUP_SENTINEL.try_with(|_| {}).is_ok()
+    true
 }
 
 /// The epoch clock and the birth stamp of a node allocated on this thread
 /// (`RetiredNode::new`): see `Handle::alloc_birth_epoch`.
 #[inline]
 pub(crate) fn alloc_birth_epoch() -> u64 {
-    #[cfg(feature = "nightly")]
-    {
-        HANDLE.alloc_birth_epoch()
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        // During process teardown TLS may be destroyed. Fall back to the
-        // exiting handle, else to the late section's, else to the global
-        // counter alone (a birth no advance precedes, always correct).
-        HANDLE
-            .try_with(|handle| handle.alloc_birth_epoch())
-            .unwrap_or_else(|_| {
-                on_exiting_handle(Handle::alloc_birth_epoch)
-                    .or_else(|| on_late_handle(Handle::alloc_birth_epoch))
-                    .unwrap_or_else(slot::epoch)
-            })
-    }
+    with_handle(Handle::alloc_birth_epoch)
+}
+
+/// Whether a slot's list word holds a list: neither 0 (active, empty) nor
+/// INVPTR (left). The two sentinels are the two values below 2 once
+/// incremented, so this is one compare.
+#[inline(always)]
+fn is_list(word: usize) -> bool {
+    word.wrapping_add(1) > 1
 }
 
 /// The barrier after a publication of this thread's slot (an activation,
@@ -1221,26 +1312,9 @@ fn publish_fence() {
 /// Protect: era tracking for `Atomic::load()`.
 ///
 /// Called internally by `Atomic::load()`. Must NOT be called without a live Guard.
-#[inline]
+#[inline(always)]
 pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
-    #[cfg(feature = "nightly")]
-    {
-        HANDLE.protect_load(data, order)
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        // After `HANDLE` is destroyed: the exiting handle (a destructor the
-        // exit runs), else the late section's (a destructor that runs after
-        // the exit). With neither, no guard is live on this thread, which
-        // the caller's contract rules out: a plain load.
-        HANDLE
-            .try_with(|handle| handle.protect_load(data, order))
-            .unwrap_or_else(|_| {
-                on_exiting_handle(|handle| handle.protect_load(data, order))
-                    .or_else(|| on_late_handle(|handle| handle.protect_load(data, order)))
-                    .unwrap_or_else(|| data.load(order))
-            })
-    }
+    with_handle(|handle| handle.protect_load(data, order))
 }
 
 /// Enter a critical section.
@@ -1248,24 +1322,9 @@ pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
 /// Returns a `Guard` that represents the active critical section.
 /// While the guard exists, any `Shared<'g, T>` pointers loaded are
 /// guaranteed to remain valid.
-#[inline]
+#[inline(always)]
 pub fn pin() -> Guard {
-    #[cfg(feature = "nightly")]
-    {
-        HANDLE.pin()
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        // After `HANDLE` is destroyed: pin the exiting handle (a destructor
-        // the exit runs), else start a late section (a destructor that runs
-        // after the exit), which protects its loads as any section does.
-        //
-        // unwrap_or_else (lazy), NOT unwrap_or: unwrap_or evaluates its
-        // argument eagerly, running the fallback on every successful call.
-        HANDLE
-            .try_with(|handle| handle.pin())
-            .unwrap_or_else(|_| on_exiting_handle(Handle::pin).unwrap_or_else(late_pin))
-    }
+    with_handle(Handle::pin)
 }
 
 /// Retire a node for later reclamation.
@@ -1406,49 +1465,28 @@ unsafe fn dealloc_reclaimable<T: Reclaimable>(ptr: *mut RetiredNode) {
     unsafe { <T as Reclaimable>::dealloc(ptr as *mut T) }
 }
 
-/// The one retire path both public entry points share: the nightly
-/// thread-local handle, the stable one, and the exiting thread's handle.
+/// The one retire path both public entry points share.
 #[inline]
 pub(crate) unsafe fn retire_with(node_ptr: *mut RetiredNode, destructor: DestructorFn) {
-    #[cfg(feature = "nightly")]
-    {
+    with_handle(|handle| {
         // The handle outlives the sentinel whose destructor runs the exit,
-        // and takes the retires of the destructors that exit runs. Once the
-        // exit is over, a retire (from a thread-local destructor that runs
-        // after it) would fill a batch no exit submits any more.
-        // A late section's retires go to its handle, whose exit (the
-        // section's end) submits them.
-        if exit_pending() || HANDLE.in_reclaim.get() || HANDLE.late.get() {
-            // SAFETY: Caller upholds the safety contract.
-            unsafe { HANDLE.retire_with(node_ptr, destructor) }
-        } else {
+        // and takes the retires of the destructors that exit runs and of a
+        // late section (whose end submits them). Once the exit is over, a
+        // retire (from a thread-local destructor that runs after it) would
+        // fill a batch no exit submits any more: a handle of its own.
+        if handle.exit_over() {
             // SAFETY: Caller upholds the safety contract.
             unsafe { retire_after_exit(node_ptr, destructor) }
+        } else {
+            // SAFETY: Caller upholds the safety contract.
+            unsafe { handle.retire_with(node_ptr, destructor) }
         }
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        // SAFETY: Caller upholds the safety contract.
-        // Through the handle; through the exiting handle while the exit runs
-        // (a destructor it runs); after the exit (a thread-local destructor
-        // that runs after the handle's), through the late section's handle
-        // if one is live, else through a handle of its own.
-        if HANDLE
-            .try_with(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
-            .is_err()
-            && on_exiting_handle(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
-                .is_none()
-            && on_late_handle(|handle| unsafe { handle.retire_with(node_ptr, destructor) })
-                .is_none()
-        {
-            unsafe { retire_after_exit(node_ptr, destructor) };
-        }
-    }
+    })
 }
 
 /// A retire after this thread's exit ran: a handle of its own takes the
-/// node, and its exit, as it is dropped, places it padded, as any thread's
-/// exit does with the batch it leaves; no thread ID is needed for that.
+/// node, and its exit, run at once, places it padded, as any thread's exit
+/// does with the batch it leaves; no thread ID is needed for that.
 ///
 /// # Safety
 ///
@@ -1458,6 +1496,7 @@ unsafe fn retire_after_exit(node_ptr: *mut RetiredNode, destructor: DestructorFn
     let late = Handle::new();
     // SAFETY: forwarded from the caller.
     unsafe { late.retire_with(node_ptr, destructor) };
+    late.cleanup();
 }
 
 /// Flush all retired nodes on the calling thread.
@@ -1477,20 +1516,7 @@ unsafe fn retire_after_exit(node_ptr: *mut RetiredNode, destructor: DestructorFn
 /// **Note:** This only flushes the calling thread's state. To flush all threads,
 /// each thread must call `flush()` independently or exit (which triggers cleanup).
 pub fn flush() {
-    #[cfg(feature = "nightly")]
-    {
-        HANDLE.flush()
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        // After `HANDLE` is destroyed: the exiting handle (a no-op: its exit
-        // is reclaiming), else a live late section's, else nothing.
-        if HANDLE.try_with(|handle| handle.flush()).is_err()
-            && on_exiting_handle(Handle::flush).is_none()
-        {
-            on_late_handle(Handle::flush);
-        }
-    }
+    with_handle(Handle::flush)
 }
 
 /// Submits this thread's batch of retired nodes to reclamation now, as
@@ -1499,16 +1525,5 @@ pub fn flush() {
 /// calls it: what its thread retired goes to reclamation without waiting for
 /// the batch to fill, and a drop that retired nothing costs nothing.
 pub fn flush_pending() {
-    #[cfg(feature = "nightly")]
-    {
-        HANDLE.flush_pending()
-    }
-    #[cfg(not(feature = "nightly"))]
-    {
-        if HANDLE.try_with(|handle| handle.flush_pending()).is_err()
-            && on_exiting_handle(Handle::flush_pending).is_none()
-        {
-            on_late_handle(Handle::flush_pending);
-        }
-    }
+    with_handle(Handle::flush_pending)
 }

@@ -42,32 +42,59 @@ pub(crate) const RETIRE_FREQ: usize = 64;
 /// Epoch advancement frequency: a thread advances at its first retire, then every `EPOCH_FREQ`th
 pub(crate) const EPOCH_FREQ: usize = 128;
 
-/// Unconditional reservation marker for a slot's epoch word.
+/// The tag of a left slot's era word, its top bit. The leave of a slot sets
+/// it, before the exchange that makes the list word INVPTR, and the next
+/// activation clears it, before the exchange that makes the list word 0: a
+/// scan skips a tagged slot (`era_covers`), and a retire that exchanged a
+/// node into a slot and then reads the tag knows the slot was left since
+/// its scan, so it takes the node out again (`try_retire`). The era the
+/// slot last published stays in the low bits, for the owner's cache.
+pub(crate) const ERA_INACTIVE: u64 = 1 << 63;
+
+/// Unconditional reservation marker for a slot's epoch word: the largest
+/// untagged era.
 ///
 /// A slot publishing this value is eligible for **every** batch in
-/// `try_retire`'s scan (`epoch < min_epoch` is false for any `min_epoch`),
-/// so every subsequently retired batch inserts a node into the slot and is
-/// deferred until the slot's next traversal. This is the wait-free
-/// completion path for protected loads: when the global epoch keeps
-/// advancing during a load's bounded convergence attempts, the loader
-/// escalates to an unconditional reservation and finishes with one more
-/// pointer load - protected regardless of birth epochs.
+/// `try_retire`'s scan (`era_covers` holds for any `min_epoch`), so every
+/// subsequently retired batch inserts a node into the slot and is deferred
+/// until the slot's next traversal. This is the wait-free completion path
+/// for protected loads: when the global epoch keeps advancing during a
+/// load's bounded convergence attempts, the loader escalates to an
+/// unconditional reservation and finishes with one more pointer load -
+/// protected regardless of birth epochs.
 ///
 /// The marker ends with the critical section that escalated: the outermost
 /// guard drop leaves the slot (its list word becomes INVPTR, so no scan
-/// reads its epoch) and resets the era word to 0, the era a slot starts
-/// with, so the first protected load of the next section publishes the
-/// epoch it reads. The global epoch counter is monotonically increasing
-/// from 1 and can never reach this value.
-pub(crate) const EPOCH_UNCONDITIONAL: u64 = u64::MAX;
+/// reads its epoch) and resets the era to 0, the era a slot starts with, so
+/// the first protected load of the next section publishes the epoch it
+/// reads. The global epoch counter is monotonically increasing from 1 and
+/// can never reach this value.
+pub(crate) const EPOCH_UNCONDITIONAL: u64 = ERA_INACTIVE - 1;
+
+/// Whether a slot whose era word reads `era` reserves the nodes born at
+/// `min_epoch` or later: the algorithm's `era >= min_epoch`, false for a
+/// left slot (tagged: negative as a signed word, below every birth) and
+/// true for an escalated one (the largest untagged value). One compare.
+#[inline]
+pub(crate) fn era_covers(era: u64, min_epoch: u64) -> bool {
+    era as i64 >= min_epoch as i64
+}
+
+/// Whether `era`, read from a slot's era word, carries the tag of a left
+/// slot (`ERA_INACTIVE`).
+#[inline]
+pub(crate) fn era_left(era: u64) -> bool {
+    (era as i64) < 0
+}
 
 /// A thread's reservation slot: the list word and the era word, on a cache
 /// line of their own. The list word is INVPTR while the slot is inactive: a
 /// thread's reservation is active only between its outermost `pin()` and
 /// the drop of that guard, which leaves the slot. The era word is written
 /// by the owner alone: a protected load that finds the global epoch moved
-/// publishes the epoch it read, and the leave of an escalated section
-/// resets it to 0.
+/// publishes the epoch it read; the leave tags it (`ERA_INACTIVE`), the
+/// era of an escalated section reset to 0, and the activation clears the
+/// tag.
 #[repr(align(128))]
 pub(crate) struct ThreadSlots {
     pub(crate) first: AtomicUsize,
@@ -75,10 +102,11 @@ pub(crate) struct ThreadSlots {
 }
 
 impl ThreadSlots {
+    /// A slot nobody entered yet: left, at era 0.
     const fn new() -> Self {
         Self {
             first: AtomicUsize::new(INVPTR),
-            epoch: AtomicU64::new(0),
+            epoch: AtomicU64::new(ERA_INACTIVE),
         }
     }
 }

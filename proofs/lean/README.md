@@ -150,14 +150,15 @@ for every size:
    there is a number of epoch moves past which the load has taken more steps
    (`noEscalate_unbounded`, the model's `RC_mut_no_escalate`).
 2. An outermost pin is `3 + the tid claim` steps plus three per node its exchange took
-   (`pinSteps_eq`, `pinSteps_le_of_le`); an outermost drop is seven steps plus three per node
+   (`pinSteps_eq`, `pinSteps_le_of_le`); an outermost drop is eight steps plus three per node
    of the list and one per batch freed (`leaveSteps_eq`).
 3. A submission's scan takes at most three steps per slot (`scanSteps_le`), makes never more
-   fillers than slots (`fillers_le`), and each insert takes at most six steps
-   (`insertSteps_le`, `insertsSteps_le`): the whole submission is `6 + 3 T` plus six per node
+   fillers than slots (`fillers_le`), and each insert takes at most eight steps, the era word's
+   read and the undo included (`insertSteps_le`, `insertsSteps_le`): the whole submission is
+   `6 + 3 T` plus eight per node
    (`tryRetireSteps_le`, `retireSteps_le`).
 4. A flush is two steps plus `12 + 3 T` per round and the per-node work (`flushSteps_le`), an
-   exit nine plus three per node of the list it took plus the same per round (`exitSteps_le`),
+   exit ten plus three per node of the list it took plus the same per round (`exitSteps_le`),
    for any number of rounds over at most `T` slots each (`rounds_le`).
 5. The epoch clock: a thread's first allocation advances the epoch at any frequency
    (`first_allocation_advances`); raised before its check, it does not
@@ -327,12 +328,12 @@ function of the sizes it depends on (the labels of the model's code map), for ev
 |---------|--------------|
 | `loadRun_le`, `protectLoad_le` | a protected load with `L` attempts takes at most `3 L + 1` steps, however often the epoch moves |
 | `noEscalate_unbounded` | without the escalation, for every candidate bound some number of epoch moves makes the load exceed it |
-| `pinSteps_eq`, `pinSteps_le_of_le` | an outermost pin is `3 + the tid claim` steps plus three per node taken |
-| `leaveSteps_eq` | an outermost drop is seven steps plus three per node of the list and one per batch freed |
+| `pinSteps_eq`, `pinSteps_le_of_le` | an outermost pin is `4 + the tid claim` steps plus three per node taken |
+| `leaveSteps_eq` | an outermost drop is eight steps plus three per node of the list and one per batch freed |
 | `scanSteps_le` | the scan takes at most three steps per slot |
 | `fillers_le` | a padded submission makes never more fillers than there are slots |
-| `insertSteps_le`, `insertsSteps_le` | every insert takes at most six steps, whatever it finds |
-| `tryRetireSteps_le`, `retireSteps_le` | a submission is `6 + 3 T` steps plus six per node; a retire three more |
+| `insertSteps_le`, `insertsSteps_le` | every insert takes at most eight steps, whatever it finds and whatever the era word says after it |
+| `tryRetireSteps_le`, `retireSteps_le` | a submission is `6 + 3 T` steps plus eight per node; a retire three more |
 | `roundSteps_le`, `rounds_le` | a round of a flush or an exit is `12 + 3 T` plus the per-node and per-batch work, summed over the rounds |
 | `flushSteps_le`, `exitSteps_le` | a flush is two steps plus its rounds; an exit nine plus three per node taken plus its rounds |
 | `first_allocation_advances`, `late_first_allocation_advances_nothing` | a thread's first allocation advances the epoch at any frequency; raised before its check it does not |

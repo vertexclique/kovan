@@ -95,7 +95,7 @@ RC_live_exits_park                 MC_Reclaim         pass
 RC_live_flush_chain                MC_Reclaim         pass
 RC_mut_no_leave                    MC_Reclaim         violated:DrainLive
 RC_mut_no_leave_active             MC_Reclaim         violated:ActiveOnlyPinned
-RC_mut_leave_store                 MC_Reclaim         violated:NoLoss
+RC_mut_leave_store                 MC_Reclaim         violated:CountExact
 RC_mut_leave_pinned                MC_Reclaim         violated:NoUseAfterFree
 RC_mut_no_rollback                 MC_Reclaim         violated:ActiveOnlyPinned
 RC_mut_no_rollback_live            MC_Reclaim         violated:DrainLive
@@ -107,9 +107,12 @@ RC_mut_no_era_check_birth          MC_Reclaim         violated:EraCoversBirth
 RC_wit_leave_list                  MC_Reclaim         violated:NoLeaveListW
 RC_wit_pad                         MC_Reclaim         violated:NoPadW
 RC_wit_taken_insert                MC_Reclaim         violated:NoTakenInsertW
-RC_find_reanimated                 MC_Reclaim         violated:NoReanimatedW
-RC_find_reanimated_live            MC_Reclaim         violated:DrainLive
-RC_leave_race2_safe                MC_Reclaim         pass
 RC_wit_enter_list                  MC_Reclaim         violated:NoEnterListW
 RC_wit_raise                       MC_Reclaim         violated:NoRaiseW
 RC_wf_leave_race                   MC_Reclaim         pass
+RC_leave_race2                     MC_Reclaim         pass
+RC_live_leave_race2                MC_Reclaim         pass
+RC_mut_leave_untagged              MC_Reclaim         violated:ActiveOnlyPinned
+RC_mut_insert_unchecked            MC_Reclaim         violated:ActiveOnlyPinned
+RC_wit_insert_undo                 MC_Reclaim         violated:NoInsertUndoW
+RC_leave_race2w                    MC_Reclaim         pass

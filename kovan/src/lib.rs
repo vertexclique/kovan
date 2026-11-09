@@ -22,24 +22,24 @@
 //!   then it escalates to an *unconditional reservation* (the slot becomes
 //!   eligible for every batch) and completes with one final load.
 //! - **`pin()`: wait-free.** A nested pin is a counter update. An outermost
-//!   pin activates the thread's reservation: one exchange of its slot's
-//!   list word, and a walk of what that took (one node per batch an insert
-//!   left in the slot since it was left, see Quiescence). It publishes no
-//!   epoch. A thread's first pin also claims a thread ID: one pass over the
-//!   released IDs, no lock.
+//!   pin activates the thread's reservation: one store of its slot's era
+//!   word, one exchange of its list word, and a walk of what that took (one
+//!   node per insert that landed in the left slot and has not taken its
+//!   node out yet, see Quiescence). It publishes no epoch. A thread's first
+//!   pin also claims a thread ID: one pass over the released IDs, no lock.
 //! - **`retire()`, `retire_reclaimable()`: wait-free.** O(1) per call;
 //!   every 64th submits the batch: one pass over the T slots, one insert
-//!   per eligible slot (one exchange, at most one compare-exchange after
-//!   it, none retried).
+//!   per eligible slot (one exchange, one read of the slot's era word, at
+//!   most one compare-exchange after it, none retried).
 //! - **Allocation (`RetiredNode::new`): wait-free.** One counter update and
 //!   one epoch load; every 128th allocation of a thread also advances the
 //!   epoch, one fetch-add.
 //! - **`Guard` drop: wait-free.** A nested drop is a counter update. The
-//!   outermost drop leaves the reservation: one exchange of the slot's
-//!   list word to the inactive marker, one walk of the list it took (one
-//!   entry per batch submitted while the section ran), then the frees of
-//!   the batches that walk released, whose destructors are the thread's
-//!   own work.
+//!   outermost drop leaves the reservation: one store that tags the slot's
+//!   era word, one exchange of its list word to the inactive marker, one
+//!   walk of the list it took (one entry per batch submitted while the
+//!   section ran), then the frees of the batches that walk released, whose
+//!   destructors are the thread's own work.
 //! - **`flush()` and thread exit: wait-free**, a fixed sequence of the
 //!   steps above: the thread's partial batch is placed (padded with
 //!   fillers, one per eligible slot beyond its nodes, so it is always
@@ -84,8 +84,8 @@
 //!
 //! - **Per-thread reservation slots**: Each thread with an ID owns a list
 //!   word (the batches placed in it; the inactive marker between sections)
-//!   and an era word (the epoch its loads are protected from), on a cache
-//!   line of their own.
+//!   and an era word (the epoch its loads are protected from, tagged while
+//!   the slot is left), on a cache line of their own.
 //! - **Batch retirement**: Retired nodes are accumulated in thread-local
 //!   batches (at least 64; batches grow under high thread counts so each
 //!   eligible slot can receive a node) and distributed across active slots
@@ -106,14 +106,16 @@
 //! before idling; [`flush`] submits what the calling thread itself retired
 //! and has not submitted yet (its partial batch).
 //!
-//! One race of the algorithm's insert is the exception. An insert that
-//! finds the slot just left (the inactive marker behind its exchange) takes
-//! its node back, unless a second insert landed on that node first: both
-//! then count their nodes, and the left slot holds a list until the
-//! thread's next pin or exit, which takes it. The batches it keeps
-//! meanwhile are those whose values were born no later than the epoch the
-//! slot last published; the thread's next `pin()` or exit frees them. The
-//! model's `RC_find_reanimated` exhibits the race (proofs/tla/reclaim).
+//! This holds against the inserts that race the drop. An insert that finds
+//! the slot just left (the inactive marker behind its exchange) takes its
+//! node back; one that lands on such a node instead reads the tag the drop
+//! stored on the slot's era word before its exchange, and takes its node
+//! and the one it displaced out together, traversing the latter. So the
+//! left slot holds a list only while such an insert is between its two
+//! exchanges, and no batch waits for the thread's next pin. The tag is the
+//! one addition to the algorithm's insert, whose rollback alone leaves a
+//! list in the slot when two inserts race one leave (the model's
+//! `RC_mut_insert_unchecked` and `RC_mut_leave_untagged`, proofs/tla/reclaim).
 //!
 //! # Recycling node memory (the `recycle` feature)
 //!

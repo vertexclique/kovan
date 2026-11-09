@@ -236,16 +236,30 @@ P_leave_race3 == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Ld(1), U>>
 \* guard, and exits. The insert that finds INVPTR must
 \* roll back, since no enter of thread 1 will ever take the word (no_rollback, as a lasso).
 P_leave_park == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U>> ELSE <<P, Wr(1), U, Fl, Ex>>]
-\* Two inserts racing one leave: the reader loads (its slot publishes the epoch), drops its
+\* Two inserts racing one leave: a reader pins, loads cell 1 (publishing the epoch), drops its
 \* guard, then replaces cell 2's initial value and flushes (its own flush places that batch,
-\* padded, into every slot that reads as active, its own left slot included) and parks; a
-\* writer replaces cell 1's value twice (a batch of two whose first node is the initial one,
-\* born at epoch 1, so the reader's slot is eligible and the second write's retire places it)
-\* and parks. The writer's insert that finds INVPTR behind its exchange rolls back, unless the
-\* reader's own flush landed its node on it first: then both count their nodes and the left
-\* slot holds a list nobody traverses (RC_find_reanimated_*, README.md).
+\* padded, into every slot that reads as active) and parks; a writer replaces cell 1's value
+\* twice (a batch of two whose first node is the initial one, born at epoch 1, so the reader's
+\* slot is eligible and the second write's retire places it), drops its guard and flushes what
+\* that retire could not place. The writer's insert that finds INVPTR behind its exchange rolls
+\* back, and the reader's own flush skips the slot it left (the era word's tag); with the tag
+\* not stored (leave_untagged) the flush's node lands on the writer's and the left slot holds a
+\* list nobody traverses (README.md, Findings).
 P_leave_race2 == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, Wr(2), Fl>>
-                                           ELSE <<P, Wr(1), Wr(1), U>>]
+                                           ELSE <<P, Wr(1), Wr(1), U, Fl>>]
+\* Two inserts from two threads racing one leave: the reader loads, waits until both writers
+\* have replaced a cell's value and dropped their guards, then drops its own and parks; each
+\* writer then flushes (a padded placement: one filler for the reader's slot, which is active
+\* and eligible until the reader's drop). The two flushes' inserts may both pass their checks
+\* before the reader's leave and land one on the other after it: the second reads the tag and
+\* takes both out (InsertUndo); with the era word never read after the exchange
+\* (insert_unchecked) the left slot keeps the two. The waits (the second writer's section after
+\* the first's, the reader's drop after both) cut the interleavings of the writers' sections
+\* with each other and with the reader's, which RC_leave_race3 covers; the two flushes and the
+\* drop interleave freely.
+P_leave_race2w == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Ld(1), After(2, 3), After(3, 4), U>>
+                                        [] t = 2 -> <<P, Wr(1), U, Fl>>
+                                        [] t = 3 -> <<After(2, 3), P, Wr(2), U, Fl>>]
 \* A flush short of nodes: thread 1 holds a reservation (it loaded) while thread 2, in a
 \* section of its own that loaded too, replaces cell 1's value and flushes: one node, two
 \* eligible slots, one filler; then both drop their guards and thread 1 parks.
