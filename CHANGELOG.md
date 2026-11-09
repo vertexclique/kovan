@@ -4,6 +4,19 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
+## 0.2.5
+
+Every crate goes to 0.2.5.
+
+### Fixed
+
+- kovan: the drop of a thread's outermost `Guard` stores its slot's inactive tag with Release, not
+  Relaxed. A retire's scan reads that tag with a plain Acquire load and skips the slot when it sees
+  it, and the batch it skipped the slot for is freed by another thread: with a Relaxed store
+  nothing ordered the section's reads before that free. On x86 this held, as x86 keeps a load
+  ahead of a later store; on ARM and POWER a reader could still be reading a value when its batch
+  was freed, and under Rust's memory model it was a data race on every target.
+
 ## 0.2.4
 
 Every crate goes to 0.2.4.
