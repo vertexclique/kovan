@@ -351,8 +351,8 @@ impl Handle {
         // global counter before this load (by this thread, or by a helper
         // whose result this thread acquired), so `curr_epoch >= cached` by
         // read-read coherence and `<=` means equal; or 0 (no publication
-        // yet), below every epoch; or `EPOCH_UNCONDITIONAL` (`u64::MAX`),
-        // above every epoch.
+        // yet), below every epoch; or `EPOCH_UNCONDITIONAL` (just below the
+        // inactive tag), above every epoch.
         if curr_epoch <= self.cached_epoch.get() {
             return ptr;
         }
@@ -1885,11 +1885,11 @@ fn exit_pending() -> bool {
 }
 
 /// Whether a slot's list word holds a list: neither 0 (active, empty) nor
-/// INVPTR (left). The two sentinels are the two values below 2 once
-/// incremented, so this is one compare.
+/// INVPTR (left). The word holds a pointer, so it is read at pointer width:
+/// there the two sentinels are the two values below 2 once incremented.
 #[inline(always)]
 fn is_list(word: u64) -> bool {
-    word.wrapping_add(1) > 1
+    (word as usize).wrapping_add(1) > 1
 }
 
 /// The barrier after a publication of this thread's slot (an activation)
