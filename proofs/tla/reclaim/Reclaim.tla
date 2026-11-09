@@ -22,15 +22,24 @@
 (* batch's count (on its refs-node) ends at the number of nodes inserted.  *)
 (* A traversal of a list decrements the count of every node's batch; the   *)
 (* traversal that brings a count to zero puts the batch into the thread's  *)
-(* free-list cache, freed once the cache is full or drained. A pin whose   *)
-(* epoch keeps moving takes the slow path, which other threads help before *)
-(* they advance the epoch. Destructors run inside the free and may pin,    *)
+(* free-list cache, freed once the cache is full or drained. The outermost *)
+(* pin activates the slot (the era word's left tag cleared, then one       *)
+(* exchange of the list word to 0, what it took traversed) and publishes   *)
+(* the era only when the global epoch moved, taking the slow path, which   *)
+(* other threads help before they advance the epoch, when it keeps moving. *)
+(* The drop of the outermost guard leaves the slot: the era word tagged    *)
+(* left, then one exchange of its list word to INVPTR (an insert that      *)
+(* finds INVPTR behind its exchange rolls its node back, or counts it when *)
+(* the owner's next enter took it first; an insert that reads the era word *)
+(* tagged after its exchange takes its node back too), the captured list   *)
+(* traversed, the cache drained with the slot inactive. A thread with no   *)
+(* live guard is counted by no batch. Destructors run inside the free and may pin,       *)
 (* load and retire again (re-entrance), which the per-thread call stack    *)
-(* below models. `flush` submits the partial batch, drains the thread's    *)
-(* own list and advances the epoch, and with no guard live leaves the      *)
-(* reservation at epoch 0; a thread's exit runs two rounds of the          *)
-(* same, deactivates its slots, parks what it can no longer free on its    *)
-(* tid and releases the tid for another thread to take.                   *)
+(* below models. `flush` and a thread's exit place the partial batch       *)
+(* padded with fillers (one per eligible slot beyond the batch's nodes,    *)
+(* so it is always placed), advance the epoch and drain the cache, again   *)
+(* while the destructors they ran retired; the exit leaves the slot first  *)
+(* and releases the tid last, for another thread to take.                  *)
 (*                                                                          *)
 (* Recycling (`Recycle`). In the Rust code a structure may retire a node   *)
 (* with `retire_reclaimable` instead of `retire`. When kovan frees that    *)
@@ -66,7 +75,6 @@ CONSTANTS
     MaxCache,      \* MAX_CACHE (12 in the code)
     LoadAttempts,  \* MAX_LOAD_ATTEMPTS (16 in the code)
     PinAttempts,   \* the fast attempts of a transition (16 in the code)
-    ExitRounds,    \* EXIT_ROUNDS (2 in the code)
     MaxEpoch,      \* the state constraint's bound on the global epoch
     Mutation,      \* "none" or one defect put back
     CountSteps,    \* TRUE: count every operation's steps (the wait-freedom bounds)
@@ -77,10 +85,14 @@ CONSTANTS
 
 NULL == 0
 INV == -1                      \* INVPTR: an inactive slot, a traversed node
+\* The left tag of an era word (ERA_INACTIVE, slot.rs): the model keeps a tagged word as a
+\* negative number, below every birth, as the code's signed compare does (era_covers); TagV and
+\* UntagV are inverse, and TagV leaves a tagged word as it is.
+TagV(x) == IF x < 0 THEN x ELSE 0 - x - 2
+UntagV(x) == IF x < 0 THEN 0 - x - 2 ELSE x
 UNC == 1000                    \* EPOCH_UNCONDITIONAL: above every epoch the model reaches
 BIAS == 1000                   \* REFC_PROTECT: the count an unsubmitted batch carries
 NoTid == -1
-NoSkip == -2
 SJ == {0, 2}                   \* slot indices: 0 the reservation, 2 the helper slot (hr_num + 1)
 Tids == 0 .. (MaxTid - 1)
 Nodes == 1 .. MaxNodes
@@ -97,31 +109,18 @@ Min2(a, b) == IF a < b THEN a ELSE b
 MinOf(S) == CHOOSE x \in S : \A y \in S : x <= y
 Range(s) == {s[i] : i \in DOMAIN s}
 
-\* The defects this branch fixed, one at a time (README.md).
-MutDrainPublished == Mutation = "drain_published"
-MutUnnested == Mutation = "escalated_drop_unnested"
-MutFlushUnc == Mutation = "flush_keeps_unconditional"
-MutFlushDeact == Mutation = "flush_deactivates"
+\* The defects fixed so far, one at a time (README.md).
 MutTidEarly == Mutation = "tid_released_early"
-MutExitInactive == Mutation \in {"exit_frees_inactive", "tid_released_early"}
 MutCopied == Mutation = "cache_copied"
-MutOverwritten == Mutation \in {"cache_overwritten", "escalated_drop_unnested"}
+MutOverwritten == Mutation = "cache_overwritten"
 MutHelpFirst == Mutation = "help_before_submit"
 MutLocks == Mutation = "ttas_locks"
-MutExitLoop == Mutation = "exit_loop"
 MutExitHandle == Mutation = "exit_handle_unreachable"
 MutSlowFrees == Mutation = "slow_path_frees"
 MutDetachUnclosed == Mutation = "detach_unclosed"
 MutHelpFollows == Mutation = "help_follows_next_request"
 MutNoSeqnoCheck == Mutation = "help_no_seqno_check"
 MutStaleBirth == Mutation = "stale_birth"
-MutFlushKeep == Mutation = "flush_keeps_reservation"
-\* flush_needs_tid puts back the flush of kovan 0.1.22: on a thread that has no tid (it never
-\* pinned), flush() returns at its first line, so it never adopts what exited threads parked.
-MutFlushNeedsTid == Mutation = "flush_needs_tid"
-\* exit_no_adopt puts back the exit of kovan 0.2.0: an exit never adopts what earlier exits
-\* parked, so with no flush anywhere every parked batch stays parked (OrphansAdopted).
-MutExitNoAdopt == Mutation = "exit_no_adopt"
 \* late_first_advance puts back the retire count of kovan 0.2.0: raised before its check, so a
 \* thread advances the epoch at its EpochFreq-th retire, not its first, and threads that each
 \* retire fewer values never move it (LastReleased).
@@ -129,18 +128,52 @@ MutLateFirstAdvance == Mutation = "late_first_advance"
 \* The value of the raised count at which a retire advances the epoch: 1 (the count was 0 before
 \* it, Crystalline's alloc_cnt++ % FREQ == 0), or 0 with late_first_advance.
 AdvanceAt == IF MutLateFirstAdvance THEN 0 ELSE 1 % EpochFreq
-\* no_placed_advance puts back the retire and the exit of kovan 0.2.0: placing a batch makes no
-\* epoch advance, so a reader that never retires or flushes, whose outermost pins skip while the
-\* epoch stays put, holds the batch placed in its slot until something else moves it (DrainLive).
-MutNoPlacedAdvance == Mutation = "no_placed_advance"
-\* Two mutations put back, one at a time, the two early returns as the orphan fix left them, for a
-\* thread that retired values without ever pinning (it has no tid, its batch holds them).
-\* flush_skips_batch: flush() on a thread with no tid still returns while nothing is parked, even
-\* with values in its own batch, so a flush does not submit them; they wait for the exit.
-MutFlushSkipsBatch == Mutation = "flush_skips_batch"
 \* exit_skips_batch: the exit of a thread with no tid does nothing, so the values in its batch
 \* are never submitted and never freed.
 MutExitSkipsBatch == Mutation = "exit_skips_batch"
+\* The leave (0.2.4) and what it rests on, each taken out or bent, one at a time.
+\* no_leave puts back 0.2.3: the outermost drop lowers the count and does nothing else, so the
+\* slot stays active and eligible while the thread holds no guard, and a thread that parks holds
+\* every batch placed in its slot for good (DrainLive, ActiveOnlyPinned).
+MutNoLeave == Mutation = "no_leave"
+\* leave_store: the leave stores INVPTR into the list word instead of exchanging, so a node an
+\* insert exchanged in between the leave's read and its store is lost: its batch counts a node
+\* no traversal takes (CountExact, NoLoss).
+MutLeaveStore == Mutation = "leave_store"
+\* leave_pinned: a nested drop leaves the slot too, while the outer section still holds what it
+\* loaded (NoUseAfterFree).
+MutLeavePinned == Mutation = "leave_pinned"
+\* no_rollback: an insert that finds INVPTR behind its exchange leaves its node in the word and
+\* counts it, so a left slot reads as active and takes batches nobody traverses while its owner
+\* holds no guard (ActiveOnlyPinned, DrainLive).
+MutNoRollback == Mutation = "no_rollback"
+\* no_pin_recheck: an outermost pin publishes the epoch it read and makes no further attempt
+\* when the epoch moved meanwhile (README.md says what it breaks, if anything).
+MutNoPinRecheck == Mutation = "no_pin_recheck"
+\* filler_kept: the free of a batch skips its fillers, which stay retired (NoLoss).
+MutFillerKept == Mutation = "filler_kept"
+\* filler_freed_early: a placement frees its fillers as soon as it placed the batch, while the
+\* slots that took them still hold them (NoUseAfterFree, the traversal touching a freed node).
+MutFillerEarly == Mutation = "filler_freed_early"
+\* drain_before_leave: the outermost drop takes its list with the slot still active (an exchange
+\* to 0), traverses and drains, and only then stores INVPTR: a node a retire exchanged in during
+\* the drain is overwritten and lost (NoLoss).
+MutDrainFirst == Mutation = "drain_before_leave"
+\* nested_destructors: flush and the exit raise the pin count around the destructors they run (as
+\* 0.2.3 did), so a destructor's pin is nested and enters no slot while the thread's own slot is
+\* inactive: its loads are unprotected (NoUseAfterFree).
+MutNestedDtors == Mutation = "nested_destructors"
+\* no_insert_recheck: an insert does not read the era word after its exchange, so two inserts
+\* racing a leave leave a list in the left slot that nobody traverses (NoBatchOnLeftSlot).
+MutNoInsertRecheck == Mutation = "no_insert_recheck"
+\* tag_clear_late: the pin clears the era word's tag after its exchange instead of before, so an
+\* insert that exchanged in between reads the tag, takes its node back and leaves the slot of a
+\* pinned thread inactive (PinnedIsActive).
+MutTagLate == Mutation = "tag_clear_late"
+\* pin_skips_activation: a pin whose epoch did not move activates nothing, so the slot stays
+\* inactive under a live guard and its loads (cached epoch equal) are unprotected
+\* (NoUseAfterFree, PinnedIsActive).
+MutPinSkips == Mutation = "pin_skips_activation"
 \* Mechanisms taken out, to show the properties depend on them.
 MutLoadTraverses == Mutation = "load_traverses"
 MutNoEraCheck == Mutation = "no_era_check"
@@ -196,12 +229,9 @@ variables
     slow = 0,                \* slow_counter
     ntid = 0,                \* next_tid
     rel = {},                \* released: the tids whose bit is set
-    orw = [i \in Tids |-> NULL],   \* each tid's orphan word: a chain of refs-nodes
-    orphaned = 0,            \* the tids whose orphan word holds a chain
     lkT = FALSE,             \* (ttas_locks) the spin lock the tid hand-over took
-    lkO = FALSE,             \* (ttas_locks) the spin lock the orphan hand-over took
     fst = [i \in Tids |-> [j \in SJ |-> [lo |-> INV, hi |-> 0]]],   \* first[j]: (list, seqno)
-    sep = [i \in Tids |-> [j \in SJ |-> [lo |-> 0, hi |-> 0]]],     \* epoch[j]: (epoch, seqno)
+    sep = [i \in Tids |-> [j \in SJ |-> [lo |-> TagV(0), hi |-> 0]]],   \* epoch[j]: (epoch, seqno); a slot starts left
     res = [i \in Tids |-> [lo |-> 0, hi |-> 0]],                     \* state[0].result
     \* nodes (retired.rs): st is the model's view (free, live, retired, freed)
     nst = [n \in Nodes |-> IF n \in InitNodes THEN "live" ELSE "free"],
@@ -209,6 +239,12 @@ variables
     nbl = [n \in Nodes |-> NULL],      \* batch_link
     nro = [n \in Nodes |-> 0],         \* refs_or_next
     nbe = [n \in Nodes |-> IF n \in InitNodes THEN 1 ELSE 0],   \* birth_epoch
+    \* ghosts of the nodes: fil[n], the node is a filler a padded placement made; inlist[n], the
+    \* node was exchanged into a slot's list and neither rolled back nor traversed since;
+    \* sub[r], the refs-node's batch has been submitted (its count adjusted, TF1)
+    fil = [n \in Nodes |-> FALSE],
+    inlist = [n \in Nodes |-> FALSE],
+    sub = [n \in Nodes |-> FALSE],
     cell = [c \in Cells |-> c],
     nalloc = NCells,
     \* (Recycle) pool: the recycler's free list, holding the nodes dealloc handed back that no
@@ -233,7 +269,6 @@ variables
     flst = [t \in Threads |-> NULL],
     lcnt = [t \in Threads |-> 0],
     cep = [t \in Threads |-> 0],        \* cached_epoch
-    dep = [t \in Threads |-> 0],        \* drained_epoch
     cbe = [t \in Threads |-> 0],        \* cached_birth_epoch
     inr = [t \in Threads |-> FALSE],    \* in_reclaim
     \* ghosts
@@ -241,7 +276,6 @@ variables
                                         \* pointer loaded and not yet dropped, with the
                                         \* incarnation its node had when it was loaded
     lvl = [t \in Threads |-> 0],        \* program level: 0 the thread's own, k a destructor k deep
-    gdep = [t \in Threads |-> 0],       \* the epoch published by the slot's last drain
     rv = [t \in Threads |-> 0],         \* a procedure's return value
     rok = [t \in Threads |-> TRUE],     \* try_retire's answer
     opi = [t \in Threads |-> 0],        \* the index of each program's current operation
@@ -264,10 +298,6 @@ define
                          THEN Append(acc, r) ELSE ChainW(nro[x], r, Append(acc, x))
     \* A batch chain first -> ... -> refs, following batch_next (merge_batch's walk).
     Chain(f, r) == ChainW(f, r, <<>>)
-    \* The comparison of an outermost pin: drained_epoch, or (0.1.21's rule) the published epoch.
-    SkipAt(t) == IF MutDrainPublished
-                 THEN (IF tid[t] = NoTid THEN 0 ELSE sep[tid[t]][0].lo)
-                 ELSE dep[t]
     \* The incarnation of what a load returned (0 for null).
     Inc(n) == IF n \in Nodes THEN ninc[n] ELSE 0
     \* A pointer thread t loaded (kind k: protected or not), remembered with the incarnation i
@@ -283,8 +313,6 @@ define
     \* (Recycle) the nodes a recycler can take: the pool's. Under reuse_retired (the defect) also
     \* every node still retired, its dealloc not yet called.
     Reusable == pool \cup (IF MutReuseRetired THEN {x \in Nodes : nst[x] = "retired"} ELSE {})
-    \* The scan's next thread after i, leaving out the skipped one.
-    NextTid(i, sk) == IF i + 1 = sk THEN i + 2 ELSE i + 1
     \* The thread is inside its exit (a destructor it runs reaches the handle through EXITING).
     InExit(t) == \E i \in DOMAIN stack[t] : stack[t][i].procedure = "Exit"
     \* (exit_handle_unreachable) a destructor the exit ran found no handle.
@@ -325,6 +353,17 @@ begin
     NewHeader(nalloc);
 end macro;
 
+\* A filler (guard.rs `filler`): a fresh node, retired as a member of the batch whose refs-node
+\* is r, linked ahead of the batch's first node f (batch_next = f), with the batch's birth (never
+\* read) and no value: its destructor frees it and nothing else. The batch's new first node.
+macro AllocFiller(r, f, info)
+begin
+    assert nalloc < MaxNodes;
+    nalloc := nalloc + 1 || nst[nalloc + 1] := "retired" || fil[nalloc + 1] := TRUE
+        || nnx[nalloc + 1] := info || nbl[nalloc + 1] := r || nro[nalloc + 1] := f
+        || nbe[nalloc + 1] := nbe[r];
+end macro;
+
 \* The end of a node's destructor. Without Recycle the memory is freed (drop_boxed). With
 \* Recycle, Reclaimable::dealloc has dropped the value and now pushes the node onto the pool:
 \* from the next step on, any thread may take it and write over it. So kovan must have read
@@ -336,7 +375,7 @@ end macro;
 macro Dealloc(n)
 begin
     await ~MutPoolLock \/ plk = 0;
-    nst[n] := "freed" || pool := IF Recycle THEN pool \cup {n} ELSE pool
+    nst[n] := "freed" || pool := IF Recycle /\ ~fil[n] THEN pool \cup {n} ELSE pool
         || nnx[n] := IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[n]
         || nbe[n] := IF PoolLink = "birth" THEN UNC ELSE nbe[n];
 end macro;
@@ -355,26 +394,22 @@ begin
     end with;
 end macro;
 
-\* mirror_transition (guard.rs), and the drain ghost.
+\* mirror_transition (guard.rs).
 macro Mirror(e)
 begin
-    cep[self] := e || dep[self] := e || cbe[self] := e || gdep[self] := e;
+    cep[self] := e || cbe[self] := e;
 end macro;
 
 \* ------------------------------------------------------------ tids and orphans (slot.rs)
 
-\* (ttas_locks) take the spin lock (1: the tids', 2: the orphans'): test, then test-and-set,
-\* until it is free.
-procedure SpinLock(which)
+\* (ttas_locks) take the spin lock of the tid hand-over: test, then test-and-set, until it is
+\* free.
+procedure SpinLock()
 begin
 SK1: \* the test
-    if (which = 1 /\ lkT) \/ (which = 2 /\ lkO) then goto SK1 end if;
+    if lkT then goto SK1 end if;
 SK2: \* the test-and-set
-    if which = 1 then
-        if lkT then goto SK1 else lkT := TRUE end if;
-    else
-        if lkO then goto SK1 else lkO := TRUE end if;
-    end if;
+    if lkT then goto SK1 else lkT := TRUE end if;
 SK3:
     return;
 end procedure;
@@ -384,7 +419,7 @@ procedure AllocTid()
 variables ah = 0, aseen = {};
 begin
 AT0:
-    if MutLocks then call SpinLock(1) end if;
+    if MutLocks then call SpinLock() end if;
 TidClaim: \* next_tid.load: the ids handed out, whose release words the pass reads
     ah := ntid || afr[self] := 0 || acl[self] := 0;
     if ntid = 0 then goto TidFresh end if;
@@ -421,73 +456,11 @@ end procedure;
 procedure ReleaseTid(rt)
 begin
 RL0:
-    if MutLocks then call SpinLock(1) end if;
+    if MutLocks then call SpinLock() end if;
 TidRelease:
     rel := rel \cup {rt};
     if MutLocks then lkT := FALSE end if;
     return;
-end procedure;
-
-\* park_orphans (slot.rs): the chain ph .. pt parked on tid pk's orphan word.
-procedure ParkOrphans(pk, ph, pt)
-variables pe = NULL;
-begin
-PK0:
-    if MutLocks then call SpinLock(2) end if;
-OrphanTake: \* swap: what an earlier owner of the tid parked
-    pe := orw[pk] || orw[pk] := NULL;
-OrphanPublish: \* the tail linked to it (the chain is this thread's), the joined chain stored
-    nnx[pt] := pe || orw[pk] := ph;
-    if pe # NULL then
-        if MutLocks then lkO := FALSE end if;
-        return;
-    end if;
-OrphanCount: \* orphaned.fetch_add
-    orphaned := orphaned + 1;
-    if MutLocks then lkO := FALSE end if;
-    return;
-end procedure;
-
-\* adopt_orphans (guard.rs) through the pass of slot.rs, then one merge per
-\* batch of the chain taken.
-procedure AdoptOrphans()
-variables ai = 0, am = 0, ac = NULL;
-begin
-AD0:
-    if MutLocks then call SpinLock(2) end if;
-OrphanAdopt: \* orphaned.load: nothing parked anywhere
-    if orphaned = 0 then
-        if MutLocks then lkO := FALSE end if;
-        return;
-    end if;
-OrphanAdopt2: \* max_threads
-    am := ntid;
-OrphanAdopt3: \* one tid's orphan word, loaded
-    if ai >= am then
-        if MutLocks then lkO := FALSE end if;
-        return;
-    elsif orw[ai] = NULL then
-        ai := ai + 1;
-        goto OrphanAdopt3;
-    end if;
-OrphanAdopt4: \* swapped to null
-    ac := orw[ai] || orw[ai] := NULL;
-    if ac = NULL then
-        ai := ai + 1;
-        goto OrphanAdopt3;
-    end if;
-OrphanAdopt5: \* orphaned.fetch_sub
-    orphaned := orphaned - 1;
-    if MutLocks then lkO := FALSE end if;
-OrphanMerge: \* each batch of the chain merged into the accumulating batch
-    if ac = NULL then
-        return;
-    else
-        errs := errs \cup Bad({ac});
-        Merge(Unmask(nbl[ac]), ac);
-        ac := nnx[ac];
-        goto OrphanMerge;
-    end if;
 end procedure;
 
 \* ------------------------------------------------------------ traversal and free (reclaim.rs)
@@ -516,13 +489,14 @@ TV1: \* the end of the list; next swapped with INVPTR (reclaim.rs)
     end if;
 TV2: \* batch_link.load (reclaim.rs)
     errs := errs \cup Bad({tf}) || trf := nbl[tf];
-TV3: \* refs fetch_sub; the count's last decrement pushes the batch on the free list
+TV3: \* refs fetch_sub; the count's last decrement pushes the batch on the free list; (ghost)
+     \* the node leaves its list with this decrement
     errs := errs \cup Bad({trf});
     \* (early_free) the next-to-last decrement taken for the last one
     if nro[trf] = 1 \/ (MutEarlyFree /\ nro[trf] = 2) then
-        nro[trf] := 0 || nnx[trf] := tacc || tacc := trf || tf := tnx;
+        nro[trf] := 0 || nnx[trf] := tacc || tacc := trf || tf := tnx || inlist[tf] := FALSE;
     else
-        nro[trf] := nro[trf] - 1 || tf := tnx;
+        nro[trf] := nro[trf] - 1 || tf := tnx || inlist[tf] := FALSE;
     end if;
     goto TV1;
 end procedure;
@@ -580,7 +554,12 @@ FB1:
         \* batch_next read now, before the destructor (free_batch_list: "everything kovan
         \* needs from the node is read here"); under read_after_dealloc, only at FB2
         if ~MutReadAfterDealloc then fnx := nro[fc] end if;
-        if Dtor[fc] # <<>> /\ MutReadAfterDealloc then
+        if fil[fc] then
+            \* a filler: drop_filler frees the bare node, whatever Dtor says of its id
+            \* (filler_kept: the free skips it)
+            if ~MutFillerKept then Dealloc(fc) end if;
+            goto FB1;
+        elsif Dtor[fc] # <<>> /\ MutReadAfterDealloc then
             call Destroy(fc);
             goto FB2;
         elsif Dtor[fc] # <<>> then
@@ -597,7 +576,12 @@ FB1:
         \* batch_next read now, before the destructor (free_batch_list: "everything kovan
         \* needs from the node is read here"); under read_after_dealloc, only at FB2
         if ~MutReadAfterDealloc then fnx := nro[fc] end if;
-        if Dtor[fc] # <<>> /\ MutReadAfterDealloc then
+        if fil[fc] then
+            \* a filler: drop_filler frees the bare node, whatever Dtor says of its id
+            \* (filler_kept: the free skips it)
+            if ~MutFillerKept then Dealloc(fc) end if;
+            goto FB1;
+        elsif Dtor[fc] # <<>> /\ MutReadAfterDealloc then
             call Destroy(fc);
             goto FB2;
         elsif Dtor[fc] # <<>> then
@@ -681,15 +665,25 @@ end procedure;
 
 \* ------------------------------------------------------------ transitions (guard.rs)
 
-\* do_update (guard.rs).
+\* do_update (guard.rs): [Enter] on the own reservation (ix = 0), a republication on a helper
+\* slot. The exchange to 0 activates the slot in the step that takes its list (what a retire
+\* exchanged in since the slot was left, not yet rolled back).
 procedure DoUpdate(ce, ix, dt)
 variables dlo = 0;
 begin
 DU1: \* first[index].load_lo
     if fst[dt][ix].lo = 0 then goto DU4 end if;
-DU2: \* exchange_lo(0), the list traversed
+DU2: \* ThreadSlots::activate: the era word's left tag cleared first (the owner's own store), so
+     \* a scan that reads the list word active reads the era untagged
+    sep[dt][ix].lo := UntagV(sep[dt][ix].lo);
+DU2b: \* the exchange_lo(0), the list traversed: onto the cache on the own reservation (no
+      \* destructor runs inside pin; the drop drains), into the cache on a helper slot
     dlo := fst[dt][ix].lo || fst[dt][ix].lo := 0;
-    if dlo \notin {NULL, INV} then call TIC(dlo) end if;
+    if dlo \notin {NULL, INV} /\ ix = 0 then
+        call Traverse(dlo, flst[self], 1);
+    elsif dlo \notin {NULL, INV} then
+        call TIC(dlo);
+    end if;
 DU3: \* epoch() after the traversal
     ce := ep;
 DU4: \* store_lo(curr_epoch, SeqCst) and its fence; the own slot mirrored
@@ -918,7 +912,9 @@ HT12b: \* result.load_hi(): the request the one read first; (0.1.21: while pendi
     end if;
 HT12c: \* the era's seqno still the request's: another pass
     if sep[he][0].hi = hsq then goto HelpPass end if;
-HelperLeave: \* the helper slot's first.exchange_lo(INVPTR), the list traversed
+HelperLeave: \* the helper slot's era word tagged left first
+    sep[hme][2].lo := TagV(sep[hme][2].lo);
+HelperLeave2: \* the helper slot's first.exchange_lo(INVPTR), the list traversed
     hol := fst[hme][2].lo || fst[hme][2].lo := INV;
     if hol \notin {NULL, INV} then call TIC(hol) end if;
 HT20: \* the parent words (see README); drain_free_list
@@ -932,28 +928,35 @@ end procedure;
 
 \* ------------------------------------------------------------ retire (guard.rs)
 
-\* try_retire (guard.rs).
-procedure TryRetire(rf, rr, rsk)
+\* try_retire (guard.rs). With rpad (a flush's or an exit's placement) the scan never runs out
+\* of nodes: a filler is made for every eligible slot beyond the batch's nodes, so the batch is
+\* always placed; without it (a retire's) the scan returns FALSE at the first such slot.
+procedure TryRetire(rf, rr, rpad)
 variables rmx = 0, ri = 0, rl = NULL, rmin = 0, radj = 0, rprv = NULL, rsi = 0, rsj = 0,
-          rlate = {};
+          rlate = {}, rf0 = NULL, rbh = NULL;
 begin
 TR1: \* max_threads, min_epoch, the scan's fence; the loop over the threads
      \* is local work, done where each step ends
-    rmx := ntid || rmin := nbe[rr] || rl := rf || radj := - BIAS || ri := NextTid(-1, rsk);
-    if ri >= rmx then goto TN2 end if;
+    rmx := ntid || rmin := nbe[rr] || rl := rf || rf0 := rf || radj := - BIAS || ri := 0;
+    if ri >= rmx then goto TN1 end if;
 TS2: \* reservation slot: first.load_lo, inactive
     if fst[ri][0].lo = INV then goto TG1 end if;
 TS3: \* first.load_hi, odd in a transition
     if fst[ri][0].hi % 2 = 1 then goto TG1 end if;
 TS4: \* epoch.load_lo below min_epoch
     if sep[ri][0].lo < rmin then goto TG1 end if;
-TS5: \* epoch.load_hi odd; a node assigned; (ghost) the era read even while a detach of the
-     \* list at its tag is in progress
+TS5: \* epoch.load_hi odd; a node assigned, or [Pad] a filler made for the slot and assigned;
+     \* (ghost) the era read even while a detach of the list at its tag is in progress
     if sep[ri][0].hi % 2 = 1 then
         goto TG1;
-    elsif rl = rr then
+    elsif rl = rr /\ ~rpad then
         rok[self] := FALSE;
         return;
+    elsif rl = rr then
+        AllocFiller(rr, rf, Info(ri, 0));
+        rf := nalloc
+            || rlate := rlate \cup (IF \E tk \in detaching[ri] : tk[2] = fst[ri][0].hi
+                                    THEN {ri} ELSE {});
     else
         nnx[rl] := Info(ri, 0) || rl := nro[rl]
             || rlate := rlate \cup (IF \E tk \in detaching[ri] : tk[2] = fst[ri][0].hi
@@ -961,22 +964,29 @@ TS5: \* epoch.load_hi odd; a node assigned; (ghost) the era read even while a de
     end if;
 TG1: \* the helper slot hr_num + 1: first.load_lo
     if fst[ri][2].lo = INV then
-        ri := NextTid(ri, rsk);
-        if ri >= rmx then goto TN2 else goto TS2 end if;
+        ri := ri + 1;
+        if ri >= rmx then goto TN1 else goto TS2 end if;
     end if;
-TG2: \* epoch.load_lo; a node assigned
+TG2: \* epoch.load_lo; a node assigned, or [Pad] a filler
     if sep[ri][2].lo < rmin then
-        ri := NextTid(ri, rsk);
-        if ri >= rmx then goto TN2 else goto TS2 end if;
-    elsif rl = rr then
+        ri := ri + 1;
+        if ri >= rmx then goto TN1 else goto TS2 end if;
+    elsif rl = rr /\ ~rpad then
         rok[self] := FALSE;
         return;
+    elsif rl = rr then
+        AllocFiller(rr, rf, Info(ri, 2));
+        rf := nalloc || ri := ri + 1;
+        if ri >= rmx then goto TN1 else goto TS2 end if;
     else
-        nnx[rl] := Info(ri, 2) || rl := nro[rl] || ri := NextTid(ri, rsk);
-        if ri >= rmx then goto TN2 else goto TS2 end if;
+        nnx[rl] := Info(ri, 2) || rl := nro[rl] || ri := ri + 1;
+        if ri >= rmx then goto TN1 else goto TS2 end if;
     end if;
-TN2: \* the insert phase: the next node's slot info read and its next set null (the
-     \* node is this thread's until inserted), then the slot's first.load_lo: still active?
+TN1: \* [PadMark] the scan over: fillers head the batch, so the refs-node's mark names the new
+     \* first node (a write to the thread's own unpublished batch)
+    if rf # rf0 then nbl[rr] := RNODE(rf) end if;
+TN2: \* the insert phase: the next node's slot info read and its next set null (the node is
+     \* this thread's until inserted), then the slot's first.load_lo: still active?
     if rf = rl then
         goto TF1;
     elsif fst[InfoTid(nnx[rf])][InfoIx(nnx[rf])].lo = INV then
@@ -990,11 +1000,15 @@ TN3: \* the epoch re-checked
         rf := nro[rf];
         goto TN2;
     end if;
-TN4: \* exchange_lo(curr); an empty list counts the node
-    rprv := fst[rsi][rsj].lo || fst[rsi][rsj].lo := rf
+TN4: \* exchange_lo(curr); an empty list counts the node; (ghost) the node is in a list
+    rprv := fst[rsi][rsj].lo || fst[rsi][rsj].lo := rf || inlist[rf] := TRUE
         || errs := errs \cup (IF rsj = 0 /\ rsi \in rlate /\ \E tk \in detaching[rsi] : tk[2] = fst[rsi][0].hi
                               THEN {"late_insert"} ELSE {});
     if rprv = NULL then
+        rbh := NULL;
+        goto TN5;
+    elsif rprv = INV /\ MutNoRollback then
+        \* (no_rollback) the node stays in the word of a left slot, counted
         radj := radj + 1 || rf := nro[rf];
         goto TN2;
     elsif rprv = INV then
@@ -1002,10 +1016,10 @@ TN4: \* exchange_lo(curr); an empty list counts the node
     else
         goto TL1;
     end if;
-InsertRollback: \* the slot was inactive: compare_exchange_lo(curr, INVPTR); a node already
-                \* captured counts as inserted
+InsertRollback: \* [InsertRollback] the slot was inactive: compare_exchange_lo(curr, INVPTR);
+                \* a node already captured (the owner's enter took it) counts as inserted
     if fst[rsi][rsj].lo = rf then
-        fst[rsi][rsj].lo := INV || rf := nro[rf];
+        fst[rsi][rsj].lo := INV || inlist[rf] := FALSE || rf := nro[rf];
     else
         radj := radj + 1 || rf := nro[rf];
     end if;
@@ -1013,8 +1027,8 @@ InsertRollback: \* the slot was inactive: compare_exchange_lo(curr, INVPTR); a n
 TL1: \* next CAS null -> prev
     errs := errs \cup Bad({rf});
     if nnx[rf] = NULL then
-        nnx[rf] := rprv || radj := radj + 1 || rf := nro[rf];
-        goto TN2;
+        nnx[rf] := rprv || rbh := rprv;
+        goto TN5;
     else
         \* a traversal took the node first: traverse prev here
         call Traverse(rprv, NULL, 0);
@@ -1022,15 +1036,42 @@ TL1: \* next CAS null -> prev
 TL2: \* and free what that released
     call FreeBatch(rv[self]);
 TL3:
-    radj := radj + 1 || rf := nro[rf] || rv[self] := 0;
+    rbh := NULL || rv[self] := 0;
+    goto TN5;
+TN5: \* [InsertCheck] the era word read after the exchange: tagged, the owner left since the scan
+     \* (its tag store precedes the exchange that left, which came before ours or took our
+     \* node), and nothing traverses the slot until its owner's next enter
+    if MutNoInsertRecheck \/ sep[rsi][rsj].lo >= 0 then
+        radj := radj + 1 || rf := nro[rf] || rbh := NULL;
+        goto TN2;
+    end if;
+TN6: \* [InsertUndo] compare_exchange_lo(curr, INVPTR): the node taken out again with whatever it
+     \* displaced, walked here; a failed one means an exchange took the node, which traverses it
+    if fst[rsi][rsj].lo = rf then
+        fst[rsi][rsj].lo := INV || inlist[rf] := FALSE;
+        if rbh # NULL then call Traverse(rbh, NULL, 0) end if;
+    else
+        radj := radj + 1 || rf := nro[rf] || rbh := NULL;
+        goto TN2;
+    end if;
+TN7: \* and free what that released
+    if rbh # NULL then call FreeBatch(rv[self]) end if;
+TN8:
+    rf := nro[rf] || rbh := NULL || rv[self] := 0;
     goto TN2;
-TF1: \* refs fetch_add(adjs); zero frees the batch at once
+TF1: \* refs fetch_add(adjs); zero frees the batch at once; (ghost) the batch is submitted
     errs := errs \cup Bad({rr});
-    if nro[rr] + radj = 0 then
-        nro[rr] := 0 || nnx[rr] := NULL;
+    if MutFillerEarly /\ \E n \in Nodes : fil[n] /\ nbl[n] = rr /\ nst[n] = "retired" then
+        \* (filler_freed_early) the placement frees its fillers now, one per step
+        with n \in {m \in Nodes : fil[m] /\ nbl[m] = rr /\ nst[m] = "retired"} do
+            Dealloc(n);
+        end with;
+        goto TF1;
+    elsif nro[rr] + radj = 0 then
+        nro[rr] := 0 || nnx[rr] := NULL || sub[rr] := TRUE;
         call FreeBatch(rr);
     else
-        nro[rr] := nro[rr] + radj || rok[self] := TRUE;
+        nro[rr] := nro[rr] + radj || rok[self] := TRUE || sub[rr] := TRUE;
         return;
     end if;
 TF2:
@@ -1062,7 +1103,7 @@ RE2: \* the batch boundary: in_reclaim, take_batch detaches and finalizes the ba
         ewas := inr[self] || inr[self] := TRUE || ef := bfst[self] || el := blst[self]
             || bfst[self] := NULL || blst[self] := NULL || bcnt[self] := 0
             || nbl[blst[self]] := RNODE(bfst[self]);
-        call TryRetire(ef, el, NoSkip);
+        call TryRetire(ef, el, FALSE);
     end if;
 RE3: \* a batch that could not be placed goes back to the accumulating one
     if rok[self] = FALSE then Merge(ef, el) end if;
@@ -1071,9 +1112,9 @@ RE3: \* a batch that could not be placed goes back to the accumulating one
     if MutHelpFirst then return end if;
 RE4: \* the epoch-advance counter, checked before it is raised: the first retire advances, then
      \* every EpochFreq-th (late_first_advance: raised first), and a retire that placed a batch
-     \* advances (no_placed_advance: not); tid()
+     \* advances; tid()
     acnt[self] := (acnt[self] + 1) % EpochFreq;
-    if acnt[self] # AdvanceAt /\ ~(plc[self] /\ ~MutNoPlacedAdvance) then
+    if acnt[self] # AdvanceAt /\ ~plc[self] then
         plc[self] := FALSE;
         if MutHelpFirst /\ ecnt % RetireFreq = 0 then goto RE2 else return end if;
     elsif tid[self] = NoTid then
@@ -1093,34 +1134,55 @@ end procedure;
 
 \* ------------------------------------------------------------ user operations
 
-\* pin (guard.rs) and transition.
+\* pin (guard.rs) and transition: an outermost pin always enters.
 procedure Pin()
-variables pce = 0, pa = 0;
+variables pce = 0, pa = 0, pl = NULL;
 begin
-PN1: \* the count raised; an outermost pin reads the global epoch and skips when it equals
-     \* drained_epoch; tid()
+PN1: \* the count raised; an outermost pin claims the tid on a thread's first pin
     if NoHandle(self) then
         \* (exit_handle_unreachable) a guard that pins nothing
         return;
     elsif pinc[self] > 0 then
         pinc[self] := pinc[self] + 1;
         return;
-    elsif ep = SkipAt(self) then
-        pinc[self] := 1 || errs := errs \cup (IF ep # gdep[self] THEN {"pin_skips_drain"} ELSE {});
+    else
+        pinc[self] := 1;
+        if tid[self] = NoTid then call AllocTid() end if;
+    end if;
+PNE: \* [Enter] ThreadSlots::activate: the era word's left tag cleared first, so a scan
+     \* that reads the list word active reads the era untagged (tag_clear_late: cleared after
+     \* the exchange; pin_skips_activation: nothing at all when the epoch did not move)
+    if MutPinSkips /\ ep = cep[self] then
+        rv[self] := 0;
+        return;
+    elsif ~MutTagLate then
+        sep[tid[self]][0].lo := UntagV(sep[tid[self]][0].lo);
+    end if;
+PNX: \* the activation: the one exchange_lo(0) of the list word (SeqCst)
+    pl := fst[tid[self]][0].lo || fst[tid[self]][0].lo := NULL;
+PNX2: \* (tag_clear_late) the tag cleared after the exchange
+    if MutTagLate then sep[tid[self]][0].lo := UntagV(sep[tid[self]][0].lo) end if;
+PNG: \* epoch(), read after the activation
+    pce := ep;
+PNT: \* [Enter] what the activation took traversed onto the cache (no destructor runs inside
+     \* pin; the drop drains)
+    if pl \notin {NULL, INV} then call Traverse(pl, flst[self], 1) end if;
+PNF: \* the epoch against the cached one: only a moved epoch publishes, through the transition
+     \* (no store, no fence otherwise)
+    if pce = cep[self] then
+        rv[self] := 0 || cbe[self] := pce;
         return;
     else
-        pinc[self] := 1 || pce := ep || pa := PinAttempts;
-        if tid[self] = NoTid then
-            call AllocTid();
-        else
-            call DoUpdate(pce, 0, tid[self]);
-            goto PNC;
-        end if;
+        pl := NULL;
+        pa := PinAttempts;
     end if;
 PNU: \* do_update
     call DoUpdate(pce, 0, tid[self]);
-PNC: \* attempts; the global epoch compared with the one published
-    if pa = 1 then
+PNC: \* attempts; the global epoch compared with the one published (no_pin_recheck: not)
+    if MutNoPinRecheck then
+        rv[self] := 0;
+        return;
+    elsif pa = 1 then
         rv[self] := 0;
         call SlowPath();
         return;
@@ -1133,24 +1195,62 @@ PNC: \* attempts; the global epoch compared with the one published
     end if;
 end procedure;
 
-\* Guard::drop (guard.rs), unpin, unpin_outermost.
+\* Guard::drop (guard.rs), unpin and leave.
 procedure Unpin()
+variables ul = NULL;
 begin
-UP1: \* the pointers the guard's section loaded die with it; the count lowered; the outermost
-     \* drop of an escalated section transitions with the count back at 1
+UP1: \* the pointers the guard's section loaded die with it; the count lowered; a nested drop
+     \* returns (leave_pinned: it leaves too); the outermost one leaves (no_leave: returns, the
+     \* slot still active, as 0.2.3 did)
     held[self] := {h \in held[self] : h[2] # lvl[self]};
     if NoHandle(self) then
         return;
-    elsif pinc[self] = 1 /\ cep[self] = UNC then
-        pinc[self] := IF MutUnnested THEN 0 ELSE 1;
+    elsif pinc[self] = 1 \/ (MutLeavePinned /\ pinc[self] > 1) then
+        pinc[self] := pinc[self] - 1;
+        if MutNoLeave then
+            return;
+        elsif MutDrainFirst then
+            goto LeaveActive;
+        end if;
     else
         pinc[self] := IF pinc[self] = 0 THEN 0 ELSE pinc[self] - 1;
         return;
     end if;
-UP2: \* unpin_outermost: the global epoch, do_update
-    call DoUpdate(ep, 0, tid[self]);
-UP3:
-    pinc[self] := 0 || rv[self] := 0;
+LeaveMark: \* [LeaveMark] epoch.store_lo(kept | ERA_INACTIVE): the era word tagged left before the
+           \* exchange, an escalated era reset to 0 (the cached epoch with it)
+    sep[tid[self]][0].lo := TagV(IF UntagV(sep[tid[self]][0].lo) = UNC THEN 0 ELSE UntagV(sep[tid[self]][0].lo))
+        || cep[self] := IF cep[self] = UNC THEN 0 ELSE cep[self];
+Leave: \* [Leave] first.exchange_lo(INVPTR): the slot inactive, the list it held captured
+       \* (leave_store: the word read here and stored at LeaveStore, two steps, so a node
+       \* exchanged in between is lost)
+    ul := fst[tid[self]][0].lo;
+    if MutLeaveStore then
+        goto LeaveStore;
+    else
+        fst[tid[self]][0].lo := INV;
+        \* [LeaveTraverse] traverse_onto_cache: the captured list, no destructor running
+        if ul \notin {NULL, INV} then call Traverse(ul, flst[self], 1) end if;
+    end if;
+LeaveDrain: \* [LeaveDrain] drain_free_list, with the slot inactive and the count 0
+    if flst[self] # NULL then
+        call Drain();
+        return;
+    else
+        return;
+    end if;
+LeaveStore: \* (leave_store) the plain store of INVPTR, after the read: what landed between is lost
+    fst[tid[self]][0].lo := INV;
+    if ul \notin {NULL, INV} then call Traverse(ul, flst[self], 1) end if;
+LeaveStore2:
+    goto LeaveDrain;
+LeaveActive: \* (drain_before_leave) the list taken with the slot kept active: exchange_lo(0)
+    ul := fst[tid[self]][0].lo || fst[tid[self]][0].lo := NULL;
+    if ul \notin {NULL, INV} then call Traverse(ul, flst[self], 1) end if;
+LeaveActiveDrain: \* (drain_before_leave) the cache drained with the slot active
+    if flst[self] # NULL then call Drain() end if;
+LeaveLate: \* (drain_before_leave) INVPTR stored after the drain: a node exchanged in meanwhile is
+           \* overwritten
+    fst[tid[self]][0].lo := INV;
     return;
 end procedure;
 
@@ -1284,206 +1384,98 @@ end procedure;
 
 \* flush (guard.rs).
 procedure Flush()
-variables fsv = 0, fx = NULL, ff = NULL, fl2 = NULL;
+variables fsv = 0, ff = NULL, fl2 = NULL;
 begin
-FL1: \* The start of flush(), one step: it reads the thread's own handle (its tid, in_reclaim,
-     \* the pin count, whether its own batch holds a value: `bfst`) and, on a thread with no tid,
-     \* one shared word: `orphaned`, the number of tids on which exited threads left parked
-     \* batches (orphan chains) for a flush to adopt.
-    \* Return at once in two cases. (1) The thread has no tid (it never pinned), its own batch is
-    \* empty (`bfst[self] = NULL`: it retired nothing, or a retire already submitted it) and no
-    \* batch is parked anywhere (`orphaned = 0`): it has no slot to drain, nothing to submit and
-    \* nothing to adopt, and claiming a tid would only hold one until the thread exits (the unit
-    \* test flush_without_a_tid_or_orphans_claims_none checks that it claims none; no property
-    \* here does). (2) This flush runs inside a destructor that a reclamation of this thread is
-    \* running (`inr`, in_reclaim): the outer operation finishes the work.
-    \* Under the mutation flush_needs_tid (kovan 0.1.22) case (1) looks at nothing else: a thread
-    \* with no tid always returns here, so a thread that never pins never adopts, and a batch
-    \* parked while no thread with a tid flushes afterwards stays parked for good.
-    \* Under the mutation flush_skips_batch case (1) ignores the own batch: what a thread retired
-    \* without pinning is not submitted here, only at its exit (EX1).
-    if (tid[self] = NoTid
-        /\ (MutFlushNeedsTid \/ (orphaned = 0 /\ (bfst[self] = NULL \/ MutFlushSkipsBatch))))
-       \/ inr[self] then
+FL1: \* The start of flush(), one step: the thread's own handle read (its tid, in_reclaim, whether
+     \* its own batch holds a value: `bfst`). Return at once when the thread has no tid (it never
+     \* pinned) and its batch is empty, or when this flush runs inside a destructor that a
+     \* reclamation of this thread is running (`inr`, in_reclaim): the outer operation finishes
+     \* the work. Otherwise in_reclaim is set and a thread with no tid claims one (tid() through
+     \* alloc_tid, the claim a first pin makes; its exit releases it). (nested_destructors: the
+     \* pin count raised too, as 0.2.3 did, so the destructors' pins are nested.)
+    if (tid[self] = NoTid /\ bfst[self] = NULL) \/ inr[self] then
         return;
     else
-        \* As before the fix: in_reclaim set, the pin count saved (fsv) and raised by one.
-        inr[self] := TRUE || fsv := pinc[self] || pinc[self] := pinc[self] + 1;
-        \* New: a thread with no tid gets here only when some batch is parked or its own batch
-        \* holds a value. It claims a tid first (tid() through alloc_tid, the same claim a first
-        \* pin makes; its exit releases it), then goes on as any flush, which submits the own
-        \* batch at FL4. With no guard live it drains its own list next (FL2)...
-        if tid[self] = NoTid /\ pinc[self] = 1 then
-            call AllocTid();
-            goto FL2;
-        \* ...and with a guard live it skips its own list and goes to the adoption (FL3).
-        elsif tid[self] = NoTid then
-            call AllocTid();
-            goto FL3;
-        \* A thread that already had a tid: unchanged (with a guard live, the own list is skipped).
-        elsif pinc[self] # 1 then
-            goto FL3;
-        end if;
+        inr[self] := TRUE || fsv := pinc[self]
+            || pinc[self] := IF MutNestedDtors THEN pinc[self] + 1 ELSE pinc[self];
+        if tid[self] = NoTid then call AllocTid() end if;
     end if;
-FL2: \* the own list exchanged to 0 while the slot stays active
-    fx := fst[tid[self]][0].lo || fst[tid[self]][0].lo := IF MutFlushDeact THEN INV ELSE NULL;
-    if fx \notin {NULL, INV} then call TIC(fx) end if;
-FL3: \* adopt the orphans parked on one tid
-    fx := NULL;
-    call AdoptOrphans();
-FL4: \* take_batch, the batch submitted with the own slot left out
+FL4: \* [FlushPlace] take_batch, the batch submitted padded; with an empty batch, the drain
     if bfst[self] = NULL then
         ff := NULL;
-        goto FL6;
+        goto FL8;
     else
         ff := bfst[self] || fl2 := blst[self] || bfst[self] := NULL || blst[self] := NULL
             || bcnt[self] := 0 || nbl[blst[self]] := RNODE(bfst[self]);
-        call TryRetire(ff, fl2, IF fsv = 0 /\ ~MutFlushDeact THEN tid[self] ELSE NoSkip);
+        call TryRetire(ff, fl2, TRUE);
     end if;
-FL6: \* not placed: back to the accumulating batch; increment_era: help_read
-    if ff # NULL /\ rok[self] = FALSE then Merge(ff, fl2) end if;
-    rok[self] := TRUE;
-    \* (flush_deactivates: 0.1.21's flush reactivated its slot here)
-    if MutFlushDeact /\ fsv = 0 then fst[tid[self]][0].lo := NULL end if;
+FL6: \* [FlushAdvance] increment_era: help_read (a padded batch is always placed)
+    assert rok[self];
     call HelpRead(tid[self]);
-FL7: \* advance_epoch, the birth stamp set to the epoch it advanced to; drain_free_list
+FL7: \* advance_epoch, the birth stamp set to the epoch it advanced to
     ep := ep + 1 || adv[self] := ep + 1 || cbe[self] := IF MutStaleBirth THEN cbe[self] ELSE ep + 1;
+FL8: \* [FlushDrain] drain_free_list
     if flst[self] # NULL then call Drain() end if;
-FlushClear: \* with no guard live: the own list exchanged to 0 once more, traversed;
-            \* (0.1.21: nothing here; before: only an escalated section's do_update)
-    if fsv # 0 \/ MutFlushUnc then
-        goto FL9;
-    elsif MutFlushKeep /\ cep[self] = UNC then
-        call DoUpdate(ep, 0, tid[self]);
-        goto FL9;
-    elsif MutFlushKeep then
-        goto FL9;
-    else
-        fx := fst[tid[self]][0].lo || fst[tid[self]][0].lo := NULL;
-        if fx \notin {NULL, INV} then call TIC(fx) end if;
-    end if;
-FlushClear2: \* drain_free_list
-    fx := NULL;
-    if flst[self] # NULL then call Drain() end if;
-FlushClear3: \* epoch.store_lo(0); the cached and drained epochs 0
-    sep[tid[self]][0].lo := 0 || cep[self] := 0 || dep[self] := 0 || gdep[self] := 0;
-FL9: \* the pin count and in_reclaim restored
+FL8b: \* another round while the destructors retired into the batch
+    if bfst[self] # NULL then goto FL4 end if;
+FL9: \* in_reclaim restored (and the pin count, under nested_destructors)
     pinc[self] := fsv || inr[self] := FALSE || rv[self] := 0;
     return;
 end procedure;
 
 \* A thread's exit: Handle::drop (guard.rs) and cleanup.
 procedure Exit()
-variables xsv = 0, xown = NoSkip, xf = NULL, xl = NULL, xx = NULL, xcap = <<>>, xu = NULL,
-          xr = 0, xph = NULL, xpt = NULL;
+variables xf = NULL, xl = NULL, xx = NULL, xr = 0;
 begin
-EX1: \* in_reclaim, the pin count raised, own
+EX1: \* in_reclaim; the pin count 0 (a guard still live was never dropped: its section ends here;
+     \* nested_destructors: raised instead, as 0.2.3 did)
     \* A thread with no tid and an empty batch has nothing to leave: its exit does nothing.
     \* (exit_skips_batch: the exit did nothing on any thread with no tid, so a batch it retired
     \* without pinning stayed in its handle forever, never submitted, never freed.)
     if tid[self] = NoTid /\ (bfst[self] = NULL \/ MutExitSkipsBatch) then
         return;
-    \* New: a thread with no tid whose batch holds a value (it retired without ever pinning)
-    \* claims a tid (alloc_tid, the claim a first pin makes) and comes back to EX1, which now
-    \* runs the exit every thread with a tid runs: submit, park what cannot be placed, release
-    \* the tid last.
+    \* A thread with no tid whose batch holds a value (it retired without ever pinning) claims a
+    \* tid (alloc_tid, the claim a first pin makes) and comes back to EX1, which now runs the exit
+    \* every thread with a tid runs: leave, place, release the tid last.
     elsif tid[self] = NoTid then
         call AllocTid();
         goto EX1;
     else
-        inr[self] := TRUE || xsv := pinc[self] || pinc[self] := pinc[self] + 1
-            || xown := IF pinc[self] = 0 THEN tid[self] ELSE NoSkip;
+        inr[self] := TRUE || pinc[self] := IF MutNestedDtors THEN pinc[self] + 1 ELSE 0;
     end if;
-ExitAdopt: \* (the first round, before its submit) one chain earlier exits parked, merged into the
-           \* batch, as a flush does (exit_no_adopt: none)
-    if ~MutExitNoAdopt then call AdoptOrphans(); end if;
-ExitSubmit: \* take_batch, submitted leaving the own slot out
+ExitMark: \* [ExitLeave] the era word tagged left first, as the outermost drop does
+    sep[tid[self]][0].lo := TagV(IF UntagV(sep[tid[self]][0].lo) = UNC THEN 0 ELSE UntagV(sep[tid[self]][0].lo))
+        || cep[self] := IF cep[self] = UNC THEN 0 ELSE cep[self];
+ExitLeave: \* [ExitLeave] the slot left as the outermost drop leaves it: first.exchange_lo(INVPTR),
+           \* the captured list traversed onto the cache
+    xx := fst[tid[self]][0].lo || fst[tid[self]][0].lo := INV;
+    if xx \notin {NULL, INV} then call Traverse(xx, flst[self], 1) end if;
+ExitLeave2: \* (tid_released_early: the tid released here, before the destructors ran)
+    xx := NULL;
+    if MutTidEarly then call ReleaseTid(tid[self]) end if;
+ExitPlace: \* [ExitPlace] take_batch, the batch submitted padded; with an empty batch, the drain
     xr := xr + 1;
     if bfst[self] = NULL then
-        goto ExitTake;
+        goto ExitFree;
     else
         xf := bfst[self] || xl := blst[self] || bfst[self] := NULL || blst[self] := NULL
             || bcnt[self] := 0 || nbl[blst[self]] := RNODE(bfst[self]);
-        call TryRetire(xf, xl, IF MutExitInactive THEN NoSkip ELSE xown);
+        call TryRetire(xf, xl, TRUE);
     end if;
-ExitSubmit2: \* not placed: parked; placed: [ExitAdvance] increment_era, its help_read first
-             \* (no_placed_advance: no advance)
-    if rok[self] = FALSE then
-        nnx[xl] := xph || xph := xl || xpt := IF xpt = NULL THEN xl ELSE xpt;
-        rok[self] := TRUE;
-        goto ExitTake;
-    elsif MutNoPlacedAdvance then
-        goto ExitTake;
-    else
-        call HelpRead(tid[self]);
-    end if;
+ExitHelp: \* increment_era: help_read first (a padded batch is always placed)
+    assert rok[self];
+    call HelpRead(tid[self]);
 ExitAdvance: \* advance_epoch, the birth stamp set to the epoch it advanced to
     ep := ep + 1 || adv[self] := ep + 1 || cbe[self] := IF MutStaleBirth THEN cbe[self] ELSE ep + 1;
-ExitTake: \* the own list taken with one exchange while the slot is active
-    if xown = NoSkip \/ MutExitInactive then
-        goto ExitFree;
-    else
-        xx := fst[tid[self]][0].lo || fst[tid[self]][0].lo := NULL;
-        if xx \notin {NULL, INV} then call TIC(xx) end if;
-    end if;
 ExitFree: \* drain_free_list
-    if flst[self] # NULL /\ ~MutExitInactive then call Drain() end if;
-ExitRound: \* the next round; (exit_loop: until no batch is left)
-    if (MutExitLoop /\ bfst[self] # NULL)
-       \/ (~MutExitLoop /\ ~MutExitInactive /\ xr < ExitRounds) then
-        goto ExitSubmit;
-    end if;
-ExitParkRest: \* what the last round's destructors retired is parked
-    if bfst[self] # NULL then
-        nbl[blst[self]] := RNODE(bfst[self]) || nnx[blst[self]] := xph || xph := blst[self]
-            || xpt := IF xpt = NULL THEN blst[self] ELSE xpt
-            || bfst[self] := NULL || blst[self] := NULL || bcnt[self] := 0;
-    end if;
-EX6: \* deactivate_slots (slot.rs): the reservation's epoch lo 0
-    sep[tid[self]][0].lo := 0;
-EX7: \* its first exchanged to INVPTR
-    xx := fst[tid[self]][0].lo || fst[tid[self]][0].lo := INV;
-    if xx \notin {NULL, INV} then xcap := <<xx>> end if;
-EX7b: \* the helper slot's epoch lo 0
-    sep[tid[self]][2].lo := 0;
-EX7c: \* its first exchanged to INVPTR
-    xx := fst[tid[self]][2].lo || fst[tid[self]][2].lo := INV;
-    if xx \notin {NULL, INV} then xcap := Append(xcap, xx) end if;
-    \* (tid_released_early: the tid released with the slots, before a traversal ran destructors)
-    if MutTidEarly then call ReleaseTid(tid[self]) end if;
-EX8: \* every captured list traversed into an unowned list
-    if xcap = <<>> /\ MutExitInactive then
-        goto EX11;
-    elsif xcap = <<>> then
-        goto EX12;
-    elsif MutExitInactive then
-        \* (exit_frees_inactive: traversed into the cache, freed with the slots inactive)
-        xx := Head(xcap) || xcap := Tail(xcap);
-        call TIC(xx);
-        goto EX8;
-    else
-        xx := Head(xcap) || xcap := Tail(xcap);
-        call Traverse(xx, NULL, 0);
-    end if;
-EX9: \* the batches released
-    xu := rv[self] || rv[self] := 0;
-EX10: \* each re-armed and pushed on the parked chain
-    if xu = NULL then
-        goto EX8;
-    else
-        xu := nnx[xu] || nro[xu] := BIAS || nnx[xu] := xph || xph := xu
-            || xpt := IF xpt = NULL THEN xu ELSE xpt;
-        goto EX10;
-    end if;
-EX11: \* (exit_frees_inactive: the cache drained here)
-    if MutExitInactive /\ flst[self] # NULL then call Drain() end if;
-EX12: \* the parked chain parked on this tid
-    if xph # NULL then call ParkOrphans(tid[self], xph, xpt) end if;
-EX12b: \* the tid released only now
+    if flst[self] # NULL then call Drain() end if;
+ExitRound: \* another round while the destructors retired into the batch
+    if bfst[self] # NULL then goto ExitPlace end if;
+EX12b: \* the tid released only now, after every destructor this exit ran
     if ~MutTidEarly then call ReleaseTid(tid[self]) end if;
 EX13: \* restored; the tid unset, no cached epoch claims a publication
-    pinc[self] := xsv || inr[self] := FALSE || tid[self] := NoTid || cep[self] := 0
-        || dep[self] := 0 || gdep[self] := 0;
+    inr[self] := FALSE || tid[self] := NoTid || cep[self] := 0
+        || pinc[self] := IF MutNestedDtors THEN pinc[self] - 1 ELSE 0;
     return;
 end procedure;
 
@@ -1524,10 +1516,10 @@ end process;
 end algorithm; *)
 \* BEGIN TRANSLATION
 CONSTANT defaultInitValue
-VARIABLES ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, res, nst, 
-          nnx, nbl, nro, nbe, cell, nalloc, pool, ninc, plk, tid, pinc, bfst, 
-          blst, bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, lvl, 
-          gdep, rv, rok, opi, afr, acl, detaching, adv, errs, pc, stack
+VARIABLES ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, nbl, nro, nbe, 
+          fil, inlist, sub, cell, nalloc, pool, ninc, plk, tid, pinc, bfst, 
+          blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, rv, 
+          rok, opi, afr, acl, detaching, adv, errs, pc, stack
 
 (* define statement *)
 Gone(x) == x \in Nodes /\ (nst[x] = "freed" \/ (Recycle /\ nst[x] # "retired"))
@@ -1538,10 +1530,6 @@ ChainW(x, r, acc) == IF x = r \/ x \notin Nodes \/ Len(acc) > MaxNodes
                      THEN Append(acc, r) ELSE ChainW(nro[x], r, Append(acc, x))
 
 Chain(f, r) == ChainW(f, r, <<>>)
-
-SkipAt(t) == IF MutDrainPublished
-             THEN (IF tid[t] = NoTid THEN 0 ELSE sep[tid[t]][0].lo)
-             ELSE dep[t]
 
 Inc(n) == IF n \in Nodes THEN ninc[n] ELSE 0
 
@@ -1558,32 +1546,29 @@ StampErr(t) == IF Stamp(t) < adv[t] THEN {"stale_birth"} ELSE {}
 
 Reusable == pool \cup (IF MutReuseRetired THEN {x \in Nodes : nst[x] = "retired"} ELSE {})
 
-NextTid(i, sk) == IF i + 1 = sk THEN i + 2 ELSE i + 1
-
 InExit(t) == \E i \in DOMAIN stack[t] : stack[t][i].procedure = "Exit"
 
 NoHandle(t) == MutExitHandle /\ InExit(t) /\ lvl[t] > 0
 
-VARIABLES which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-          tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-          dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-          sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-          hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-          rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-          nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt
+VARIABLES ah, aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+          tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+          swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+          hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+          radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+          pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+          xl, xx, xr
 
-vars == << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, res, nst, 
-           nnx, nbl, nro, nbe, cell, nalloc, pool, ninc, plk, tid, pinc, bfst, 
-           blst, bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, lvl, 
-           gdep, rv, rok, opi, afr, acl, detaching, adv, errs, pc, stack, 
-           which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-           tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-           dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-           sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-           hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-           rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-           nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-           xpt >>
+vars == << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, nbl, nro, nbe, 
+           fil, inlist, sub, cell, nalloc, pool, ninc, plk, tid, pinc, bfst, 
+           blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, rv, 
+           rok, opi, afr, acl, detaching, adv, errs, pc, stack, ah, aseen, rt, 
+           tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
+           twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+           spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+           hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+           radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+           pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+           xl, xx, xr >>
 
 ProcSet == (Threads)
 
@@ -1592,18 +1577,18 @@ Init == (* Global variables *)
         /\ slow = 0
         /\ ntid = 0
         /\ rel = {}
-        /\ orw = [i \in Tids |-> NULL]
-        /\ orphaned = 0
         /\ lkT = FALSE
-        /\ lkO = FALSE
         /\ fst = [i \in Tids |-> [j \in SJ |-> [lo |-> INV, hi |-> 0]]]
-        /\ sep = [i \in Tids |-> [j \in SJ |-> [lo |-> 0, hi |-> 0]]]
+        /\ sep = [i \in Tids |-> [j \in SJ |-> [lo |-> TagV(0), hi |-> 0]]]
         /\ res = [i \in Tids |-> [lo |-> 0, hi |-> 0]]
         /\ nst = [n \in Nodes |-> IF n \in InitNodes THEN "live" ELSE "free"]
         /\ nnx = [n \in Nodes |-> NULL]
         /\ nbl = [n \in Nodes |-> NULL]
         /\ nro = [n \in Nodes |-> 0]
         /\ nbe = [n \in Nodes |-> IF n \in InitNodes THEN 1 ELSE 0]
+        /\ fil = [n \in Nodes |-> FALSE]
+        /\ inlist = [n \in Nodes |-> FALSE]
+        /\ sub = [n \in Nodes |-> FALSE]
         /\ cell = [c \in Cells |-> c]
         /\ nalloc = NCells
         /\ pool = {}
@@ -1619,12 +1604,10 @@ Init == (* Global variables *)
         /\ flst = [t \in Threads |-> NULL]
         /\ lcnt = [t \in Threads |-> 0]
         /\ cep = [t \in Threads |-> 0]
-        /\ dep = [t \in Threads |-> 0]
         /\ cbe = [t \in Threads |-> 0]
         /\ inr = [t \in Threads |-> FALSE]
         /\ held = [t \in Threads |-> {}]
         /\ lvl = [t \in Threads |-> 0]
-        /\ gdep = [t \in Threads |-> 0]
         /\ rv = [t \in Threads |-> 0]
         /\ rok = [t \in Threads |-> TRUE]
         /\ opi = [t \in Threads |-> 0]
@@ -1633,22 +1616,11 @@ Init == (* Global variables *)
         /\ detaching = [i \in Tids |-> {}]
         /\ adv = [t \in Threads |-> 0]
         /\ errs = {}
-        (* Procedure SpinLock *)
-        /\ which = [ self \in ProcSet |-> defaultInitValue]
         (* Procedure AllocTid *)
         /\ ah = [ self \in ProcSet |-> 0]
         /\ aseen = [ self \in ProcSet |-> {}]
         (* Procedure ReleaseTid *)
         /\ rt = [ self \in ProcSet |-> defaultInitValue]
-        (* Procedure ParkOrphans *)
-        /\ pk = [ self \in ProcSet |-> defaultInitValue]
-        /\ ph = [ self \in ProcSet |-> defaultInitValue]
-        /\ pt = [ self \in ProcSet |-> defaultInitValue]
-        /\ pe = [ self \in ProcSet |-> NULL]
-        (* Procedure AdoptOrphans *)
-        /\ ai = [ self \in ProcSet |-> 0]
-        /\ am = [ self \in ProcSet |-> 0]
-        /\ ac = [ self \in ProcSet |-> NULL]
         (* Procedure Traverse *)
         /\ tf = [ self \in ProcSet |-> defaultInitValue]
         /\ tacc = [ self \in ProcSet |-> defaultInitValue]
@@ -1709,7 +1681,7 @@ Init == (* Global variables *)
         (* Procedure TryRetire *)
         /\ rf = [ self \in ProcSet |-> defaultInitValue]
         /\ rr = [ self \in ProcSet |-> defaultInitValue]
-        /\ rsk = [ self \in ProcSet |-> defaultInitValue]
+        /\ rpad = [ self \in ProcSet |-> defaultInitValue]
         /\ rmx = [ self \in ProcSet |-> 0]
         /\ ri = [ self \in ProcSet |-> 0]
         /\ rl = [ self \in ProcSet |-> NULL]
@@ -1719,6 +1691,8 @@ Init == (* Global variables *)
         /\ rsi = [ self \in ProcSet |-> 0]
         /\ rsj = [ self \in ProcSet |-> 0]
         /\ rlate = [ self \in ProcSet |-> {}]
+        /\ rf0 = [ self \in ProcSet |-> NULL]
+        /\ rbh = [ self \in ProcSet |-> NULL]
         (* Procedure Retire *)
         /\ rn = [ self \in ProcSet |-> defaultInitValue]
         /\ ecnt = [ self \in ProcSet |-> 0]
@@ -1728,6 +1702,9 @@ Init == (* Global variables *)
         (* Procedure Pin *)
         /\ pce = [ self \in ProcSet |-> 0]
         /\ pa = [ self \in ProcSet |-> 0]
+        /\ pl = [ self \in ProcSet |-> NULL]
+        (* Procedure Unpin *)
+        /\ ul = [ self \in ProcSet |-> NULL]
         (* Procedure Load *)
         /\ lc = [ self \in ProcSet |-> defaultInitValue]
         /\ lp = [ self \in ProcSet |-> NULL]
@@ -1743,120 +1720,98 @@ Init == (* Global variables *)
         /\ nn = [ self \in ProcSet |-> NULL]
         (* Procedure Flush *)
         /\ fsv = [ self \in ProcSet |-> 0]
-        /\ fx = [ self \in ProcSet |-> NULL]
         /\ ff = [ self \in ProcSet |-> NULL]
         /\ fl2 = [ self \in ProcSet |-> NULL]
         (* Procedure Exit *)
-        /\ xsv = [ self \in ProcSet |-> 0]
-        /\ xown = [ self \in ProcSet |-> NoSkip]
         /\ xf = [ self \in ProcSet |-> NULL]
         /\ xl = [ self \in ProcSet |-> NULL]
         /\ xx = [ self \in ProcSet |-> NULL]
-        /\ xcap = [ self \in ProcSet |-> <<>>]
-        /\ xu = [ self \in ProcSet |-> NULL]
         /\ xr = [ self \in ProcSet |-> 0]
-        /\ xph = [ self \in ProcSet |-> NULL]
-        /\ xpt = [ self \in ProcSet |-> NULL]
         /\ stack = [self \in ProcSet |-> << >>]
         /\ pc = [self \in ProcSet |-> "TH2"]
 
 SK1(self) == /\ pc[self] = "SK1"
-             /\ IF (which[self] = 1 /\ lkT) \/ (which[self] = 2 /\ lkO)
+             /\ IF lkT
                    THEN /\ pc' = [pc EXCEPT ![self] = "SK1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "SK2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SK2(self) == /\ pc[self] = "SK2"
-             /\ IF which[self] = 1
-                   THEN /\ IF lkT
-                              THEN /\ pc' = [pc EXCEPT ![self] = "SK1"]
-                                   /\ lkT' = lkT
-                              ELSE /\ lkT' = TRUE
-                                   /\ pc' = [pc EXCEPT ![self] = "SK3"]
-                        /\ lkO' = lkO
-                   ELSE /\ IF lkO
-                              THEN /\ pc' = [pc EXCEPT ![self] = "SK1"]
-                                   /\ lkO' = lkO
-                              ELSE /\ lkO' = TRUE
-                                   /\ pc' = [pc EXCEPT ![self] = "SK3"]
+             /\ IF lkT
+                   THEN /\ pc' = [pc EXCEPT ![self] = "SK1"]
                         /\ lkT' = lkT
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, fst, sep, res, 
-                             nst, nnx, nbl, nro, nbe, cell, nalloc, pool, ninc, 
-                             plk, tid, pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                             lcnt, cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, stack, 
-                             which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                   ELSE /\ lkT' = TRUE
+                        /\ pc' = [pc EXCEPT ![self] = "SK3"]
+             /\ UNCHANGED << ep, slow, ntid, rel, fst, sep, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
+                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SK3(self) == /\ pc[self] = "SK3"
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-             /\ which' = [which EXCEPT ![self] = Head(stack[self]).which]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SpinLock(self) == SK1(self) \/ SK2(self) \/ SK3(self)
 
 AT0(self) == /\ pc[self] = "AT0"
              /\ IF MutLocks
-                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SpinLock",
-                                                                    pc        |->  "TidClaim",
-                                                                    which     |->  which[self] ] >>
-                                                                \o stack[self]]
-                           /\ which' = [which EXCEPT ![self] = 1]
+                   THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SpinLock",
+                                                                 pc        |->  "TidClaim" ] >>
+                                                             \o stack[self]]
                         /\ pc' = [pc EXCEPT ![self] = "SK1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TidClaim"]
-                        /\ UNCHANGED << stack, which >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                        /\ stack' = stack
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 TidClaim(self) == /\ pc[self] = "TidClaim"
                   /\ /\ acl' = [acl EXCEPT ![self] = 0]
@@ -1865,23 +1820,21 @@ TidClaim(self) == /\ pc[self] = "TidClaim"
                   /\ IF ntid = 0
                         THEN /\ pc' = [pc EXCEPT ![self] = "TidFresh"]
                         ELSE /\ pc' = [pc EXCEPT ![self] = "TidClaim2"]
-                  /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                  fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                  nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                  blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                                  cbe, inr, held, lvl, gdep, rv, rok, opi, 
-                                  detaching, adv, errs, stack, which, aseen, 
-                                  rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                                  tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                                  tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                                  dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
-                                  spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                                  hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                                  rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
-                                  rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                  lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                  ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                  xph, xpt >>
+                                  blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                  inr, held, lvl, rv, rok, opi, detaching, adv, 
+                                  errs, stack, aseen, rt, tf, tacc, tcache, 
+                                  tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
+                                  twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                                  sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                                  sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                                  hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
+                                  rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                                  rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                                  pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                                  nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TidClaim2(self) == /\ pc[self] = "TidClaim2"
                    /\ /\ acl' = [acl EXCEPT ![self] = acl[self] + (IF CountSteps THEN 1 ELSE 0)]
@@ -1889,23 +1842,22 @@ TidClaim2(self) == /\ pc[self] = "TidClaim2"
                    /\ IF rel = {}
                          THEN /\ pc' = [pc EXCEPT ![self] = "TidFresh"]
                          ELSE /\ pc' = [pc EXCEPT ![self] = "TidClaim3"]
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, fst, sep, res, nst, nnx, nbl, nro, nbe, 
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                   nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
                                    cell, nalloc, pool, ninc, plk, tid, pinc, 
                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                   rok, opi, afr, detaching, adv, errs, stack, 
-                                   which, ah, rt, pk, ph, pt, pe, ai, am, ac, 
-                                   tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                   fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                   dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                                   spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
-                                   hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                                   hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                   radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                                   el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                   wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                                   xl, xx, xcap, xu, xr, xph, xpt >>
+                                   cep, cbe, inr, held, lvl, rv, rok, opi, afr, 
+                                   detaching, adv, errs, stack, ah, rt, tf, 
+                                   tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                   fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                                   ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                                   sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
+                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
+                                   rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                   rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                   ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, 
+                                   uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                                   xr >>
 
 TidClaim3(self) == /\ pc[self] = "TidClaim3"
                    /\ IF MinOf(aseen[self]) \in rel
@@ -1927,46 +1879,42 @@ TidClaim3(self) == /\ pc[self] = "TidClaim3"
                                             /\ aseen' = [aseen EXCEPT ![self] = aseen[self] \ {MinOf(aseen[self])}]
                                          /\ pc' = [pc EXCEPT ![self] = "TidClaim3"]
                               /\ UNCHANGED << rel, lkT, tid, stack, ah >>
-                   /\ UNCHANGED << ep, slow, ntid, orw, orphaned, lkO, fst, 
-                                   sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                   /\ UNCHANGED << ep, slow, ntid, fst, sep, res, nst, nnx, 
+                                   nbl, nro, nbe, fil, inlist, sub, cell, 
                                    nalloc, pool, ninc, plk, pinc, bfst, blst, 
-                                   bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, 
-                                   inr, held, lvl, gdep, rv, rok, opi, afr, 
-                                   detaching, adv, errs, which, rt, pk, ph, pt, 
-                                   pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
+                                   bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, 
+                                   held, lvl, rv, rok, opi, afr, detaching, 
+                                   adv, errs, rt, tf, tacc, tcache, tnx, trf, 
                                    dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
                                    tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
                                    tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
                                    sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                                   hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
+                                   hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
                                    rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                   rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                   lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                   ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                   xr, xph, xpt >>
+                                   rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                                   pce, pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                                   wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TidFresh(self) == /\ pc[self] = "TidFresh"
                   /\ ah' = [ah EXCEPT ![self] = ntid]
                   /\ Assert(ntid < MaxTid, 
-                            "Failure of assertion at line 408, column 5.")
+                            "Failure of assertion at line 443, column 5.")
                   /\ pc' = [pc EXCEPT ![self] = "TidFresh2"]
-                  /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                  fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                  nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                  blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                                  cbe, inr, held, lvl, gdep, rv, rok, opi, afr, 
-                                  acl, detaching, adv, errs, stack, which, 
-                                  aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
+                                  blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                  inr, held, lvl, rv, rok, opi, afr, acl, 
+                                  detaching, adv, errs, stack, aseen, rt, tf, 
                                   tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
                                   fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
                                   ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                                   sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                                  rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                  rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, 
-                                  pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                  fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                  xr, xph, xpt >>
+                                  rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                  rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                  ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, 
+                                  uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TidFresh2(self) == /\ pc[self] = "TidFresh2"
                    /\ IF ntid = ah[self]
@@ -1984,23 +1932,21 @@ TidFresh2(self) == /\ pc[self] = "TidFresh2"
                          ELSE /\ afr' = [afr EXCEPT ![self] = afr[self] + (IF CountSteps THEN 1 ELSE 0)]
                               /\ pc' = [pc EXCEPT ![self] = "TidFresh"]
                               /\ UNCHANGED << ntid, lkT, tid, stack, ah, aseen >>
-                   /\ UNCHANGED << ep, slow, rel, orw, orphaned, lkO, fst, sep, 
-                                   res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                   /\ UNCHANGED << ep, slow, rel, fst, sep, res, nst, nnx, nbl, 
+                                   nro, nbe, fil, inlist, sub, cell, nalloc, 
                                    pool, ninc, plk, pinc, bfst, blst, bcnt, 
-                                   acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                                   held, lvl, gdep, rv, rok, opi, acl, 
-                                   detaching, adv, errs, which, rt, pk, ph, pt, 
-                                   pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
-                                   dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                                   tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
-                                   tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                                   sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                                   hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                   rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                   rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                   lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                   ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                   xr, xph, xpt >>
+                                   acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                                   lvl, rv, rok, opi, acl, detaching, adv, 
+                                   errs, rt, tf, tacc, tcache, tnx, trf, dn, 
+                                   di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                                   tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
+                                   kt, swas, spe, ssq, sfi, spr, sce, sex, sre, 
+                                   sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                                   hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                                   rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                   rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                                   ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                   fsv, ff, fl2, xf, xl, xx, xr >>
 
 AllocTid(self) == AT0(self) \/ TidClaim(self) \/ TidClaim2(self)
                      \/ TidClaim3(self) \/ TidFresh(self)
@@ -2008,29 +1954,26 @@ AllocTid(self) == AT0(self) \/ TidClaim(self) \/ TidClaim2(self)
 
 RL0(self) == /\ pc[self] = "RL0"
              /\ IF MutLocks
-                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SpinLock",
-                                                                    pc        |->  "TidRelease",
-                                                                    which     |->  which[self] ] >>
-                                                                \o stack[self]]
-                           /\ which' = [which EXCEPT ![self] = 1]
+                   THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SpinLock",
+                                                                 pc        |->  "TidRelease" ] >>
+                                                             \o stack[self]]
                         /\ pc' = [pc EXCEPT ![self] = "SK1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TidRelease"]
-                        /\ UNCHANGED << stack, which >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                        /\ stack' = stack
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 TidRelease(self) == /\ pc[self] = "TidRelease"
                     /\ rel' = (rel \cup {rt[self]})
@@ -2041,362 +1984,24 @@ TidRelease(self) == /\ pc[self] = "TidRelease"
                     /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                     /\ rt' = [rt EXCEPT ![self] = Head(stack[self]).rt]
                     /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                    /\ UNCHANGED << ep, slow, ntid, orw, orphaned, lkO, fst, 
-                                    sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                    /\ UNCHANGED << ep, slow, ntid, fst, sep, res, nst, nnx, 
+                                    nbl, nro, nbe, fil, inlist, sub, cell, 
                                     nalloc, pool, ninc, plk, tid, pinc, bfst, 
                                     blst, bcnt, acnt, plc, flst, lcnt, cep, 
-                                    dep, cbe, inr, held, lvl, gdep, rv, rok, 
-                                    opi, afr, acl, detaching, adv, errs, which, 
-                                    ah, aseen, pk, ph, pt, pe, ai, am, ac, tf, 
+                                    cbe, inr, held, lvl, rv, rok, opi, afr, 
+                                    acl, detaching, adv, errs, ah, aseen, tf, 
                                     tacc, tcache, tnx, trf, dn, di, fl, fc, 
                                     fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                                     dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
                                     spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
                                     hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                                    hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                    radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                                    el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                    wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                    xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                    hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                    radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                    ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                                    lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                                    fl2, xf, xl, xx, xr >>
 
 ReleaseTid(self) == RL0(self) \/ TidRelease(self)
-
-PK0(self) == /\ pc[self] = "PK0"
-             /\ IF MutLocks
-                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SpinLock",
-                                                                    pc        |->  "OrphanTake",
-                                                                    which     |->  which[self] ] >>
-                                                                \o stack[self]]
-                           /\ which' = [which EXCEPT ![self] = 2]
-                        /\ pc' = [pc EXCEPT ![self] = "SK1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "OrphanTake"]
-                        /\ UNCHANGED << stack, which >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
-
-OrphanTake(self) == /\ pc[self] = "OrphanTake"
-                    /\ /\ orw' = [orw EXCEPT ![pk[self]] = NULL]
-                       /\ pe' = [pe EXCEPT ![self] = orw[pk[self]]]
-                    /\ pc' = [pc EXCEPT ![self] = "OrphanPublish"]
-                    /\ UNCHANGED << ep, slow, ntid, rel, orphaned, lkT, lkO, 
-                                    fst, sep, res, nst, nnx, nbl, nro, nbe, 
-                                    cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                    cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                    rok, opi, afr, acl, detaching, adv, errs, 
-                                    stack, which, ah, aseen, rt, pk, ph, pt, 
-                                    ai, am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                    di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                                    tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                    kt, swas, spe, ssq, sfi, spr, sce, sex, 
-                                    sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                                    hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                                    ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                                    rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                    lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                    fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                    xph, xpt >>
-
-OrphanPublish(self) == /\ pc[self] = "OrphanPublish"
-                       /\ /\ nnx' = [nnx EXCEPT ![pt[self]] = pe[self]]
-                          /\ orw' = [orw EXCEPT ![pk[self]] = ph[self]]
-                       /\ IF pe[self] # NULL
-                             THEN /\ IF MutLocks
-                                        THEN /\ lkO' = FALSE
-                                        ELSE /\ TRUE
-                                             /\ lkO' = lkO
-                                  /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                  /\ pe' = [pe EXCEPT ![self] = Head(stack[self]).pe]
-                                  /\ pk' = [pk EXCEPT ![self] = Head(stack[self]).pk]
-                                  /\ ph' = [ph EXCEPT ![self] = Head(stack[self]).ph]
-                                  /\ pt' = [pt EXCEPT ![self] = Head(stack[self]).pt]
-                                  /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                             ELSE /\ pc' = [pc EXCEPT ![self] = "OrphanCount"]
-                                  /\ UNCHANGED << lkO, stack, pk, ph, pt, pe >>
-                       /\ UNCHANGED << ep, slow, ntid, rel, orphaned, lkT, fst, 
-                                       sep, res, nst, nbl, nro, nbe, cell, 
-                                       nalloc, pool, ninc, plk, tid, pinc, 
-                                       bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                       cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                       rok, opi, afr, acl, detaching, adv, 
-                                       errs, which, ah, aseen, rt, ai, am, ac, 
-                                       tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                                       fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                                       dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                       kt, swas, spe, ssq, sfi, spr, sce, sex, 
-                                       sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                                       hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                       rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                       rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                       lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                                       fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                       xcap, xu, xr, xph, xpt >>
-
-OrphanCount(self) == /\ pc[self] = "OrphanCount"
-                     /\ orphaned' = orphaned + 1
-                     /\ IF MutLocks
-                           THEN /\ lkO' = FALSE
-                           ELSE /\ TRUE
-                                /\ lkO' = lkO
-                     /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                     /\ pe' = [pe EXCEPT ![self] = Head(stack[self]).pe]
-                     /\ pk' = [pk EXCEPT ![self] = Head(stack[self]).pk]
-                     /\ ph' = [ph EXCEPT ![self] = Head(stack[self]).ph]
-                     /\ pt' = [pt EXCEPT ![self] = Head(stack[self]).pt]
-                     /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, lkT, fst, sep, 
-                                     res, nst, nnx, nbl, nro, nbe, cell, 
-                                     nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                     blst, bcnt, acnt, plc, flst, lcnt, cep, 
-                                     dep, cbe, inr, held, lvl, gdep, rv, rok, 
-                                     opi, afr, acl, detaching, adv, errs, 
-                                     which, ah, aseen, rt, ai, am, ac, tf, 
-                                     tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                     fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                     dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                                     spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                                     hm, hmx, hx, he, hme, hh, hsq, hce, hol, 
-                                     hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                                     rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                     ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                     xpt >>
-
-ParkOrphans(self) == PK0(self) \/ OrphanTake(self) \/ OrphanPublish(self)
-                        \/ OrphanCount(self)
-
-AD0(self) == /\ pc[self] = "AD0"
-             /\ IF MutLocks
-                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SpinLock",
-                                                                    pc        |->  "OrphanAdopt",
-                                                                    which     |->  which[self] ] >>
-                                                                \o stack[self]]
-                           /\ which' = [which EXCEPT ![self] = 2]
-                        /\ pc' = [pc EXCEPT ![self] = "SK1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt"]
-                        /\ UNCHANGED << stack, which >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
-
-OrphanAdopt(self) == /\ pc[self] = "OrphanAdopt"
-                     /\ IF orphaned = 0
-                           THEN /\ IF MutLocks
-                                      THEN /\ lkO' = FALSE
-                                      ELSE /\ TRUE
-                                           /\ lkO' = lkO
-                                /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                /\ ai' = [ai EXCEPT ![self] = Head(stack[self]).ai]
-                                /\ am' = [am EXCEPT ![self] = Head(stack[self]).am]
-                                /\ ac' = [ac EXCEPT ![self] = Head(stack[self]).ac]
-                                /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                           ELSE /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt2"]
-                                /\ UNCHANGED << lkO, stack, ai, am, ac >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     fst, sep, res, nst, nnx, nbl, nro, nbe, 
-                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                     bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                     cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                     rok, opi, afr, acl, detaching, adv, errs, 
-                                     which, ah, aseen, rt, pk, ph, pt, pe, tf, 
-                                     tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                     fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                     dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                                     spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                                     hm, hmx, hx, he, hme, hh, hsq, hce, hol, 
-                                     hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                                     rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                     ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                     xpt >>
-
-OrphanAdopt2(self) == /\ pc[self] = "OrphanAdopt2"
-                      /\ am' = [am EXCEPT ![self] = ntid]
-                      /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt3"]
-                      /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                      lkO, fst, sep, res, nst, nnx, nbl, nro, 
-                                      nbe, cell, nalloc, pool, ninc, plk, tid, 
-                                      pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                                      lcnt, cep, dep, cbe, inr, held, lvl, 
-                                      gdep, rv, rok, opi, afr, acl, detaching, 
-                                      adv, errs, stack, which, ah, aseen, rt, 
-                                      pk, ph, pt, pe, ai, ac, tf, tacc, tcache, 
-                                      tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
-                                      tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                                      dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                      sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                                      hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                                      hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                      radj, rprv, rsi, rsj, rlate, rn, ecnt, 
-                                      ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                                      la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                      xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                      xpt >>
-
-OrphanAdopt3(self) == /\ pc[self] = "OrphanAdopt3"
-                      /\ IF ai[self] >= am[self]
-                            THEN /\ IF MutLocks
-                                       THEN /\ lkO' = FALSE
-                                       ELSE /\ TRUE
-                                            /\ lkO' = lkO
-                                 /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                 /\ ai' = [ai EXCEPT ![self] = Head(stack[self]).ai]
-                                 /\ am' = [am EXCEPT ![self] = Head(stack[self]).am]
-                                 /\ ac' = [ac EXCEPT ![self] = Head(stack[self]).ac]
-                                 /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                            ELSE /\ IF orw[ai[self]] = NULL
-                                       THEN /\ ai' = [ai EXCEPT ![self] = ai[self] + 1]
-                                            /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt3"]
-                                       ELSE /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt4"]
-                                            /\ ai' = ai
-                                 /\ UNCHANGED << lkO, stack, am, ac >>
-                      /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                      fst, sep, res, nst, nnx, nbl, nro, nbe, 
-                                      cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                      bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                      cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                      rok, opi, afr, acl, detaching, adv, errs, 
-                                      which, ah, aseen, rt, pk, ph, pt, pe, tf, 
-                                      tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                      fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                      dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                                      swas, spe, ssq, sfi, spr, sce, sex, sre, 
-                                      sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                      hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                                      rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                                      rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                      lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                      fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                      xph, xpt >>
-
-OrphanAdopt4(self) == /\ pc[self] = "OrphanAdopt4"
-                      /\ /\ ac' = [ac EXCEPT ![self] = orw[ai[self]]]
-                         /\ orw' = [orw EXCEPT ![ai[self]] = NULL]
-                      /\ IF ac'[self] = NULL
-                            THEN /\ ai' = [ai EXCEPT ![self] = ai[self] + 1]
-                                 /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt3"]
-                            ELSE /\ pc' = [pc EXCEPT ![self] = "OrphanAdopt5"]
-                                 /\ ai' = ai
-                      /\ UNCHANGED << ep, slow, ntid, rel, orphaned, lkT, lkO, 
-                                      fst, sep, res, nst, nnx, nbl, nro, nbe, 
-                                      cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                      bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                      cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                      rok, opi, afr, acl, detaching, adv, errs, 
-                                      stack, which, ah, aseen, rt, pk, ph, pt, 
-                                      pe, am, tf, tacc, tcache, tnx, trf, dn, 
-                                      di, fl, fc, fnx, fci, tt, tdo, twas, 
-                                      tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
-                                      tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                                      sce, sex, sre, sps, hm, hmx, hx, he, hme, 
-                                      hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                                      rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
-                                      rsj, rlate, rn, ecnt, ef, el, ewas, pce, 
-                                      pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                                      fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                      xcap, xu, xr, xph, xpt >>
-
-OrphanAdopt5(self) == /\ pc[self] = "OrphanAdopt5"
-                      /\ orphaned' = orphaned - 1
-                      /\ IF MutLocks
-                            THEN /\ lkO' = FALSE
-                            ELSE /\ TRUE
-                                 /\ lkO' = lkO
-                      /\ pc' = [pc EXCEPT ![self] = "OrphanMerge"]
-                      /\ UNCHANGED << ep, slow, ntid, rel, orw, lkT, fst, sep, 
-                                      res, nst, nnx, nbl, nro, nbe, cell, 
-                                      nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                      blst, bcnt, acnt, plc, flst, lcnt, cep, 
-                                      dep, cbe, inr, held, lvl, gdep, rv, rok, 
-                                      opi, afr, acl, detaching, adv, errs, 
-                                      stack, which, ah, aseen, rt, pk, ph, pt, 
-                                      pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                                      trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
-                                      twas, tloc, tlc, dwas, dl, ce, ix, dt, 
-                                      dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
-                                      spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                                      hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                                      rf, rr, rsk, rmx, ri, rl, rmin, radj, 
-                                      rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
-                                      ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                      wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                      xf, xl, xx, xcap, xu, xr, xph, xpt >>
-
-OrphanMerge(self) == /\ pc[self] = "OrphanMerge"
-                     /\ IF ac[self] = NULL
-                           THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                /\ ai' = [ai EXCEPT ![self] = Head(stack[self]).ai]
-                                /\ am' = [am EXCEPT ![self] = Head(stack[self]).am]
-                                /\ ac' = [ac EXCEPT ![self] = Head(stack[self]).ac]
-                                /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                /\ UNCHANGED << nbl, nro, nbe, bfst, blst, 
-                                                bcnt, errs >>
-                           ELSE /\ errs' = (errs \cup Bad({ac[self]}))
-                                /\ LET f0 == Unmask(nbl[ac[self]]) IN
-                                     LET r0 == ac[self] IN
-                                       LET ch == Chain((Unmask(nbl[ac[self]])), ac[self]) IN
-                                         IF bfst[self] = NULL
-                                            THEN /\ /\ bcnt' = [bcnt EXCEPT ![self] = Len(ch)]
-                                                    /\ bfst' = [bfst EXCEPT ![self] = f0]
-                                                    /\ blst' = [blst EXCEPT ![self] = r0]
-                                                 /\ UNCHANGED << nbl, nro, nbe >>
-                                            ELSE /\ nbe' = [nbe EXCEPT ![blst[self]] = Min2(nbe[blst[self]], nbe[r0])]
-                                                 /\ nbl' = [n \in Nodes |-> IF n \in Range(ch) THEN blst[self] ELSE nbl[n]]
-                                                 /\ nro' = [nro EXCEPT ![r0] = bfst[self]]
-                                                 /\ /\ bcnt' = [bcnt EXCEPT ![self] = bcnt[self] + Len(ch)]
-                                                    /\ bfst' = [bfst EXCEPT ![self] = f0]
-                                                 /\ blst' = blst
-                                /\ ac' = [ac EXCEPT ![self] = nnx[ac[self]]]
-                                /\ pc' = [pc EXCEPT ![self] = "OrphanMerge"]
-                                /\ UNCHANGED << stack, ai, am >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, fst, sep, res, nst, nnx, cell, 
-                                     nalloc, pool, ninc, plk, tid, pinc, acnt, 
-                                     plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                                     lvl, gdep, rv, rok, opi, afr, acl, 
-                                     detaching, adv, which, ah, aseen, rt, pk, 
-                                     ph, pt, pe, tf, tacc, tcache, tnx, trf, 
-                                     dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                                     tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
-                                     tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                                     sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                                     hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                     rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                     rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                     lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                     fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                     xu, xr, xph, xpt >>
-
-AdoptOrphans(self) == AD0(self) \/ OrphanAdopt(self) \/ OrphanAdopt2(self)
-                         \/ OrphanAdopt3(self) \/ OrphanAdopt4(self)
-                         \/ OrphanAdopt5(self) \/ OrphanMerge(self)
 
 TV1(self) == /\ pc[self] = "TV1"
              /\ IF tf[self] = NULL
@@ -2436,67 +2041,65 @@ TV1(self) == /\ pc[self] = "TV1"
                                    /\ pc' = [pc EXCEPT ![self] = "TV2"]
                                    /\ UNCHANGED << flst, lcnt, rv, stack, tf, 
                                                    tacc, tcache, trf >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             cep, dep, cbe, inr, held, lvl, gdep, rok, opi, 
-                             afr, acl, detaching, adv, which, ah, aseen, rt, 
-                             pk, ph, pt, pe, ai, am, ac, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             cep, cbe, inr, held, lvl, rok, opi, afr, acl, 
+                             detaching, adv, ah, aseen, rt, dn, di, fl, fc, 
+                             fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                             ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                             spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 TV2(self) == /\ pc[self] = "TV2"
              /\ /\ errs' = (errs \cup Bad({tf[self]}))
                 /\ trf' = [trf EXCEPT ![self] = nbl[tf[self]]]
              /\ pc' = [pc EXCEPT ![self] = "TV3"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, dn, di, fl, fc, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, dn, di, fl, fc, 
                              fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
                              ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 TV3(self) == /\ pc[self] = "TV3"
              /\ errs' = (errs \cup Bad({trf[self]}))
              /\ IF nro[trf[self]] = 1 \/ (MutEarlyFree /\ nro[trf[self]] = 2)
-                   THEN /\ /\ nnx' = [nnx EXCEPT ![trf[self]] = tacc[self]]
+                   THEN /\ /\ inlist' = [inlist EXCEPT ![tf[self]] = FALSE]
+                           /\ nnx' = [nnx EXCEPT ![trf[self]] = tacc[self]]
                            /\ nro' = [nro EXCEPT ![trf[self]] = 0]
                            /\ tacc' = [tacc EXCEPT ![self] = trf[self]]
                            /\ tf' = [tf EXCEPT ![self] = tnx[self]]
-                   ELSE /\ /\ nro' = [nro EXCEPT ![trf[self]] = nro[trf[self]] - 1]
+                   ELSE /\ /\ inlist' = [inlist EXCEPT ![tf[self]] = FALSE]
+                           /\ nro' = [nro EXCEPT ![trf[self]] = nro[trf[self]] - 1]
                            /\ tf' = [tf EXCEPT ![self] = tnx[self]]
                         /\ UNCHANGED << nnx, tacc >>
              /\ pc' = [pc EXCEPT ![self] = "TV1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nbe, cell, nalloc, pool, ninc, 
-                             plk, tid, pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                             lcnt, cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, stack, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tcache, 
-                             tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nbl, 
+                             nbe, fil, sub, cell, nalloc, pool, ninc, plk, tid, 
+                             pinc, bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                             cep, cbe, inr, held, lvl, rv, rok, opi, afr, acl, 
+                             detaching, adv, stack, ah, aseen, rt, tcache, tnx, 
+                             trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
                              tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
                              kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 Traverse(self) == TV1(self) \/ TV2(self) \/ TV3(self)
 
@@ -2513,7 +2116,7 @@ DS1(self) == /\ pc[self] = "DS1"
                                    /\ /\ nbe' = [nbe EXCEPT ![dn[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[dn[self]]]
                                       /\ nnx' = [nnx EXCEPT ![dn[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[dn[self]]]
                                       /\ nst' = [nst EXCEPT ![dn[self]] = "freed"]
-                                      /\ pool' = (IF Recycle THEN pool \cup {dn[self]} ELSE pool)
+                                      /\ pool' = (IF Recycle /\ ~fil[dn[self]] THEN pool \cup {dn[self]} ELSE pool)
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                    /\ di' = [di EXCEPT ![self] = Head(stack[self]).di]
                                    /\ dn' = [dn EXCEPT ![self] = Head(stack[self]).dn]
@@ -2524,20 +2127,19 @@ DS1(self) == /\ pc[self] = "DS1"
                                    /\ UNCHANGED << nst, nnx, nbe, pool, stack, 
                                                    dn, di >>
                         /\ errs' = errs
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nbl, nro, cell, nalloc, ninc, plk, tid, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nbl, nro, 
+                             fil, inlist, sub, cell, nalloc, ninc, plk, tid, 
                              pinc, bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                             cep, dep, cbe, inr, held, gdep, rv, rok, opi, afr, 
-                             acl, detaching, adv, which, ah, aseen, rt, pk, ph, 
-                             pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             cep, cbe, inr, held, rv, rok, opi, afr, acl, 
+                             detaching, adv, ah, aseen, rt, tf, tacc, tcache, 
+                             tnx, trf, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 DS2(self) == /\ pc[self] = "DS2"
              /\ IF di[self] = Len(Dtor[dn[self]])
@@ -2545,36 +2147,39 @@ DS2(self) == /\ pc[self] = "DS2"
                         /\ /\ nbe' = [nbe EXCEPT ![dn[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[dn[self]]]
                            /\ nnx' = [nnx EXCEPT ![dn[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[dn[self]]]
                            /\ nst' = [nst EXCEPT ![dn[self]] = "freed"]
-                           /\ pool' = (IF Recycle THEN pool \cup {dn[self]} ELSE pool)
+                           /\ pool' = (IF Recycle /\ ~fil[dn[self]] THEN pool \cup {dn[self]} ELSE pool)
                         /\ lvl' = [lvl EXCEPT ![self] = lvl[self] - 1]
                         /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ di' = [di EXCEPT ![self] = Head(stack[self]).di]
                         /\ dn' = [dn EXCEPT ![self] = Head(stack[self]).dn]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                        /\ UNCHANGED << pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                                        wn, nn, fsv, fx, ff, fl2 >>
+                        /\ UNCHANGED << pce, pa, pl, ul, lc, lp, lpi, le, la, 
+                                        uc, wc, wn, nn, fsv, ff, fl2 >>
                    ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "pin"
                               THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                    /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
                                                                             pc        |->  "DS2",
                                                                             pce       |->  pce[self],
-                                                                            pa        |->  pa[self] ] >>
+                                                                            pa        |->  pa[self],
+                                                                            pl        |->  pl[self] ] >>
                                                                         \o stack[self]]
                                    /\ pce' = [pce EXCEPT ![self] = 0]
                                    /\ pa' = [pa EXCEPT ![self] = 0]
+                                   /\ pl' = [pl EXCEPT ![self] = NULL]
                                    /\ pc' = [pc EXCEPT ![self] = "PN1"]
-                                   /\ UNCHANGED << lc, lp, lpi, le, la, uc, wc, 
-                                                   wn, nn, fsv, fx, ff, fl2 >>
+                                   /\ UNCHANGED << ul, lc, lp, lpi, le, la, uc, 
+                                                   wc, wn, nn, fsv, ff, fl2 >>
                               ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "unpin"
                                          THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                               /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Unpin",
-                                                                                       pc        |->  "DS2" ] >>
+                                                                                       pc        |->  "DS2",
+                                                                                       ul        |->  ul[self] ] >>
                                                                                    \o stack[self]]
+                                              /\ ul' = [ul EXCEPT ![self] = NULL]
                                               /\ pc' = [pc EXCEPT ![self] = "UP1"]
                                               /\ UNCHANGED << lc, lp, lpi, le, 
                                                               la, uc, wc, wn, 
-                                                              nn, fsv, fx, ff, 
-                                                              fl2 >>
+                                                              nn, fsv, ff, fl2 >>
                                          ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "ld"
                                                     THEN /\ di' = [di EXCEPT ![self] = di[self] + 1]
                                                          /\ /\ lc' = [lc EXCEPT ![self] = Dtor[dn[self]][di'[self]].c]
@@ -2596,7 +2201,6 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                          wn, 
                                                                          nn, 
                                                                          fsv, 
-                                                                         fx, 
                                                                          ff, 
                                                                          fl2 >>
                                                     ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "lu"
@@ -2611,7 +2215,6 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                     wn, 
                                                                                     nn, 
                                                                                     fsv, 
-                                                                                    fx, 
                                                                                     ff, 
                                                                                     fl2 >>
                                                                ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "wr"
@@ -2626,7 +2229,6 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                /\ pc' = [pc EXCEPT ![self] = "WR1"]
                                                                                /\ UNCHANGED << nn, 
                                                                                                fsv, 
-                                                                                               fx, 
                                                                                                ff, 
                                                                                                fl2 >>
                                                                           ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "rt"
@@ -2638,7 +2240,6 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                           /\ nn' = [nn EXCEPT ![self] = NULL]
                                                                                           /\ pc' = [pc EXCEPT ![self] = "RN1"]
                                                                                           /\ UNCHANGED << fsv, 
-                                                                                                          fx, 
                                                                                                           ff, 
                                                                                                           fl2 >>
                                                                                      ELSE /\ IF Dtor[dn[self]][di[self] + 1].k = "fl"
@@ -2646,12 +2247,10 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
                                                                                                                                               pc        |->  "DS2",
                                                                                                                                               fsv       |->  fsv[self],
-                                                                                                                                              fx        |->  fx[self],
                                                                                                                                               ff        |->  ff[self],
                                                                                                                                               fl2       |->  fl2[self] ] >>
                                                                                                                                           \o stack[self]]
                                                                                                      /\ fsv' = [fsv EXCEPT ![self] = 0]
-                                                                                                     /\ fx' = [fx EXCEPT ![self] = NULL]
                                                                                                      /\ ff' = [ff EXCEPT ![self] = NULL]
                                                                                                      /\ fl2' = [fl2 EXCEPT ![self] = NULL]
                                                                                                      /\ pc' = [pc EXCEPT ![self] = "FL1"]
@@ -2659,7 +2258,6 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                                                      /\ UNCHANGED << stack, 
                                                                                                                      di, 
                                                                                                                      fsv, 
-                                                                                                                     fx, 
                                                                                                                      ff, 
                                                                                                                      fl2 >>
                                                                                           /\ nn' = nn
@@ -2671,21 +2269,21 @@ DS2(self) == /\ pc[self] = "DS2"
                                                                          lpi, 
                                                                          le, 
                                                                          la >>
-                                   /\ UNCHANGED << pce, pa >>
+                                              /\ ul' = ul
+                                   /\ UNCHANGED << pce, pa, pl >>
                         /\ UNCHANGED << nst, nnx, nbe, pool, lvl, dn >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nbl, nro, cell, nalloc, ninc, plk, tid, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nbl, nro, 
+                             fil, inlist, sub, cell, nalloc, ninc, plk, tid, 
                              pinc, bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                             cep, dep, cbe, inr, held, gdep, rv, rok, opi, afr, 
-                             acl, detaching, adv, errs, which, ah, aseen, rt, 
-                             pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                             trf, fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                             dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                             spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                             rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, xsv, xown, xf, xl, 
-                             xx, xcap, xu, xr, xph, xpt >>
+                             cep, cbe, inr, held, rv, rok, opi, afr, acl, 
+                             detaching, adv, errs, ah, aseen, rt, tf, tacc, 
+                             tcache, tnx, trf, fl, fc, fnx, fci, tt, tdo, twas, 
+                             tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
+                             kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
+                             hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             xf, xl, xx, xr >>
 
 Destroy(self) == DS1(self) \/ DS2(self)
 
@@ -2709,21 +2307,24 @@ FB1(self) == /\ pc[self] = "FB1"
                                          THEN /\ fnx' = [fnx EXCEPT ![self] = nro[fc'[self]]]
                                          ELSE /\ TRUE
                                               /\ fnx' = fnx
-                                   /\ IF Dtor[fc'[self]] # <<>> /\ MutReadAfterDealloc
-                                         THEN /\ /\ dn' = [dn EXCEPT ![self] = fc'[self]]
-                                                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Destroy",
-                                                                                          pc        |->  "FB2",
-                                                                                          di        |->  di[self],
-                                                                                          dn        |->  dn[self] ] >>
-                                                                                      \o stack[self]]
-                                              /\ di' = [di EXCEPT ![self] = 0]
-                                              /\ pc' = [pc EXCEPT ![self] = "DS1"]
-                                              /\ UNCHANGED << nst, nnx, nbe, 
-                                                              pool >>
-                                         ELSE /\ IF Dtor[fc'[self]] # <<>>
+                                   /\ IF fil[fc'[self]]
+                                         THEN /\ IF ~MutFillerKept
+                                                    THEN /\ ~MutPoolLock \/ plk = 0
+                                                         /\ /\ nbe' = [nbe EXCEPT ![fc'[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[fc'[self]]]
+                                                            /\ nnx' = [nnx EXCEPT ![fc'[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[fc'[self]]]
+                                                            /\ nst' = [nst EXCEPT ![fc'[self]] = "freed"]
+                                                            /\ pool' = (IF Recycle /\ ~fil[fc'[self]] THEN pool \cup {fc'[self]} ELSE pool)
+                                                    ELSE /\ TRUE
+                                                         /\ UNCHANGED << nst, 
+                                                                         nnx, 
+                                                                         nbe, 
+                                                                         pool >>
+                                              /\ pc' = [pc EXCEPT ![self] = "FB1"]
+                                              /\ UNCHANGED << stack, dn, di >>
+                                         ELSE /\ IF Dtor[fc'[self]] # <<>> /\ MutReadAfterDealloc
                                                     THEN /\ /\ dn' = [dn EXCEPT ![self] = fc'[self]]
                                                             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Destroy",
-                                                                                                     pc        |->  "FB1",
+                                                                                                     pc        |->  "FB2",
                                                                                                      di        |->  di[self],
                                                                                                      dn        |->  dn[self] ] >>
                                                                                                  \o stack[self]]
@@ -2733,17 +2334,30 @@ FB1(self) == /\ pc[self] = "FB1"
                                                                          nnx, 
                                                                          nbe, 
                                                                          pool >>
-                                                    ELSE /\ ~MutPoolLock \/ plk = 0
-                                                         /\ /\ nbe' = [nbe EXCEPT ![fc'[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[fc'[self]]]
-                                                            /\ nnx' = [nnx EXCEPT ![fc'[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[fc'[self]]]
-                                                            /\ nst' = [nst EXCEPT ![fc'[self]] = "freed"]
-                                                            /\ pool' = (IF Recycle THEN pool \cup {fc'[self]} ELSE pool)
-                                                         /\ IF MutReadAfterDealloc
-                                                               THEN /\ pc' = [pc EXCEPT ![self] = "FB2"]
-                                                               ELSE /\ pc' = [pc EXCEPT ![self] = "FB1"]
-                                                         /\ UNCHANGED << stack, 
-                                                                         dn, 
-                                                                         di >>
+                                                    ELSE /\ IF Dtor[fc'[self]] # <<>>
+                                                               THEN /\ /\ dn' = [dn EXCEPT ![self] = fc'[self]]
+                                                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Destroy",
+                                                                                                                pc        |->  "FB1",
+                                                                                                                di        |->  di[self],
+                                                                                                                dn        |->  dn[self] ] >>
+                                                                                                            \o stack[self]]
+                                                                    /\ di' = [di EXCEPT ![self] = 0]
+                                                                    /\ pc' = [pc EXCEPT ![self] = "DS1"]
+                                                                    /\ UNCHANGED << nst, 
+                                                                                    nnx, 
+                                                                                    nbe, 
+                                                                                    pool >>
+                                                               ELSE /\ ~MutPoolLock \/ plk = 0
+                                                                    /\ /\ nbe' = [nbe EXCEPT ![fc'[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[fc'[self]]]
+                                                                       /\ nnx' = [nnx EXCEPT ![fc'[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[fc'[self]]]
+                                                                       /\ nst' = [nst EXCEPT ![fc'[self]] = "freed"]
+                                                                       /\ pool' = (IF Recycle /\ ~fil[fc'[self]] THEN pool \cup {fc'[self]} ELSE pool)
+                                                                    /\ IF MutReadAfterDealloc
+                                                                          THEN /\ pc' = [pc EXCEPT ![self] = "FB2"]
+                                                                          ELSE /\ pc' = [pc EXCEPT ![self] = "FB1"]
+                                                                    /\ UNCHANGED << stack, 
+                                                                                    dn, 
+                                                                                    di >>
                               ELSE /\ /\ errs' = (   errs \cup Bad({fnx[self]})
                                                   \cup (IF Dtor[fnx[self]] = <<>> /\ nst[fnx[self]] = "freed" THEN {"double_free"} ELSE {}))
                                       /\ fc' = [fc EXCEPT ![self] = fnx[self]]
@@ -2752,21 +2366,24 @@ FB1(self) == /\ pc[self] = "FB1"
                                          THEN /\ fnx' = [fnx EXCEPT ![self] = nro[fc'[self]]]
                                          ELSE /\ TRUE
                                               /\ fnx' = fnx
-                                   /\ IF Dtor[fc'[self]] # <<>> /\ MutReadAfterDealloc
-                                         THEN /\ /\ dn' = [dn EXCEPT ![self] = fc'[self]]
-                                                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Destroy",
-                                                                                          pc        |->  "FB2",
-                                                                                          di        |->  di[self],
-                                                                                          dn        |->  dn[self] ] >>
-                                                                                      \o stack[self]]
-                                              /\ di' = [di EXCEPT ![self] = 0]
-                                              /\ pc' = [pc EXCEPT ![self] = "DS1"]
-                                              /\ UNCHANGED << nst, nnx, nbe, 
-                                                              pool >>
-                                         ELSE /\ IF Dtor[fc'[self]] # <<>>
+                                   /\ IF fil[fc'[self]]
+                                         THEN /\ IF ~MutFillerKept
+                                                    THEN /\ ~MutPoolLock \/ plk = 0
+                                                         /\ /\ nbe' = [nbe EXCEPT ![fc'[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[fc'[self]]]
+                                                            /\ nnx' = [nnx EXCEPT ![fc'[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[fc'[self]]]
+                                                            /\ nst' = [nst EXCEPT ![fc'[self]] = "freed"]
+                                                            /\ pool' = (IF Recycle /\ ~fil[fc'[self]] THEN pool \cup {fc'[self]} ELSE pool)
+                                                    ELSE /\ TRUE
+                                                         /\ UNCHANGED << nst, 
+                                                                         nnx, 
+                                                                         nbe, 
+                                                                         pool >>
+                                              /\ pc' = [pc EXCEPT ![self] = "FB1"]
+                                              /\ UNCHANGED << stack, dn, di >>
+                                         ELSE /\ IF Dtor[fc'[self]] # <<>> /\ MutReadAfterDealloc
                                                     THEN /\ /\ dn' = [dn EXCEPT ![self] = fc'[self]]
                                                             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Destroy",
-                                                                                                     pc        |->  "FB1",
+                                                                                                     pc        |->  "FB2",
                                                                                                      di        |->  di[self],
                                                                                                      dn        |->  dn[self] ] >>
                                                                                                  \o stack[self]]
@@ -2776,53 +2393,64 @@ FB1(self) == /\ pc[self] = "FB1"
                                                                          nnx, 
                                                                          nbe, 
                                                                          pool >>
-                                                    ELSE /\ ~MutPoolLock \/ plk = 0
-                                                         /\ /\ nbe' = [nbe EXCEPT ![fc'[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[fc'[self]]]
-                                                            /\ nnx' = [nnx EXCEPT ![fc'[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[fc'[self]]]
-                                                            /\ nst' = [nst EXCEPT ![fc'[self]] = "freed"]
-                                                            /\ pool' = (IF Recycle THEN pool \cup {fc'[self]} ELSE pool)
-                                                         /\ IF MutReadAfterDealloc
-                                                               THEN /\ pc' = [pc EXCEPT ![self] = "FB2"]
-                                                               ELSE /\ pc' = [pc EXCEPT ![self] = "FB1"]
-                                                         /\ UNCHANGED << stack, 
-                                                                         dn, 
-                                                                         di >>
+                                                    ELSE /\ IF Dtor[fc'[self]] # <<>>
+                                                               THEN /\ /\ dn' = [dn EXCEPT ![self] = fc'[self]]
+                                                                       /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Destroy",
+                                                                                                                pc        |->  "FB1",
+                                                                                                                di        |->  di[self],
+                                                                                                                dn        |->  dn[self] ] >>
+                                                                                                            \o stack[self]]
+                                                                    /\ di' = [di EXCEPT ![self] = 0]
+                                                                    /\ pc' = [pc EXCEPT ![self] = "DS1"]
+                                                                    /\ UNCHANGED << nst, 
+                                                                                    nnx, 
+                                                                                    nbe, 
+                                                                                    pool >>
+                                                               ELSE /\ ~MutPoolLock \/ plk = 0
+                                                                    /\ /\ nbe' = [nbe EXCEPT ![fc'[self]] = IF PoolLink = "birth" THEN UNC ELSE nbe[fc'[self]]]
+                                                                       /\ nnx' = [nnx EXCEPT ![fc'[self]] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[fc'[self]]]
+                                                                       /\ nst' = [nst EXCEPT ![fc'[self]] = "freed"]
+                                                                       /\ pool' = (IF Recycle /\ ~fil[fc'[self]] THEN pool \cup {fc'[self]} ELSE pool)
+                                                                    /\ IF MutReadAfterDealloc
+                                                                          THEN /\ pc' = [pc EXCEPT ![self] = "FB2"]
+                                                                          ELSE /\ pc' = [pc EXCEPT ![self] = "FB1"]
+                                                                    /\ UNCHANGED << stack, 
+                                                                                    dn, 
+                                                                                    di >>
                                    /\ fl' = fl
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nbl, nro, cell, nalloc, ninc, plk, tid, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nbl, nro, 
+                             fil, inlist, sub, cell, nalloc, ninc, plk, tid, 
                              pinc, bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                             cep, dep, cbe, inr, held, lvl, gdep, rv, rok, opi, 
-                             afr, acl, detaching, adv, which, ah, aseen, rt, 
-                             pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                             trf, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             cep, cbe, inr, held, lvl, rv, rok, opi, afr, acl, 
+                             detaching, adv, ah, aseen, rt, tf, tacc, tcache, 
+                             tnx, trf, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                             ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                             spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 FB2(self) == /\ pc[self] = "FB2"
              /\ errs' = (errs \cup (IF ninc[fc[self]] # fci[self] \/ (~Recycle /\ nst[fc[self]] = "freed")
                                     THEN {"uaf_int"} ELSE {}))
              /\ fnx' = [fnx EXCEPT ![self] = nro[fc[self]]]
              /\ pc' = [pc EXCEPT ![self] = "FB1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
                              ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 FreeBatch(self) == FB1(self) \/ FB2(self)
 
@@ -2914,20 +2542,18 @@ TC1(self) == /\ pc[self] = "TC1"
                                               /\ pc' = [pc EXCEPT ![self] = "TV1"]
                                               /\ UNCHANGED << flst, lcnt, inr, 
                                                               fl, fc, fnx, fci >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, cep, dep, cbe, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, dn, di, 
+                             acnt, plc, cep, cbe, held, lvl, rv, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, dn, di, 
                              tt, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
                              swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TC2(self) == /\ pc[self] = "TC2"
              /\ IF MutCopied \/ MutOverwritten
@@ -2973,20 +2599,19 @@ TC2(self) == /\ pc[self] = "TC2"
                         /\ tnx' = [tnx EXCEPT ![self] = NULL]
                         /\ trf' = [trf EXCEPT ![self] = NULL]
                         /\ pc' = [pc EXCEPT ![self] = "TV1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, held, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, dn, di, fl, fc, fnx, fci, tt, dwas, dl, 
+                             acnt, plc, flst, lcnt, cep, cbe, held, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, dn, di, fl, fc, fnx, fci, tt, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 TC3(self) == /\ pc[self] = "TC3"
              /\ IF MutOverwritten
@@ -3003,20 +2628,19 @@ TC3(self) == /\ pc[self] = "TC3"
              /\ tlc' = [tlc EXCEPT ![self] = Head(stack[self]).tlc]
              /\ tt' = [tt EXCEPT ![self] = Head(stack[self]).tt]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, cep, dep, cbe, held, lvl, gdep, rok, 
-                             opi, afr, acl, detaching, adv, errs, which, ah, 
-                             aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, cep, cbe, held, lvl, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, tf, 
+                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                             dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                             spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
+                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 TIC(self) == TC1(self) \/ TC2(self) \/ TC3(self)
 
@@ -3044,20 +2668,19 @@ DF1(self) == /\ pc[self] = "DF1"
                         /\ fnx' = [fnx EXCEPT ![self] = NULL]
                         /\ fci' = [fci EXCEPT ![self] = 0]
                         /\ pc' = [pc EXCEPT ![self] = "FB1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, cep, dep, cbe, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
+                             acnt, plc, cep, cbe, held, lvl, rv, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, tf, 
                              tacc, tcache, tnx, trf, dn, di, tt, tdo, twas, 
                              tloc, tlc, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
                              spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                             rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 DF2(self) == /\ pc[self] = "DF2"
              /\ IF flst[self] = NULL
@@ -3083,20 +2706,19 @@ DF2(self) == /\ pc[self] = "DF2"
                         /\ fci' = [fci EXCEPT ![self] = 0]
                         /\ pc' = [pc EXCEPT ![self] = "FB1"]
                         /\ UNCHANGED << inr, dwas >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, cep, dep, cbe, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
+                             acnt, plc, cep, cbe, held, lvl, rv, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, tf, 
                              tacc, tcache, tnx, trf, dn, di, tt, tdo, twas, 
                              tloc, tlc, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
                              spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                             rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 Drain(self) == DF1(self) \/ DF2(self)
 
@@ -3104,85 +2726,116 @@ DU1(self) == /\ pc[self] = "DU1"
              /\ IF fst[dt[self]][ix[self]].lo = 0
                    THEN /\ pc' = [pc EXCEPT ![self] = "DU4"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "DU2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 DU2(self) == /\ pc[self] = "DU2"
-             /\ /\ dlo' = [dlo EXCEPT ![self] = fst[dt[self]][ix[self]].lo]
-                /\ fst' = [fst EXCEPT ![dt[self]][ix[self]].lo = 0]
-             /\ IF dlo'[self] \notin {NULL, INV}
-                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
-                                                                    pc        |->  "DU3",
-                                                                    tdo       |->  tdo[self],
-                                                                    twas      |->  twas[self],
-                                                                    tloc      |->  tloc[self],
-                                                                    tlc       |->  tlc[self],
-                                                                    tt        |->  tt[self] ] >>
-                                                                \o stack[self]]
-                           /\ tt' = [tt EXCEPT ![self] = dlo'[self]]
-                        /\ tdo' = [tdo EXCEPT ![self] = FALSE]
-                        /\ twas' = [twas EXCEPT ![self] = FALSE]
-                        /\ tloc' = [tloc EXCEPT ![self] = NULL]
-                        /\ tlc' = [tlc EXCEPT ![self] = 0]
-                        /\ pc' = [pc EXCEPT ![self] = "TC1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "DU3"]
-                        /\ UNCHANGED << stack, tt, tdo, twas, tloc, tlc >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ sep' = [sep EXCEPT ![dt[self]][ix[self]].lo = UntagV(sep[dt[self]][ix[self]].lo)]
+             /\ pc' = [pc EXCEPT ![self] = "DU2b"]
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, dwas, dl, ce, ix, dt, sk, tg, kl, kt, swas, 
-                             spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                             rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
+
+DU2b(self) == /\ pc[self] = "DU2b"
+              /\ /\ dlo' = [dlo EXCEPT ![self] = fst[dt[self]][ix[self]].lo]
+                 /\ fst' = [fst EXCEPT ![dt[self]][ix[self]].lo = 0]
+              /\ IF dlo'[self] \notin {NULL, INV} /\ ix[self] = 0
+                    THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                     pc        |->  "DU3",
+                                                                     tnx       |->  tnx[self],
+                                                                     trf       |->  trf[self],
+                                                                     tf        |->  tf[self],
+                                                                     tacc      |->  tacc[self],
+                                                                     tcache    |->  tcache[self] ] >>
+                                                                 \o stack[self]]
+                            /\ tacc' = [tacc EXCEPT ![self] = flst[self]]
+                            /\ tcache' = [tcache EXCEPT ![self] = 1]
+                            /\ tf' = [tf EXCEPT ![self] = dlo'[self]]
+                         /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                         /\ trf' = [trf EXCEPT ![self] = NULL]
+                         /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                         /\ UNCHANGED << tt, tdo, twas, tloc, tlc >>
+                    ELSE /\ IF dlo'[self] \notin {NULL, INV}
+                               THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
+                                                                                pc        |->  "DU3",
+                                                                                tdo       |->  tdo[self],
+                                                                                twas      |->  twas[self],
+                                                                                tloc      |->  tloc[self],
+                                                                                tlc       |->  tlc[self],
+                                                                                tt        |->  tt[self] ] >>
+                                                                            \o stack[self]]
+                                       /\ tt' = [tt EXCEPT ![self] = dlo'[self]]
+                                    /\ tdo' = [tdo EXCEPT ![self] = FALSE]
+                                    /\ twas' = [twas EXCEPT ![self] = FALSE]
+                                    /\ tloc' = [tloc EXCEPT ![self] = NULL]
+                                    /\ tlc' = [tlc EXCEPT ![self] = 0]
+                                    /\ pc' = [pc EXCEPT ![self] = "TC1"]
+                               ELSE /\ pc' = [pc EXCEPT ![self] = "DU3"]
+                                    /\ UNCHANGED << stack, tt, tdo, twas, tloc, 
+                                                    tlc >>
+                         /\ UNCHANGED << tf, tacc, tcache, tnx, trf >>
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, 
+                              nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                              acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                              aseen, rt, dn, di, fl, fc, fnx, fci, dwas, dl, 
+                              ce, ix, dt, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+                              hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
+                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
+                              rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                              ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                              fl2, xf, xl, xx, xr >>
 
 DU3(self) == /\ pc[self] = "DU3"
              /\ ce' = [ce EXCEPT ![self] = ep]
              /\ pc' = [pc EXCEPT ![self] = "DU4"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                             spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
+                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 DU4(self) == /\ pc[self] = "DU4"
              /\ sep' = [sep EXCEPT ![dt[self]][ix[self]].lo = ce[self]]
              /\ IF ix[self] = 0 /\ dt[self] = tid[self]
                    THEN /\ /\ cbe' = [cbe EXCEPT ![self] = ce[self]]
                            /\ cep' = [cep EXCEPT ![self] = ce[self]]
-                           /\ dep' = [dep EXCEPT ![self] = ce[self]]
-                           /\ gdep' = [gdep EXCEPT ![self] = ce[self]]
                    ELSE /\ TRUE
-                        /\ UNCHANGED << cep, dep, cbe, gdep >>
+                        /\ UNCHANGED << cep, cbe >>
              /\ rv' = [rv EXCEPT ![self] = ce[self]]
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
              /\ dlo' = [dlo EXCEPT ![self] = Head(stack[self]).dlo]
@@ -3190,22 +2843,22 @@ DU4(self) == /\ pc[self] = "DU4"
              /\ ix' = [ix EXCEPT ![self] = Head(stack[self]).ix]
              /\ dt' = [dt EXCEPT ![self] = Head(stack[self]).dt]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
                              flst, lcnt, inr, held, lvl, rok, opi, afr, acl, 
-                             detaching, adv, errs, which, ah, aseen, rt, pk, 
-                             ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                             trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                             tloc, tlc, dwas, dl, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             detaching, adv, errs, ah, aseen, rt, tf, tacc, 
+                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
-DoUpdate(self) == DU1(self) \/ DU2(self) \/ DU3(self) \/ DU4(self)
+DoUpdate(self) == DU1(self) \/ DU2(self) \/ DU2b(self) \/ DU3(self)
+                     \/ DU4(self)
 
 DetachEra(self) == /\ pc[self] = "DetachEra"
                    /\ IF ~MutDetachUnclosed /\ sep[sk[self]][0].hi = tg[self]
@@ -3214,46 +2867,43 @@ DetachEra(self) == /\ pc[self] = "DetachEra"
                               /\ sep' = sep
                    /\ detaching' = [detaching EXCEPT ![sk[self]] = detaching[sk[self]] \cup {<<self, tg[self]>>}]
                    /\ pc' = [pc EXCEPT ![self] = "DetachList"]
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, fst, res, nst, nnx, nbl, nro, nbe, 
-                                   cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                   bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                   rok, opi, afr, acl, adv, errs, stack, which, 
-                                   ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                                   tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                   fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                   dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                                   spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
-                                   hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                                   hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                   radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                                   el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                   wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                                   xl, xx, xcap, xu, xr, xph, xpt >>
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                   inr, held, lvl, rv, rok, opi, afr, acl, adv, 
+                                   errs, stack, ah, aseen, rt, tf, tacc, 
+                                   tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                                   tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
+                                   dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                                   sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
+                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
+                                   rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                   rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                   ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, 
+                                   uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                                   xr >>
 
 DetachList(self) == /\ pc[self] = "DetachList"
                     /\ /\ kl' = [kl EXCEPT ![self] = fst[sk[self]][0].lo]
                        /\ kt' = [kt EXCEPT ![self] = kt[self] + (IF CountSteps THEN 1 ELSE 0)]
                     /\ pc' = [pc EXCEPT ![self] = "DetachList2"]
-                    /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                    lkO, fst, sep, res, nst, nnx, nbl, nro, 
-                                    nbe, cell, nalloc, pool, ninc, plk, tid, 
-                                    pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                                    lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                                    rv, rok, opi, afr, acl, detaching, adv, 
-                                    errs, stack, which, ah, aseen, rt, pk, ph, 
-                                    pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                                    trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
-                                    twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
-                                    sk, tg, swas, spe, ssq, sfi, spr, sce, sex, 
-                                    sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                                    hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                                    ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                                    rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                    lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                    fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                    xph, xpt >>
+                    /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                    nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
+                                    cell, nalloc, pool, ninc, plk, tid, pinc, 
+                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                    cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                    afr, acl, detaching, adv, errs, stack, ah, 
+                                    aseen, rt, tf, tacc, tcache, tnx, trf, dn, 
+                                    di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                                    tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, 
+                                    swas, spe, ssq, sfi, spr, sce, sex, sre, 
+                                    sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                                    hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                                    rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                    rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                                    ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                    fsv, ff, fl2, xf, xl, xx, xr >>
 
 DetachList2(self) == /\ pc[self] = "DetachList2"
                      /\ IF fst[sk[self]][0].hi # tg[self]
@@ -3268,23 +2918,22 @@ DetachList2(self) == /\ pc[self] = "DetachList2"
                            ELSE /\ pc' = [pc EXCEPT ![self] = "DetachList3"]
                                 /\ UNCHANGED << rv, detaching, stack, sk, tg, 
                                                 kl, kt >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, fst, sep, res, nst, nnx, nbl, nro, 
-                                     nbe, cell, nalloc, pool, ninc, plk, tid, 
-                                     pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                                     lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                                     rok, opi, afr, acl, adv, errs, which, ah, 
-                                     aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                                     tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                     fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                     dl, ce, ix, dt, dlo, swas, spe, ssq, sfi, 
-                                     spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                                     hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                                     rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                     rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                                     pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                     nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                     xx, xcap, xu, xr, xph, xpt >>
+                     /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                     nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
+                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
+                                     bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                     cep, cbe, inr, held, lvl, rok, opi, afr, 
+                                     acl, adv, errs, ah, aseen, rt, tf, tacc, 
+                                     tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                     fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                                     ce, ix, dt, dlo, swas, spe, ssq, sfi, spr, 
+                                     sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+                                     hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                                     rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                     rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                     ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                     la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                     xx, xr >>
 
 DetachList3(self) == /\ pc[self] = "DetachList3"
                      /\ IF fst[sk[self]][0] = [lo |-> kl[self], hi |-> tg[self]]
@@ -3300,23 +2949,22 @@ DetachList3(self) == /\ pc[self] = "DetachList3"
                            ELSE /\ pc' = [pc EXCEPT ![self] = "DetachList"]
                                 /\ UNCHANGED << fst, rv, detaching, stack, sk, 
                                                 tg, kl, kt >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, sep, res, nst, nnx, nbl, nro, nbe, 
+                     /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                     nnx, nbl, nro, nbe, fil, inlist, sub, 
                                      cell, nalloc, pool, ninc, plk, tid, pinc, 
                                      bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                     cep, dep, cbe, inr, held, lvl, gdep, rok, 
-                                     opi, afr, acl, adv, errs, which, ah, 
-                                     aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                                     tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                                     fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                                     dl, ce, ix, dt, dlo, swas, spe, ssq, sfi, 
-                                     spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                                     hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                                     rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                     rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                                     pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                     nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                     xx, xcap, xu, xr, xph, xpt >>
+                                     cep, cbe, inr, held, lvl, rok, opi, afr, 
+                                     acl, adv, errs, ah, aseen, rt, tf, tacc, 
+                                     tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                     fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                                     ce, ix, dt, dlo, swas, spe, ssq, sfi, spr, 
+                                     sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+                                     hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                                     rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                     rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                     ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                     la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                     xx, xr >>
 
 Detach(self) == DetachEra(self) \/ DetachList(self) \/ DetachList2(self)
                    \/ DetachList3(self)
@@ -3326,97 +2974,92 @@ SP1(self) == /\ pc[self] = "SP1"
                 /\ spe' = [spe EXCEPT ![self] = sep[tid[self]][0].lo]
                 /\ swas' = [swas EXCEPT ![self] = inr[self]]
              /\ pc' = [pc EXCEPT ![self] = "SP2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, held, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
+                             acnt, plc, flst, lcnt, cep, cbe, held, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, stack, 
+                             ah, aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
                              fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                              dl, ce, ix, dt, dlo, sk, tg, kl, kt, ssq, sfi, 
                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 SP2(self) == /\ pc[self] = "SP2"
              /\ slow' = slow + 1
              /\ pc' = [pc EXCEPT ![self] = "SP3"]
-             /\ UNCHANGED << ep, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, ntid, rel, lkT, fst, sep, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SP3(self) == /\ pc[self] = "SP3"
              /\ ssq' = [ssq EXCEPT ![self] = sep[tid[self]][0].hi]
              /\ pc' = [pc EXCEPT ![self] = "SP4"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, sfi, spr, sce, sex, sre, sps, hm, hmx, 
+                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SP4(self) == /\ pc[self] = "SP4"
              /\ res' = [res EXCEPT ![tid[self]].hi = ssq[self]]
              /\ pc' = [pc EXCEPT ![self] = "SP5"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SP5(self) == /\ pc[self] = "SP5"
              /\ res' = [res EXCEPT ![tid[self]].lo = INV]
              /\ pc' = [pc EXCEPT ![self] = "SL1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SL1(self) == /\ pc[self] = "SL1"
              /\ /\ sce' = [sce EXCEPT ![self] = ep]
@@ -3424,21 +3067,20 @@ SL1(self) == /\ pc[self] = "SL1"
              /\ IF ep # spe[self]
                    THEN /\ pc' = [pc EXCEPT ![self] = "SL3"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "SL2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sex, sre, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sex, sre, hm, hmx, hx, 
+                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SL2(self) == /\ pc[self] = "SL2"
              /\ IF res[tid[self]] = [lo |-> INV, hi |-> ssq[self]]
@@ -3446,68 +3088,61 @@ SL2(self) == /\ pc[self] = "SL2"
                         /\ pc' = [pc EXCEPT ![self] = "SL2a"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "SL3"]
                         /\ res' = res
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 SL2a(self) == /\ pc[self] = "SL2a"
               /\ sep' = [sep EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
               /\ pc' = [pc EXCEPT ![self] = "SL2b"]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, 
+                              nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                               pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                              acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, stack, which, ah, aseen, rt, pk, ph, 
-                              pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
+                              acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, 
+                              stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
                               dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
                               tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
                               swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
                               hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                              rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                              ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                              wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SL2b(self) == /\ pc[self] = "SL2b"
               /\ fst' = [fst EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
               /\ pc' = [pc EXCEPT ![self] = "SL2c"]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, 
+                              nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                               pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                              acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, stack, which, ah, aseen, rt, pk, ph, 
-                              pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
+                              acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, 
+                              stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
                               dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
                               tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
                               swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
                               hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                              rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                              ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                              wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SL2c(self) == /\ pc[self] = "SL2c"
               /\ slow' = slow - 1
               /\ /\ cbe' = [cbe EXCEPT ![self] = spe[self]]
                  /\ cep' = [cep EXCEPT ![self] = spe[self]]
-                 /\ dep' = [dep EXCEPT ![self] = spe[self]]
-                 /\ gdep' = [gdep EXCEPT ![self] = spe[self]]
               /\ IF flst[self] # NULL /\ ~MutSlowFrees
                     THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
                                                                   pc        |->  "SL2d",
@@ -3519,21 +3154,20 @@ SL2c(self) == /\ pc[self] = "SL2c"
                          /\ pc' = [pc EXCEPT ![self] = "DF1"]
                     ELSE /\ pc' = [pc EXCEPT ![self] = "SL2d"]
                          /\ UNCHANGED << stack, dwas, dl >>
-              /\ UNCHANGED << ep, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, 
-                              res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+              /\ UNCHANGED << ep, ntid, rel, lkT, fst, sep, res, nst, nnx, nbl, 
+                              nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                               ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, 
                               plc, flst, lcnt, inr, held, lvl, rv, rok, opi, 
-                              afr, acl, detaching, adv, errs, which, ah, aseen, 
-                              rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-                              tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
-                              twas, tloc, tlc, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                              swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
-                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              afr, acl, detaching, adv, errs, ah, aseen, rt, 
+                              tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                              fci, tt, tdo, twas, tloc, tlc, ce, ix, dt, dlo, 
+                              sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                              hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                              rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                              rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                              lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                              xl, xx, xr >>
 
 SL2d(self) == /\ pc[self] = "SL2d"
               /\ inr' = [inr EXCEPT ![self] = swas[self]]
@@ -3548,60 +3182,57 @@ SL2d(self) == /\ pc[self] = "SL2d"
               /\ sre' = [sre EXCEPT ![self] = Head(stack[self]).sre]
               /\ sps' = [sps EXCEPT ![self] = Head(stack[self]).sps]
               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, which, ah, aseen, rt, pk, ph, pt, pe, 
-                              ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                              aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
                               fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                               dl, ce, ix, dt, dlo, sk, tg, kl, kt, hm, hmx, hx, 
                               he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                              rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                              rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                              pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                              nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SL3(self) == /\ pc[self] = "SL3"
              /\ IF fst[tid[self]][0].lo \in {NULL, INV}
                    THEN /\ pc' = [pc EXCEPT ![self] = "SL6"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "SL4"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SL4(self) == /\ pc[self] = "SL4"
              /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
                 /\ sex' = [sex EXCEPT ![self] = fst[tid[self]][0].lo]
              /\ pc' = [pc EXCEPT ![self] = "SL5"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 SL5(self) == /\ pc[self] = "SL5"
              /\ IF fst[tid[self]][0].hi # ssq[self]
@@ -3647,41 +3278,37 @@ SL5(self) == /\ pc[self] = "SL5"
                                                               tcache, tnx, trf >>
                                    /\ UNCHANGED << tt, tdo, twas, tloc, tlc >>
                         /\ UNCHANGED << sfi, spr, sex >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, dn, di, fl, fc, fnx, fci, dwas, dl, ce, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, dn, di, fl, fc, fnx, fci, dwas, dl, ce, 
                              ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sce, 
                              sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, 
-                             hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                             radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
-                             ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                             radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                             ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SL5b(self) == /\ pc[self] = "SL5b"
               /\ /\ sce' = [sce EXCEPT ![self] = ep]
                  /\ sex' = [sex EXCEPT ![self] = NULL]
               /\ pc' = [pc EXCEPT ![self] = "SL6"]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                              held, lvl, gdep, rv, rok, opi, afr, acl, 
-                              detaching, adv, errs, stack, which, ah, aseen, 
-                              rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                              lvl, rv, rok, opi, afr, acl, detaching, adv, 
+                              errs, stack, ah, aseen, rt, tf, tacc, tcache, 
                               tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
                               twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
                               tg, kl, kt, swas, spe, ssq, sfi, spr, sre, sps, 
                               hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                              hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, 
-                              rprv, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                              pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                              fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                              xu, xr, xph, xpt >>
+                              hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, 
+                              rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, 
+                              el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, 
+                              uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SL6(self) == /\ pc[self] = "SL6"
              /\ IF sep[tid[self]][0] = [lo |-> spe[self], hi |-> ssq[self]]
@@ -3690,41 +3317,39 @@ SL6(self) == /\ pc[self] = "SL6"
                         /\ sep' = sep
              /\ spe' = [spe EXCEPT ![self] = sce[self]]
              /\ pc' = [pc EXCEPT ![self] = "SL7"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, ssq, sfi, 
                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 SL7(self) == /\ pc[self] = "SL7"
              /\ IF res[tid[self]].lo # INV
                    THEN /\ pc' = [pc EXCEPT ![self] = "DN1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "SL1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 DN1(self) == /\ pc[self] = "DN1"
              /\ IF MutSlowFrees
@@ -3752,21 +3377,20 @@ DN1(self) == /\ pc[self] = "DN1"
                         /\ kl' = [kl EXCEPT ![self] = 0]
                         /\ kt' = [kt EXCEPT ![self] = 0]
                         /\ pc' = [pc EXCEPT ![self] = "DetachEra"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, swas, spe, ssq, sfi, spr, sce, 
                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 Produced(self) == /\ pc[self] = "Produced"
                   /\ /\ rv' = [rv EXCEPT ![self] = 0]
@@ -3774,92 +3398,83 @@ Produced(self) == /\ pc[self] = "Produced"
                      /\ spr' = [spr EXCEPT ![self] = FALSE]
                      /\ sre' = [sre EXCEPT ![self] = res[tid[self]].hi]
                   /\ pc' = [pc EXCEPT ![self] = "Produced2"]
-                  /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                  fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                  nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                  blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                                  cbe, inr, held, lvl, gdep, rok, opi, afr, 
-                                  acl, detaching, adv, errs, stack, which, ah, 
-                                  aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                                  tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                                  fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
-                                  ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                  sce, sex, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                                  hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                                  ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                                  rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                  le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                  xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                  xpt >>
+                                  blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                  inr, held, lvl, rok, opi, afr, acl, 
+                                  detaching, adv, errs, stack, ah, aseen, rt, 
+                                  tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                  fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                                  ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
+                                  ssq, sce, sex, sps, hm, hmx, hx, he, hme, hh, 
+                                  hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
+                                  rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                                  rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                                  pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                                  nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 Produced2(self) == /\ pc[self] = "Produced2"
                    /\ sep' = [sep EXCEPT ![tid[self]][0].lo = sre[self]]
                    /\ pc' = [pc EXCEPT ![self] = "Produced3"]
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, fst, res, nst, nnx, nbl, nro, nbe, 
-                                   cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                   bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                   rok, opi, afr, acl, detaching, adv, errs, 
-                                   stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                                   ai, am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                   di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                                   tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                   kt, swas, spe, ssq, sfi, spr, sce, sex, sre, 
-                                   sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                   hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                                   rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                   ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                   le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                   xpt >>
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                   inr, held, lvl, rv, rok, opi, afr, acl, 
+                                   detaching, adv, errs, stack, ah, aseen, rt, 
+                                   tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                   fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                   dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                                   spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                                   hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
+                                   hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                   radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                   ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                                   lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                                   xf, xl, xx, xr >>
 
 Produced3(self) == /\ pc[self] = "Produced3"
                    /\ sep' = [sep EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
                    /\ /\ cbe' = [cbe EXCEPT ![self] = sre[self]]
                       /\ cep' = [cep EXCEPT ![self] = sre[self]]
-                      /\ dep' = [dep EXCEPT ![self] = sre[self]]
-                      /\ gdep' = [gdep EXCEPT ![self] = sre[self]]
                    /\ pc' = [pc EXCEPT ![self] = "Produced4"]
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, fst, res, nst, nnx, nbl, nro, nbe, 
-                                   cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                   bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   inr, held, lvl, rv, rok, opi, afr, acl, 
-                                   detaching, adv, errs, stack, which, ah, 
-                                   aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                                   tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                                   fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
-                                   ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                   sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                                   rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                   rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                                   pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                   nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                   xcap, xu, xr, xph, xpt >>
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, inr, 
+                                   held, lvl, rv, rok, opi, afr, acl, 
+                                   detaching, adv, errs, stack, ah, aseen, rt, 
+                                   tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                   fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                   dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                                   spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                                   hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
+                                   hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                   radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                   ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                                   lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                                   xf, xl, xx, xr >>
 
 Produced4(self) == /\ pc[self] = "Produced4"
                    /\ fst' = [fst EXCEPT ![tid[self]][0].hi = ssq[self] + 2]
                    /\ pc' = [pc EXCEPT ![self] = "DN9"]
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, sep, res, nst, nnx, nbl, nro, nbe, 
-                                   cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                   bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                   rok, opi, afr, acl, detaching, adv, errs, 
-                                   stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                                   ai, am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                   di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                                   tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                   kt, swas, spe, ssq, sfi, spr, sce, sex, sre, 
-                                   sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                   hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                                   rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                   ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                   le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                   xpt >>
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                   inr, held, lvl, rv, rok, opi, afr, acl, 
+                                   detaching, adv, errs, stack, ah, aseen, rt, 
+                                   tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                   fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                   dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                                   spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                                   hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
+                                   hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                   radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                   ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                                   lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                                   xf, xl, xx, xr >>
 
 DN9(self) == /\ pc[self] = "DN9"
              /\ IF res[tid[self]].lo # 0
@@ -3867,21 +3482,20 @@ DN9(self) == /\ pc[self] = "DN9"
                    ELSE /\ TRUE
                         /\ errs' = errs
              /\ pc' = [pc EXCEPT ![self] = "DN10"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 DN10(self) == /\ pc[self] = "DN10"
               /\ slow' = slow - 1
@@ -3920,20 +3534,19 @@ DN10(self) == /\ pc[self] = "DN10"
                                     /\ UNCHANGED << stack, tf, tacc, tcache, 
                                                     tnx, trf >>
                          /\ UNCHANGED << tt, tdo, twas, tloc, tlc >>
-              /\ UNCHANGED << ep, ntid, rel, orw, orphaned, lkT, lkO, fst, sep, 
-                              res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+              /\ UNCHANGED << ep, ntid, rel, lkT, fst, sep, res, nst, nnx, nbl, 
+                              nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                               ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, 
-                              plc, flst, lcnt, cep, dep, cbe, inr, held, lvl, 
-                              gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                              errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                              am, ac, dn, di, fl, fc, fnx, fci, dwas, dl, ce, 
-                              ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
-                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, 
-                              hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                              rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                              la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                              xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              plc, flst, lcnt, cep, cbe, inr, held, lvl, rv, 
+                              rok, opi, afr, acl, detaching, adv, errs, ah, 
+                              aseen, rt, dn, di, fl, fc, fnx, fci, dwas, dl, 
+                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                              rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                              rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                              pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                              ff, fl2, xf, xl, xx, xr >>
 
 DN11(self) == /\ pc[self] = "DN11"
               /\ IF flst[self] # NULL
@@ -3960,20 +3573,19 @@ DN11(self) == /\ pc[self] = "DN11"
                          /\ sps' = [sps EXCEPT ![self] = Head(stack[self]).sps]
                          /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                          /\ UNCHANGED << dwas, dl >>
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, which, ah, aseen, rt, pk, ph, pt, pe, 
-                              ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                              aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
                               fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, ce, 
                               ix, dt, dlo, sk, tg, kl, kt, hm, hmx, hx, he, 
                               hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                              rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                              pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                              ff, fl2, xf, xl, xx, xr >>
 
 DN12(self) == /\ pc[self] = "DN12"
               /\ inr' = [inr EXCEPT ![self] = swas[self]]
@@ -3988,20 +3600,19 @@ DN12(self) == /\ pc[self] = "DN12"
               /\ sre' = [sre EXCEPT ![self] = Head(stack[self]).sre]
               /\ sps' = [sps EXCEPT ![self] = Head(stack[self]).sps]
               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, which, ah, aseen, rt, pk, ph, pt, pe, 
-                              ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                              aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
                               fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                               dl, ce, ix, dt, dlo, sk, tg, kl, kt, hm, hmx, hx, 
                               he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
-                              rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                              rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                              pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                              nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 DN2(self) == /\ pc[self] = "DN2"
              /\ /\ sfi' = [sfi EXCEPT ![self] = NULL]
@@ -4023,21 +3634,19 @@ DN2(self) == /\ pc[self] = "DN2"
                         /\ pc' = [pc EXCEPT ![self] = "TC1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "Produced"]
                         /\ UNCHANGED << stack, tt, tdo, twas, tloc, tlc >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, dwas, dl, ce, ix, dt, dlo, sk, tg, 
                              kl, kt, swas, spe, ssq, sce, sex, sre, sps, hm, 
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 SlowPath(self) == SP1(self) \/ SP2(self) \/ SP3(self) \/ SP4(self)
                      \/ SP5(self) \/ SL1(self) \/ SL2(self) \/ SL2a(self)
@@ -4057,40 +3666,38 @@ HR1(self) == /\ pc[self] = "HR1"
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "HR2"]
                         /\ UNCHANGED << stack, hm, hmx, hx >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                             lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                             xx, xr >>
 
 HR2(self) == /\ pc[self] = "HR2"
              /\ hmx' = [hmx EXCEPT ![self] = ntid]
              /\ pc' = [pc EXCEPT ![self] = "HR3"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 HR3(self) == /\ pc[self] = "HR3"
              /\ IF hx[self] >= hmx[self]
@@ -4130,20 +3737,19 @@ HR3(self) == /\ pc[self] = "HR3"
                                    /\ UNCHANGED << stack, he, hme, hh, hsq, 
                                                    hce, hol, hoh, hps, hep >>
                         /\ UNCHANGED << hm, hmx >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                             sfi, spr, sce, sex, sre, sps, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             sfi, spr, sce, sex, sre, sps, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 HelpRead(self) == HR1(self) \/ HR2(self) \/ HR3(self)
 
@@ -4163,79 +3769,75 @@ HT1(self) == /\ pc[self] = "HT1"
                    ELSE /\ pc' = [pc EXCEPT ![self] = "HT2"]
                         /\ UNCHANGED << stack, he, hme, hh, hsq, hce, hol, hoh, 
                                         hps, hep >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 HT2(self) == /\ pc[self] = "HT2"
              /\ hh' = [hh EXCEPT ![self] = res[he[self]].hi]
              /\ pc' = [pc EXCEPT ![self] = "HT3"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hsq, hce, hol, hoh, hps, hep, 
+                             rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                             rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 HT3(self) == /\ pc[self] = "HT3"
              /\ hsq' = [hsq EXCEPT ![self] = sep[he[self]][0].hi]
              /\ IF hh[self] # sep[he[self]][0].hi
                    THEN /\ pc' = [pc EXCEPT ![self] = "HT20"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "HT4"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                             rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                             rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hce, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 HT4(self) == /\ pc[self] = "HT4"
              /\ hce' = [hce EXCEPT ![self] = ep]
              /\ pc' = [pc EXCEPT ![self] = "HelpPass"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hol, hoh, hps, hep, rf, rr, rsk, 
-                             rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                             rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 HelpPass(self) == /\ pc[self] = "HelpPass"
                   /\ hps' = [hps EXCEPT ![self] = hps[self] + (IF CountSteps THEN 1 ELSE 0)]
@@ -4251,22 +3853,21 @@ HelpPass(self) == /\ pc[self] = "HelpPass"
                                                           \o stack[self]]
                   /\ dlo' = [dlo EXCEPT ![self] = 0]
                   /\ pc' = [pc EXCEPT ![self] = "DU1"]
-                  /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                  fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                  nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                  blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                                  cbe, inr, held, lvl, gdep, rv, rok, opi, afr, 
-                                  acl, detaching, adv, errs, which, ah, aseen, 
-                                  rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                                  tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                                  tt, tdo, twas, tloc, tlc, dwas, dl, sk, tg, 
-                                  kl, kt, swas, spe, ssq, sfi, spr, sce, sex, 
-                                  sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                  hol, hoh, hep, rf, rr, rsk, rmx, ri, rl, 
-                                  rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, 
-                                  ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                                  uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                  xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                  blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                  inr, held, lvl, rv, rok, opi, afr, acl, 
+                                  detaching, adv, errs, ah, aseen, rt, tf, 
+                                  tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                  fci, tt, tdo, twas, tloc, tlc, dwas, dl, sk, 
+                                  tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                                  sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                                  hce, hol, hoh, hep, rf, rr, rpad, rmx, ri, 
+                                  rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                  rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, 
+                                  lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                                  fl2, xf, xl, xx, xr >>
 
 HT6(self) == /\ pc[self] = "HT6"
              /\ IF rv[self] # ep
@@ -4276,21 +3877,20 @@ HT6(self) == /\ pc[self] = "HT6"
                    ELSE /\ /\ hce' = [hce EXCEPT ![self] = ep]
                            /\ rv' = [rv EXCEPT ![self] = 0]
                         /\ pc' = [pc EXCEPT ![self] = "HT7"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rok, opi, afr, acl, detaching, adv, errs, stack, 
+                             ah, aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
                              fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                              dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
                              ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hol, hoh, hps, hep, rf, rr, rsk, 
-                             rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                             rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             he, hme, hh, hsq, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 HT7(self) == /\ pc[self] = "HT7"
              /\ IF res[he[self]] = [lo |-> INV, hi |-> hh[self]]
@@ -4309,21 +3909,19 @@ HT7(self) == /\ pc[self] = "HT7"
                         /\ pc' = [pc EXCEPT ![self] = "DetachEra"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "HelperLeave"]
                         /\ UNCHANGED << res, stack, sk, tg, kl, kt >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, swas, spe, ssq, sfi, spr, sce, sex, sre, 
-                             sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                             hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, 
-                             rprv, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, ah, aseen, 
+                             rt, tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                             fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                             ix, dt, dlo, swas, spe, ssq, sfi, spr, sce, sex, 
+                             sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, 
+                             hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                             radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                             ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 HT10(self) == /\ pc[self] = "HT10"
               /\ IF rv[self] \notin {NULL, INV}
@@ -4343,69 +3941,64 @@ HT10(self) == /\ pc[self] = "HT10"
                          /\ pc' = [pc EXCEPT ![self] = "TC1"]
                     ELSE /\ pc' = [pc EXCEPT ![self] = "HandOverEpoch"]
                          /\ UNCHANGED << stack, tt, tdo, twas, tloc, tlc >>
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                              held, lvl, gdep, rv, rok, opi, afr, acl, 
-                              detaching, adv, errs, which, ah, aseen, rt, pk, 
-                              ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                              trf, dn, di, fl, fc, fnx, fci, dwas, dl, ce, ix, 
-                              dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
-                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, 
-                              hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                              rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                              la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                              xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                              lvl, rv, rok, opi, afr, acl, detaching, adv, 
+                              errs, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                              dn, di, fl, fc, fnx, fci, dwas, dl, ce, ix, dt, 
+                              dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                              hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                              ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                              rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                              lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                              xf, xl, xx, xr >>
 
 HandOverEpoch(self) == /\ pc[self] = "HandOverEpoch"
                        /\ /\ hol' = [hol EXCEPT ![self] = sep[he[self]][0].lo]
                           /\ rv' = [rv EXCEPT ![self] = 0]
                        /\ pc' = [pc EXCEPT ![self] = "HandOverEpoch2"]
-                       /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                       lkO, fst, sep, res, nst, nnx, nbl, nro, 
-                                       nbe, cell, nalloc, pool, ninc, plk, tid, 
+                       /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                       nst, nnx, nbl, nro, nbe, fil, inlist, 
+                                       sub, cell, nalloc, pool, ninc, plk, tid, 
                                        pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                                       lcnt, cep, dep, cbe, inr, held, lvl, 
-                                       gdep, rok, opi, afr, acl, detaching, 
-                                       adv, errs, stack, which, ah, aseen, rt, 
-                                       pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                                       tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                                       fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                                       ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                                       spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                                       hm, hmx, hx, he, hme, hh, hsq, hce, hoh, 
-                                       hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                                       rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                       ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                       lpi, le, la, uc, wc, wn, nn, fsv, fx, 
-                                       ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                       xu, xr, xph, xpt >>
+                                       lcnt, cep, cbe, inr, held, lvl, rok, 
+                                       opi, afr, acl, detaching, adv, errs, 
+                                       stack, ah, aseen, rt, tf, tacc, tcache, 
+                                       tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                                       tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
+                                       dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                                       sfi, spr, sce, sex, sre, sps, hm, hmx, 
+                                       hx, he, hme, hh, hsq, hce, hoh, hps, 
+                                       hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                       radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                                       rn, ecnt, ef, el, ewas, pce, pa, pl, ul, 
+                                       lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                       fsv, ff, fl2, xf, xl, xx, xr >>
 
 HandOverEpoch2(self) == /\ pc[self] = "HandOverEpoch2"
                         /\ hoh' = [hoh EXCEPT ![self] = sep[he[self]][0].hi]
                         /\ pc' = [pc EXCEPT ![self] = "HandOverEpoch3"]
-                        /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, 
-                                        lkT, lkO, fst, sep, res, nst, nnx, nbl, 
-                                        nro, nbe, cell, nalloc, pool, ninc, 
+                        /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, 
+                                        res, nst, nnx, nbl, nro, nbe, fil, 
+                                        inlist, sub, cell, nalloc, pool, ninc, 
                                         plk, tid, pinc, bfst, blst, bcnt, acnt, 
-                                        plc, flst, lcnt, cep, dep, cbe, inr, 
-                                        held, lvl, gdep, rv, rok, opi, afr, 
-                                        acl, detaching, adv, errs, stack, 
-                                        which, ah, aseen, rt, pk, ph, pt, pe, 
-                                        ai, am, ac, tf, tacc, tcache, tnx, trf, 
-                                        dn, di, fl, fc, fnx, fci, tt, tdo, 
-                                        twas, tloc, tlc, dwas, dl, ce, ix, dt, 
-                                        dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                        sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                                        hx, he, hme, hh, hsq, hce, hol, hps, 
-                                        hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                        radj, rprv, rsi, rsj, rlate, rn, ecnt, 
-                                        ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                                        la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                        xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                        xph, xpt >>
+                                        plc, flst, lcnt, cep, cbe, inr, held, 
+                                        lvl, rv, rok, opi, afr, acl, detaching, 
+                                        adv, errs, stack, ah, aseen, rt, tf, 
+                                        tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                        fnx, fci, tt, tdo, twas, tloc, tlc, 
+                                        dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
+                                        kt, swas, spe, ssq, sfi, spr, sce, sex, 
+                                        sre, sps, hm, hmx, hx, he, hme, hh, 
+                                        hsq, hce, hol, hps, hep, rf, rr, rpad, 
+                                        rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                        rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                        ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                        la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                                        xl, xx, xr >>
 
 HandOverEpoch3(self) == /\ pc[self] = "HandOverEpoch3"
                         /\ IF hoh[self] # hsq[self] + 1
@@ -4421,25 +4014,24 @@ HandOverEpoch3(self) == /\ pc[self] = "HandOverEpoch3"
                                                  /\ hol' = [hol EXCEPT ![self] = sep[he[self]][0].lo]
                                               /\ pc' = [pc EXCEPT ![self] = "HandOverEpoch3"]
                                               /\ sep' = sep
-                        /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, 
-                                        lkT, lkO, fst, res, nst, nnx, nbl, nro, 
-                                        nbe, cell, nalloc, pool, ninc, plk, 
+                        /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, 
+                                        nst, nnx, nbl, nro, nbe, fil, inlist, 
+                                        sub, cell, nalloc, pool, ninc, plk, 
                                         tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                                        flst, lcnt, cep, dep, cbe, inr, held, 
-                                        lvl, gdep, rv, rok, opi, afr, acl, 
-                                        detaching, adv, errs, stack, which, ah, 
-                                        aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                                        tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                                        fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                                        dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                        kt, swas, spe, ssq, sfi, spr, sce, sex, 
+                                        flst, lcnt, cep, cbe, inr, held, lvl, 
+                                        rv, rok, opi, afr, acl, detaching, adv, 
+                                        errs, stack, ah, aseen, rt, tf, tacc, 
+                                        tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                        fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                        dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                                        swas, spe, ssq, sfi, spr, sce, sex, 
                                         sre, sps, hm, hmx, hx, he, hme, hh, 
-                                        hsq, hce, hps, rf, rr, rsk, rmx, ri, 
+                                        hsq, hce, hps, rf, rr, rpad, rmx, ri, 
                                         rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                                        rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                        lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                        fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                        xcap, xu, xr, xph, xpt >>
+                                        rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                                        pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                                        wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                                        xr >>
 
 HandOverList(self) == /\ pc[self] = "HandOverList"
                       /\ IF fst[he[self]][0].hi = hsq[self] + 1
@@ -4447,44 +4039,41 @@ HandOverList(self) == /\ pc[self] = "HandOverList"
                             ELSE /\ TRUE
                                  /\ fst' = fst
                       /\ pc' = [pc EXCEPT ![self] = "HelperLeave"]
-                      /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                      lkO, sep, res, nst, nnx, nbl, nro, nbe, 
+                      /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                      nnx, nbl, nro, nbe, fil, inlist, sub, 
                                       cell, nalloc, pool, ninc, plk, tid, pinc, 
                                       bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                      cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                      rok, opi, afr, acl, detaching, adv, errs, 
-                                      stack, which, ah, aseen, rt, pk, ph, pt, 
-                                      pe, ai, am, ac, tf, tacc, tcache, tnx, 
+                                      cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                      afr, acl, detaching, adv, errs, stack, 
+                                      ah, aseen, rt, tf, tacc, tcache, tnx, 
                                       trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
                                       twas, tloc, tlc, dwas, dl, ce, ix, dt, 
                                       dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
                                       spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                                       hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                                      rf, rr, rsk, rmx, ri, rl, rmin, radj, 
-                                      rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
-                                      ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                      wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                                      xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                      rf, rr, rpad, rmx, ri, rl, rmin, radj, 
+                                      rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                      ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                                      lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                                      fl2, xf, xl, xx, xr >>
 
 HT12(self) == /\ pc[self] = "HT12"
               /\ hol' = [hol EXCEPT ![self] = res[he[self]].lo]
               /\ pc' = [pc EXCEPT ![self] = "HT12b"]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                              held, lvl, gdep, rv, rok, opi, afr, acl, 
-                              detaching, adv, errs, stack, which, ah, aseen, 
-                              rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                              lvl, rv, rok, opi, afr, acl, detaching, adv, 
+                              errs, stack, ah, aseen, rt, tf, tacc, tcache, 
                               tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
                               twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
                               tg, kl, kt, swas, spe, ssq, sfi, spr, sce, sex, 
                               sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                              hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                              radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
-                              ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                              nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                              xcap, xu, xr, xph, xpt >>
+                              hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                              radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                              ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                              la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 HT12b(self) == /\ pc[self] = "HT12b"
                /\ IF MutHelpFollows /\ hol[self] = INV
@@ -4499,82 +4088,100 @@ HT12b(self) == /\ pc[self] = "HT12b"
                                 ELSE /\ hol' = [hol EXCEPT ![self] = 0]
                                      /\ pc' = [pc EXCEPT ![self] = "HelperLeave"]
                           /\ hh' = hh
-               /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                               fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+               /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                               nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                               bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                               held, lvl, gdep, rv, rok, opi, afr, acl, 
-                               detaching, adv, errs, stack, which, ah, aseen, 
-                               rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
+                               bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, 
+                               held, lvl, rv, rok, opi, afr, acl, detaching, 
+                               adv, errs, stack, ah, aseen, rt, tf, tacc, 
                                tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
                                tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
                                sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
                                sex, sre, sps, hm, hmx, hx, he, hme, hsq, hce, 
-                               hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                               radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
-                               ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                               nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                               xcap, xu, xr, xph, xpt >>
+                               hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                               radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                               ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                               la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                               xr >>
 
 HT12c(self) == /\ pc[self] = "HT12c"
                /\ IF sep[he[self]][0].hi = hsq[self]
                      THEN /\ pc' = [pc EXCEPT ![self] = "HelpPass"]
                      ELSE /\ pc' = [pc EXCEPT ![self] = "HelperLeave"]
-               /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                               fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+               /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                               nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                               bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                               held, lvl, gdep, rv, rok, opi, afr, acl, 
-                               detaching, adv, errs, stack, which, ah, aseen, 
-                               rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
+                               bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, 
+                               held, lvl, rv, rok, opi, afr, acl, detaching, 
+                               adv, errs, stack, ah, aseen, rt, tf, tacc, 
                                tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
                                tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
                                sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
                                sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                               hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                               rl, rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, 
-                               ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                               wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                               xx, xcap, xu, xr, xph, xpt >>
+                               hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                               rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                               rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                               lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                               xl, xx, xr >>
 
 HelperLeave(self) == /\ pc[self] = "HelperLeave"
-                     /\ /\ fst' = [fst EXCEPT ![hme[self]][2].lo = INV]
-                        /\ hol' = [hol EXCEPT ![self] = fst[hme[self]][2].lo]
-                     /\ IF hol'[self] \notin {NULL, INV}
-                           THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
-                                                                            pc        |->  "HT20",
-                                                                            tdo       |->  tdo[self],
-                                                                            twas      |->  twas[self],
-                                                                            tloc      |->  tloc[self],
-                                                                            tlc       |->  tlc[self],
-                                                                            tt        |->  tt[self] ] >>
-                                                                        \o stack[self]]
-                                   /\ tt' = [tt EXCEPT ![self] = hol'[self]]
-                                /\ tdo' = [tdo EXCEPT ![self] = FALSE]
-                                /\ twas' = [twas EXCEPT ![self] = FALSE]
-                                /\ tloc' = [tloc EXCEPT ![self] = NULL]
-                                /\ tlc' = [tlc EXCEPT ![self] = 0]
-                                /\ pc' = [pc EXCEPT ![self] = "TC1"]
-                           ELSE /\ pc' = [pc EXCEPT ![self] = "HT20"]
-                                /\ UNCHANGED << stack, tt, tdo, twas, tloc, 
-                                                tlc >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, sep, res, nst, nnx, nbl, nro, nbe, 
+                     /\ sep' = [sep EXCEPT ![hme[self]][2].lo = TagV(sep[hme[self]][2].lo)]
+                     /\ pc' = [pc EXCEPT ![self] = "HelperLeave2"]
+                     /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, 
+                                     nnx, nbl, nro, nbe, fil, inlist, sub, 
                                      cell, nalloc, pool, ninc, plk, tid, pinc, 
                                      bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                     cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                     rok, opi, afr, acl, detaching, adv, errs, 
-                                     which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                                     am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                     di, fl, fc, fnx, fci, dwas, dl, ce, ix, 
-                                     dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                     sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                                     he, hme, hh, hsq, hce, hoh, hps, hep, rf, 
-                                     rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                     rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                                     pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                     nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                     xx, xcap, xu, xr, xph, xpt >>
+                                     cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                     afr, acl, detaching, adv, errs, stack, ah, 
+                                     aseen, rt, tf, tacc, tcache, tnx, trf, dn, 
+                                     di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                                     tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, 
+                                     kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                                     sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                                     hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                                     rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                     rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                     ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                     la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                     xx, xr >>
+
+HelperLeave2(self) == /\ pc[self] = "HelperLeave2"
+                      /\ /\ fst' = [fst EXCEPT ![hme[self]][2].lo = INV]
+                         /\ hol' = [hol EXCEPT ![self] = fst[hme[self]][2].lo]
+                      /\ IF hol'[self] \notin {NULL, INV}
+                            THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
+                                                                             pc        |->  "HT20",
+                                                                             tdo       |->  tdo[self],
+                                                                             twas      |->  twas[self],
+                                                                             tloc      |->  tloc[self],
+                                                                             tlc       |->  tlc[self],
+                                                                             tt        |->  tt[self] ] >>
+                                                                         \o stack[self]]
+                                    /\ tt' = [tt EXCEPT ![self] = hol'[self]]
+                                 /\ tdo' = [tdo EXCEPT ![self] = FALSE]
+                                 /\ twas' = [twas EXCEPT ![self] = FALSE]
+                                 /\ tloc' = [tloc EXCEPT ![self] = NULL]
+                                 /\ tlc' = [tlc EXCEPT ![self] = 0]
+                                 /\ pc' = [pc EXCEPT ![self] = "TC1"]
+                            ELSE /\ pc' = [pc EXCEPT ![self] = "HT20"]
+                                 /\ UNCHANGED << stack, tt, tdo, twas, tloc, 
+                                                 tlc >>
+                      /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                      nnx, nbl, nro, nbe, fil, inlist, sub, 
+                                      cell, nalloc, pool, ninc, plk, tid, pinc, 
+                                      bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                      cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                      afr, acl, detaching, adv, errs, ah, 
+                                      aseen, rt, tf, tacc, tcache, tnx, trf, 
+                                      dn, di, fl, fc, fnx, fci, dwas, dl, ce, 
+                                      ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
+                                      ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                                      hmx, hx, he, hme, hh, hsq, hce, hoh, hps, 
+                                      hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                      radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                                      rn, ecnt, ef, el, ewas, pce, pa, pl, ul, 
+                                      lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                                      ff, fl2, xf, xl, xx, xr >>
 
 HT20(self) == /\ pc[self] = "HT20"
               /\ IF flst[self] # NULL
@@ -4606,120 +4213,118 @@ HT20(self) == /\ pc[self] = "HT20"
                          /\ hme' = [hme EXCEPT ![self] = Head(stack[self]).hme]
                          /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                          /\ UNCHANGED << dwas, dl >>
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                              held, lvl, gdep, rv, rok, opi, afr, acl, 
-                              detaching, adv, errs, which, ah, aseen, rt, pk, 
-                              ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                              trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                              tloc, tlc, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                              spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                              hx, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                              lvl, rv, rok, opi, afr, acl, detaching, adv, 
+                              errs, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                              dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                              tlc, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
+                              ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
+                              rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                              rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                              pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                              nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 HelpThread(self) == HT1(self) \/ HT2(self) \/ HT3(self) \/ HT4(self)
                        \/ HelpPass(self) \/ HT6(self) \/ HT7(self)
                        \/ HT10(self) \/ HandOverEpoch(self)
                        \/ HandOverEpoch2(self) \/ HandOverEpoch3(self)
                        \/ HandOverList(self) \/ HT12(self) \/ HT12b(self)
-                       \/ HT12c(self) \/ HelperLeave(self) \/ HT20(self)
+                       \/ HT12c(self) \/ HelperLeave(self)
+                       \/ HelperLeave2(self) \/ HT20(self)
 
 TR1(self) == /\ pc[self] = "TR1"
              /\ /\ radj' = [radj EXCEPT ![self] = - BIAS]
-                /\ ri' = [ri EXCEPT ![self] = NextTid(-1, rsk[self])]
+                /\ rf0' = [rf0 EXCEPT ![self] = rf[self]]
+                /\ ri' = [ri EXCEPT ![self] = 0]
                 /\ rl' = [rl EXCEPT ![self] = rf[self]]
                 /\ rmin' = [rmin EXCEPT ![self] = nbe[rr[self]]]
                 /\ rmx' = [rmx EXCEPT ![self] = ntid]
              /\ IF ri'[self] >= rmx'[self]
-                   THEN /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                   THEN /\ pc' = [pc EXCEPT ![self] = "TN1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TS2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rprv, rsi, rsj, rlate, rn, ecnt, ef, el, 
-                             ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rprv, rsi, rsj, rlate, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 TS2(self) == /\ pc[self] = "TS2"
              /\ IF fst[ri[self]][0].lo = INV
                    THEN /\ pc' = [pc EXCEPT ![self] = "TG1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TS3"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TS3(self) == /\ pc[self] = "TS3"
              /\ IF fst[ri[self]][0].hi % 2 = 1
                    THEN /\ pc' = [pc EXCEPT ![self] = "TG1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TS4"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TS4(self) == /\ pc[self] = "TS4"
              /\ IF sep[ri[self]][0].lo < rmin[self]
                    THEN /\ pc' = [pc EXCEPT ![self] = "TG1"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TS5"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TS5(self) == /\ pc[self] = "TS5"
              /\ IF sep[ri[self]][0].hi % 2 = 1
                    THEN /\ pc' = [pc EXCEPT ![self] = "TG1"]
-                        /\ UNCHANGED << nnx, rok, stack, rf, rr, rsk, rmx, ri, 
-                                        rl, rmin, radj, rprv, rsi, rsj, rlate >>
-                   ELSE /\ IF rl[self] = rr[self]
+                        /\ UNCHANGED << nst, nnx, nbl, nro, nbe, fil, nalloc, 
+                                        rok, stack, rf, rr, rpad, rmx, ri, rl, 
+                                        rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                        rbh >>
+                   ELSE /\ IF rl[self] = rr[self] /\ ~rpad[self]
                               THEN /\ rok' = [rok EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                    /\ rmx' = [rmx EXCEPT ![self] = Head(stack[self]).rmx]
@@ -4731,67 +4336,85 @@ TS5(self) == /\ pc[self] = "TS5"
                                    /\ rsi' = [rsi EXCEPT ![self] = Head(stack[self]).rsi]
                                    /\ rsj' = [rsj EXCEPT ![self] = Head(stack[self]).rsj]
                                    /\ rlate' = [rlate EXCEPT ![self] = Head(stack[self]).rlate]
+                                   /\ rf0' = [rf0 EXCEPT ![self] = Head(stack[self]).rf0]
+                                   /\ rbh' = [rbh EXCEPT ![self] = Head(stack[self]).rbh]
                                    /\ rf' = [rf EXCEPT ![self] = Head(stack[self]).rf]
                                    /\ rr' = [rr EXCEPT ![self] = Head(stack[self]).rr]
-                                   /\ rsk' = [rsk EXCEPT ![self] = Head(stack[self]).rsk]
+                                   /\ rpad' = [rpad EXCEPT ![self] = Head(stack[self]).rpad]
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                   /\ nnx' = nnx
-                              ELSE /\ /\ nnx' = [nnx EXCEPT ![rl[self]] = Info(ri[self], 0)]
-                                      /\ rl' = [rl EXCEPT ![self] = nro[rl[self]]]
-                                      /\ rlate' = [rlate EXCEPT ![self] = rlate[self] \cup (IF \E tk \in detaching[ri[self]] : tk[2] = fst[ri[self]][0].hi
-                                                                                            THEN {ri[self]} ELSE {})]
+                                   /\ UNCHANGED << nst, nnx, nbl, nro, nbe, 
+                                                   fil, nalloc >>
+                              ELSE /\ IF rl[self] = rr[self]
+                                         THEN /\ Assert(nalloc < MaxNodes, 
+                                                        "Failure of assertion at line 361, column 5 of macro called at line 956, column 9.")
+                                              /\ /\ fil' = [fil EXCEPT ![nalloc + 1] = TRUE]
+                                                 /\ nalloc' = nalloc + 1
+                                                 /\ nbe' = [nbe EXCEPT ![nalloc + 1] = nbe[rr[self]]]
+                                                 /\ nbl' = [nbl EXCEPT ![nalloc + 1] = rr[self]]
+                                                 /\ nnx' = [nnx EXCEPT ![nalloc + 1] = Info(ri[self], 0)]
+                                                 /\ nro' = [nro EXCEPT ![nalloc + 1] = rf[self]]
+                                                 /\ nst' = [nst EXCEPT ![nalloc + 1] = "retired"]
+                                              /\ /\ rf' = [rf EXCEPT ![self] = nalloc']
+                                                 /\ rlate' = [rlate EXCEPT ![self] = rlate[self] \cup (IF \E tk \in detaching[ri[self]] : tk[2] = fst[ri[self]][0].hi
+                                                                                                       THEN {ri[self]} ELSE {})]
+                                              /\ rl' = rl
+                                         ELSE /\ /\ nnx' = [nnx EXCEPT ![rl[self]] = Info(ri[self], 0)]
+                                                 /\ rl' = [rl EXCEPT ![self] = nro[rl[self]]]
+                                                 /\ rlate' = [rlate EXCEPT ![self] = rlate[self] \cup (IF \E tk \in detaching[ri[self]] : tk[2] = fst[ri[self]][0].hi
+                                                                                                       THEN {ri[self]} ELSE {})]
+                                              /\ UNCHANGED << nst, nbl, nro, 
+                                                              nbe, fil, nalloc, 
+                                                              rf >>
                                    /\ pc' = [pc EXCEPT ![self] = "TG1"]
-                                   /\ UNCHANGED << rok, stack, rf, rr, rsk, 
-                                                   rmx, ri, rmin, radj, rprv, 
-                                                   rsi, rsj >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nro, nbe, cell, nalloc, pool, 
-                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
-                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                                   /\ UNCHANGED << rok, stack, rr, rpad, rmx, 
+                                                   ri, rmin, radj, rprv, rsi, 
+                                                   rsj, rf0, rbh >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, inlist, 
+                             sub, cell, pool, ninc, plk, tid, pinc, bfst, blst, 
+                             bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                             lvl, rv, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rn, ecnt, 
+                             ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TG1(self) == /\ pc[self] = "TG1"
              /\ IF fst[ri[self]][2].lo = INV
-                   THEN /\ ri' = [ri EXCEPT ![self] = NextTid(ri[self], rsk[self])]
+                   THEN /\ ri' = [ri EXCEPT ![self] = ri[self] + 1]
                         /\ IF ri'[self] >= rmx[self]
-                              THEN /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                              THEN /\ pc' = [pc EXCEPT ![self] = "TN1"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "TS2"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TG2"]
                         /\ ri' = ri
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, rl, rmin, radj, rprv, rsi, rsj, rlate, 
-                             rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, rl, rmin, radj, rprv, rsi, 
+                             rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 TG2(self) == /\ pc[self] = "TG2"
              /\ IF sep[ri[self]][2].lo < rmin[self]
-                   THEN /\ ri' = [ri EXCEPT ![self] = NextTid(ri[self], rsk[self])]
+                   THEN /\ ri' = [ri EXCEPT ![self] = ri[self] + 1]
                         /\ IF ri'[self] >= rmx[self]
-                              THEN /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                              THEN /\ pc' = [pc EXCEPT ![self] = "TN1"]
                               ELSE /\ pc' = [pc EXCEPT ![self] = "TS2"]
-                        /\ UNCHANGED << nnx, rok, stack, rf, rr, rsk, rmx, rl, 
-                                        rmin, radj, rprv, rsi, rsj, rlate >>
-                   ELSE /\ IF rl[self] = rr[self]
+                        /\ UNCHANGED << nst, nnx, nbl, nro, nbe, fil, nalloc, 
+                                        rok, stack, rf, rr, rpad, rmx, rl, 
+                                        rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                        rbh >>
+                   ELSE /\ IF rl[self] = rr[self] /\ ~rpad[self]
                               THEN /\ rok' = [rok EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                    /\ rmx' = [rmx EXCEPT ![self] = Head(stack[self]).rmx]
@@ -4803,34 +4426,74 @@ TG2(self) == /\ pc[self] = "TG2"
                                    /\ rsi' = [rsi EXCEPT ![self] = Head(stack[self]).rsi]
                                    /\ rsj' = [rsj EXCEPT ![self] = Head(stack[self]).rsj]
                                    /\ rlate' = [rlate EXCEPT ![self] = Head(stack[self]).rlate]
+                                   /\ rf0' = [rf0 EXCEPT ![self] = Head(stack[self]).rf0]
+                                   /\ rbh' = [rbh EXCEPT ![self] = Head(stack[self]).rbh]
                                    /\ rf' = [rf EXCEPT ![self] = Head(stack[self]).rf]
                                    /\ rr' = [rr EXCEPT ![self] = Head(stack[self]).rr]
-                                   /\ rsk' = [rsk EXCEPT ![self] = Head(stack[self]).rsk]
+                                   /\ rpad' = [rpad EXCEPT ![self] = Head(stack[self]).rpad]
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                   /\ nnx' = nnx
-                              ELSE /\ /\ nnx' = [nnx EXCEPT ![rl[self]] = Info(ri[self], 2)]
-                                      /\ ri' = [ri EXCEPT ![self] = NextTid(ri[self], rsk[self])]
-                                      /\ rl' = [rl EXCEPT ![self] = nro[rl[self]]]
-                                   /\ IF ri'[self] >= rmx[self]
-                                         THEN /\ pc' = [pc EXCEPT ![self] = "TN2"]
-                                         ELSE /\ pc' = [pc EXCEPT ![self] = "TS2"]
-                                   /\ UNCHANGED << rok, stack, rf, rr, rsk, 
-                                                   rmx, rmin, radj, rprv, rsi, 
-                                                   rsj, rlate >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nro, nbe, cell, nalloc, pool, 
+                                   /\ UNCHANGED << nst, nnx, nbl, nro, nbe, 
+                                                   fil, nalloc >>
+                              ELSE /\ IF rl[self] = rr[self]
+                                         THEN /\ Assert(nalloc < MaxNodes, 
+                                                        "Failure of assertion at line 361, column 5 of macro called at line 978, column 9.")
+                                              /\ /\ fil' = [fil EXCEPT ![nalloc + 1] = TRUE]
+                                                 /\ nalloc' = nalloc + 1
+                                                 /\ nbe' = [nbe EXCEPT ![nalloc + 1] = nbe[rr[self]]]
+                                                 /\ nbl' = [nbl EXCEPT ![nalloc + 1] = rr[self]]
+                                                 /\ nnx' = [nnx EXCEPT ![nalloc + 1] = Info(ri[self], 2)]
+                                                 /\ nro' = [nro EXCEPT ![nalloc + 1] = rf[self]]
+                                                 /\ nst' = [nst EXCEPT ![nalloc + 1] = "retired"]
+                                              /\ /\ rf' = [rf EXCEPT ![self] = nalloc']
+                                                 /\ ri' = [ri EXCEPT ![self] = ri[self] + 1]
+                                              /\ IF ri'[self] >= rmx[self]
+                                                    THEN /\ pc' = [pc EXCEPT ![self] = "TN1"]
+                                                    ELSE /\ pc' = [pc EXCEPT ![self] = "TS2"]
+                                              /\ rl' = rl
+                                         ELSE /\ /\ nnx' = [nnx EXCEPT ![rl[self]] = Info(ri[self], 2)]
+                                                 /\ ri' = [ri EXCEPT ![self] = ri[self] + 1]
+                                                 /\ rl' = [rl EXCEPT ![self] = nro[rl[self]]]
+                                              /\ IF ri'[self] >= rmx[self]
+                                                    THEN /\ pc' = [pc EXCEPT ![self] = "TN1"]
+                                                    ELSE /\ pc' = [pc EXCEPT ![self] = "TS2"]
+                                              /\ UNCHANGED << nst, nbl, nro, 
+                                                              nbe, fil, nalloc, 
+                                                              rf >>
+                                   /\ UNCHANGED << rok, stack, rr, rpad, rmx, 
+                                                   rmin, radj, rprv, rsi, rsj, 
+                                                   rlate, rf0, rbh >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, inlist, 
+                             sub, cell, pool, ninc, plk, tid, pinc, bfst, blst, 
+                             bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                             lvl, rv, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rn, ecnt, 
+                             ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+TN1(self) == /\ pc[self] = "TN1"
+             /\ IF rf[self] # rf0[self]
+                   THEN /\ nbl' = [nbl EXCEPT ![rr[self]] = RNODE(rf[self])]
+                   ELSE /\ TRUE
+                        /\ nbl' = nbl
+             /\ pc' = [pc EXCEPT ![self] = "TN2"]
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
-                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 TN2(self) == /\ pc[self] = "TN2"
              /\ IF rf[self] = rl[self]
@@ -4846,21 +4509,20 @@ TN2(self) == /\ pc[self] = "TN2"
                                       /\ rsj' = [rsj EXCEPT ![self] = InfoIx(nnx[rf[self]])]
                                    /\ pc' = [pc EXCEPT ![self] = "TN3"]
                                    /\ rf' = rf
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rr, rsk, 
-                             rmx, ri, rl, rmin, radj, rprv, rlate, rn, ecnt, 
-                             ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                             wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                             xx, xcap, xu, xr, xph, xpt >>
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rr, rpad, 
+                             rmx, ri, rl, rmin, radj, rprv, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                             lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                             xx, xr >>
 
 TN3(self) == /\ pc[self] = "TN3"
              /\ IF sep[rsi[self]][rsj[self]].lo < rmin[self]
@@ -4868,87 +4530,89 @@ TN3(self) == /\ pc[self] = "TN3"
                         /\ pc' = [pc EXCEPT ![self] = "TN2"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "TN4"]
                         /\ rf' = rf
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                             rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 TN4(self) == /\ pc[self] = "TN4"
              /\ /\ errs' = (errs \cup (IF rsj[self] = 0 /\ rsi[self] \in rlate[self] /\ \E tk \in detaching[rsi[self]] : tk[2] = fst[rsi[self]][0].hi
                                        THEN {"late_insert"} ELSE {}))
                 /\ fst' = [fst EXCEPT ![rsi[self]][rsj[self]].lo = rf[self]]
+                /\ inlist' = [inlist EXCEPT ![rf[self]] = TRUE]
                 /\ rprv' = [rprv EXCEPT ![self] = fst[rsi[self]][rsj[self]].lo]
              /\ IF rprv'[self] = NULL
-                   THEN /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
-                           /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
-                        /\ pc' = [pc EXCEPT ![self] = "TN2"]
-                   ELSE /\ IF rprv'[self] = INV
-                              THEN /\ pc' = [pc EXCEPT ![self] = "InsertRollback"]
-                              ELSE /\ pc' = [pc EXCEPT ![self] = "TL1"]
+                   THEN /\ rbh' = [rbh EXCEPT ![self] = NULL]
+                        /\ pc' = [pc EXCEPT ![self] = "TN5"]
                         /\ UNCHANGED << rf, radj >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
-                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, stack, 
-                             which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                   ELSE /\ IF rprv'[self] = INV /\ MutNoRollback
+                              THEN /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
+                                      /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
+                                   /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                              ELSE /\ IF rprv'[self] = INV
+                                         THEN /\ pc' = [pc EXCEPT ![self] = "InsertRollback"]
+                                         ELSE /\ pc' = [pc EXCEPT ![self] = "TL1"]
+                                   /\ UNCHANGED << rf, radj >>
+                        /\ rbh' = rbh
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, nbl, 
+                             nro, nbe, fil, sub, cell, nalloc, pool, ninc, plk, 
+                             tid, pinc, bfst, blst, bcnt, acnt, plc, flst, 
+                             lcnt, cep, cbe, inr, held, lvl, rv, rok, opi, afr, 
+                             acl, detaching, adv, stack, ah, aseen, rt, tf, 
+                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
+                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rr, rsk, rmx, ri, rl, 
-                             rmin, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             hce, hol, hoh, hps, hep, rr, rpad, rmx, ri, rl, 
+                             rmin, rsi, rsj, rlate, rf0, rn, ecnt, ef, el, 
+                             ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                             wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 InsertRollback(self) == /\ pc[self] = "InsertRollback"
                         /\ IF fst[rsi[self]][rsj[self]].lo = rf[self]
                               THEN /\ /\ fst' = [fst EXCEPT ![rsi[self]][rsj[self]].lo = INV]
+                                      /\ inlist' = [inlist EXCEPT ![rf[self]] = FALSE]
                                       /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
                                    /\ radj' = radj
                               ELSE /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
                                       /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
-                                   /\ fst' = fst
+                                   /\ UNCHANGED << fst, inlist >>
                         /\ pc' = [pc EXCEPT ![self] = "TN2"]
-                        /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, 
-                                        lkT, lkO, sep, res, nst, nnx, nbl, nro, 
-                                        nbe, cell, nalloc, pool, ninc, plk, 
-                                        tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                                        flst, lcnt, cep, dep, cbe, inr, held, 
-                                        lvl, gdep, rv, rok, opi, afr, acl, 
-                                        detaching, adv, errs, stack, which, ah, 
-                                        aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                                        tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                                        fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                                        dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                        kt, swas, spe, ssq, sfi, spr, sce, sex, 
+                        /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, 
+                                        nst, nnx, nbl, nro, nbe, fil, sub, 
+                                        cell, nalloc, pool, ninc, plk, tid, 
+                                        pinc, bfst, blst, bcnt, acnt, plc, 
+                                        flst, lcnt, cep, cbe, inr, held, lvl, 
+                                        rv, rok, opi, afr, acl, detaching, adv, 
+                                        errs, stack, ah, aseen, rt, tf, tacc, 
+                                        tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                        fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                        dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                                        swas, spe, ssq, sfi, spr, sce, sex, 
                                         sre, sps, hm, hmx, hx, he, hme, hh, 
-                                        hsq, hce, hol, hoh, hps, hep, rr, rsk, 
+                                        hsq, hce, hol, hoh, hps, hep, rr, rpad, 
                                         rmx, ri, rl, rmin, rprv, rsi, rsj, 
-                                        rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                        lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                                        fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                                        xx, xcap, xu, xr, xph, xpt >>
+                                        rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                        ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                        la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                                        xl, xx, xr >>
 
 TL1(self) == /\ pc[self] = "TL1"
              /\ errs' = (errs \cup Bad({rf[self]}))
              /\ IF nnx[rf[self]] = NULL
                    THEN /\ /\ nnx' = [nnx EXCEPT ![rf[self]] = rprv[self]]
-                           /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
-                           /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
-                        /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                           /\ rbh' = [rbh EXCEPT ![self] = rprv[self]]
+                        /\ pc' = [pc EXCEPT ![self] = "TN5"]
                         /\ UNCHANGED << stack, tf, tacc, tcache, tnx, trf >>
                    ELSE /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
                                                                     pc        |->  "TL2",
@@ -4964,21 +4628,20 @@ TL1(self) == /\ pc[self] = "TL1"
                         /\ tnx' = [tnx EXCEPT ![self] = NULL]
                         /\ trf' = [trf EXCEPT ![self] = NULL]
                         /\ pc' = [pc EXCEPT ![self] = "TV1"]
-                        /\ UNCHANGED << nnx, rf, radj >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nro, nbe, cell, nalloc, pool, 
+                        /\ UNCHANGED << nnx, rbh >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, which, ah, 
-                             aseen, rt, pk, ph, pt, pe, ai, am, ac, dn, di, fl, 
-                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rr, rsk, 
-                             rmx, ri, rl, rmin, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, ah, aseen, rt, dn, 
+                             di, fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
+                             dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                             spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
+                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                             rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                             ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
 
 TL2(self) == /\ pc[self] = "TL2"
              /\ /\ fl' = [fl EXCEPT ![self] = rv[self]]
@@ -4993,51 +4656,111 @@ TL2(self) == /\ pc[self] = "TL2"
              /\ fnx' = [fnx EXCEPT ![self] = NULL]
              /\ fci' = [fci EXCEPT ![self] = 0]
              /\ pc' = [pc EXCEPT ![self] = "FB1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, tt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, tt, 
                              tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
                              sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 TL3(self) == /\ pc[self] = "TL3"
-             /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
-                /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
+             /\ /\ rbh' = [rbh EXCEPT ![self] = NULL]
                 /\ rv' = [rv EXCEPT ![self] = 0]
-             /\ pc' = [pc EXCEPT ![self] = "TN2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ pc' = [pc EXCEPT ![self] = "TN5"]
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rok, opi, afr, acl, detaching, adv, errs, stack, 
+                             ah, aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
+                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
+                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
+                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
+                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                             ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
+
+TN5(self) == /\ pc[self] = "TN5"
+             /\ IF MutNoInsertRecheck \/ sep[rsi[self]][rsj[self]].lo >= 0
+                   THEN /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
+                           /\ rbh' = [rbh EXCEPT ![self] = NULL]
+                           /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
+                        /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "TN6"]
+                        /\ UNCHANGED << rf, radj, rbh >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rr, rpad, rmx, ri, rl, rmin, rprv, rsi, rsj, 
+                             rlate, rf0, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                             ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
+
+TN6(self) == /\ pc[self] = "TN6"
+             /\ IF fst[rsi[self]][rsj[self]].lo = rf[self]
+                   THEN /\ /\ fst' = [fst EXCEPT ![rsi[self]][rsj[self]].lo = INV]
+                           /\ inlist' = [inlist EXCEPT ![rf[self]] = FALSE]
+                        /\ IF rbh[self] # NULL
+                              THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                               pc        |->  "TN7",
+                                                                               tnx       |->  tnx[self],
+                                                                               trf       |->  trf[self],
+                                                                               tf        |->  tf[self],
+                                                                               tacc      |->  tacc[self],
+                                                                               tcache    |->  tcache[self] ] >>
+                                                                           \o stack[self]]
+                                      /\ tacc' = [tacc EXCEPT ![self] = NULL]
+                                      /\ tcache' = [tcache EXCEPT ![self] = 0]
+                                      /\ tf' = [tf EXCEPT ![self] = rbh[self]]
+                                   /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                                   /\ trf' = [trf EXCEPT ![self] = NULL]
+                                   /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "TN7"]
+                                   /\ UNCHANGED << stack, tf, tacc, tcache, 
+                                                   tnx, trf >>
+                        /\ UNCHANGED << rf, radj, rbh >>
+                   ELSE /\ /\ radj' = [radj EXCEPT ![self] = radj[self] + 1]
+                           /\ rbh' = [rbh EXCEPT ![self] = NULL]
+                           /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
+                        /\ pc' = [pc EXCEPT ![self] = "TN2"]
+                        /\ UNCHANGED << fst, inlist, stack, tf, tacc, tcache, 
+                                        tnx, trf >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, nbl, 
+                             nro, nbe, fil, sub, cell, nalloc, pool, ninc, plk, 
+                             tid, pinc, bfst, blst, bcnt, acnt, plc, flst, 
+                             lcnt, cep, cbe, inr, held, lvl, rv, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, dn, di, 
                              fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                              dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
                              ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
                              he, hme, hh, hsq, hce, hol, hoh, hps, hep, rr, 
-                             rsk, rmx, ri, rl, rmin, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, rprv, rsi, rsj, rlate, 
+                             rf0, rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
-TF1(self) == /\ pc[self] = "TF1"
-             /\ errs' = (errs \cup Bad({rr[self]}))
-             /\ IF nro[rr[self]] + radj[self] = 0
-                   THEN /\ /\ nnx' = [nnx EXCEPT ![rr[self]] = NULL]
-                           /\ nro' = [nro EXCEPT ![rr[self]] = 0]
-                        /\ /\ fl' = [fl EXCEPT ![self] = rr[self]]
+TN7(self) == /\ pc[self] = "TN7"
+             /\ IF rbh[self] # NULL
+                   THEN /\ /\ fl' = [fl EXCEPT ![self] = rv[self]]
                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "FreeBatch",
-                                                                    pc        |->  "TF2",
+                                                                    pc        |->  "TN8",
                                                                     fc        |->  fc[self],
                                                                     fnx       |->  fnx[self],
                                                                     fci       |->  fci[self],
@@ -5047,38 +4770,107 @@ TF1(self) == /\ pc[self] = "TF1"
                         /\ fnx' = [fnx EXCEPT ![self] = NULL]
                         /\ fci' = [fci EXCEPT ![self] = 0]
                         /\ pc' = [pc EXCEPT ![self] = "FB1"]
-                        /\ UNCHANGED << rok, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                        radj, rprv, rsi, rsj, rlate >>
-                   ELSE /\ /\ nro' = [nro EXCEPT ![rr[self]] = nro[rr[self]] + radj[self]]
-                           /\ rok' = [rok EXCEPT ![self] = TRUE]
-                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ rmx' = [rmx EXCEPT ![self] = Head(stack[self]).rmx]
-                        /\ ri' = [ri EXCEPT ![self] = Head(stack[self]).ri]
-                        /\ rl' = [rl EXCEPT ![self] = Head(stack[self]).rl]
-                        /\ rmin' = [rmin EXCEPT ![self] = Head(stack[self]).rmin]
-                        /\ radj' = [radj EXCEPT ![self] = Head(stack[self]).radj]
-                        /\ rprv' = [rprv EXCEPT ![self] = Head(stack[self]).rprv]
-                        /\ rsi' = [rsi EXCEPT ![self] = Head(stack[self]).rsi]
-                        /\ rsj' = [rsj EXCEPT ![self] = Head(stack[self]).rsj]
-                        /\ rlate' = [rlate EXCEPT ![self] = Head(stack[self]).rlate]
-                        /\ rf' = [rf EXCEPT ![self] = Head(stack[self]).rf]
-                        /\ rr' = [rr EXCEPT ![self] = Head(stack[self]).rr]
-                        /\ rsk' = [rsk EXCEPT ![self] = Head(stack[self]).rsk]
-                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                        /\ UNCHANGED << nnx, fl, fc, fnx, fci >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nbl, nbe, cell, nalloc, pool, ninc, 
-                             plk, tid, pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                             lcnt, cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                             opi, afr, acl, detaching, adv, which, ah, aseen, 
-                             rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-                             tnx, trf, dn, di, tt, tdo, twas, tloc, tlc, dwas, 
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "TN8"]
+                        /\ UNCHANGED << stack, fl, fc, fnx, fci >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
+
+TN8(self) == /\ pc[self] = "TN8"
+             /\ /\ rbh' = [rbh EXCEPT ![self] = NULL]
+                /\ rf' = [rf EXCEPT ![self] = nro[rf[self]]]
+                /\ rv' = [rv EXCEPT ![self] = 0]
+             /\ pc' = [pc EXCEPT ![self] = "TN2"]
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rok, opi, afr, acl, detaching, adv, errs, stack, 
+                             ah, aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, 
+                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
                              dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
                              ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                             ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
+
+TF1(self) == /\ pc[self] = "TF1"
+             /\ errs' = (errs \cup Bad({rr[self]}))
+             /\ IF MutFillerEarly /\ \E n \in Nodes : fil[n] /\ nbl[n] = rr[self] /\ nst[n] = "retired"
+                   THEN /\ \E n \in {m \in Nodes : fil[m] /\ nbl[m] = rr[self] /\ nst[m] = "retired"}:
+                             /\ ~MutPoolLock \/ plk = 0
+                             /\ /\ nbe' = [nbe EXCEPT ![n] = IF PoolLink = "birth" THEN UNC ELSE nbe[n]]
+                                /\ nnx' = [nnx EXCEPT ![n] = IF PoolLink = "next" THEN (IF pool = {} THEN NULL ELSE MinOf(pool)) ELSE nnx[n]]
+                                /\ nst' = [nst EXCEPT ![n] = "freed"]
+                                /\ pool' = (IF Recycle /\ ~fil[n] THEN pool \cup {n} ELSE pool)
+                        /\ pc' = [pc EXCEPT ![self] = "TF1"]
+                        /\ UNCHANGED << nro, sub, rok, stack, fl, fc, fnx, fci, 
+                                        rf, rr, rpad, rmx, ri, rl, rmin, radj, 
+                                        rprv, rsi, rsj, rlate, rf0, rbh >>
+                   ELSE /\ IF nro[rr[self]] + radj[self] = 0
+                              THEN /\ /\ nnx' = [nnx EXCEPT ![rr[self]] = NULL]
+                                      /\ nro' = [nro EXCEPT ![rr[self]] = 0]
+                                      /\ sub' = [sub EXCEPT ![rr[self]] = TRUE]
+                                   /\ /\ fl' = [fl EXCEPT ![self] = rr[self]]
+                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "FreeBatch",
+                                                                               pc        |->  "TF2",
+                                                                               fc        |->  fc[self],
+                                                                               fnx       |->  fnx[self],
+                                                                               fci       |->  fci[self],
+                                                                               fl        |->  fl[self] ] >>
+                                                                           \o stack[self]]
+                                   /\ fc' = [fc EXCEPT ![self] = NULL]
+                                   /\ fnx' = [fnx EXCEPT ![self] = NULL]
+                                   /\ fci' = [fci EXCEPT ![self] = 0]
+                                   /\ pc' = [pc EXCEPT ![self] = "FB1"]
+                                   /\ UNCHANGED << rok, rf, rr, rpad, rmx, ri, 
+                                                   rl, rmin, radj, rprv, rsi, 
+                                                   rsj, rlate, rf0, rbh >>
+                              ELSE /\ /\ nro' = [nro EXCEPT ![rr[self]] = nro[rr[self]] + radj[self]]
+                                      /\ rok' = [rok EXCEPT ![self] = TRUE]
+                                      /\ sub' = [sub EXCEPT ![rr[self]] = TRUE]
+                                   /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                   /\ rmx' = [rmx EXCEPT ![self] = Head(stack[self]).rmx]
+                                   /\ ri' = [ri EXCEPT ![self] = Head(stack[self]).ri]
+                                   /\ rl' = [rl EXCEPT ![self] = Head(stack[self]).rl]
+                                   /\ rmin' = [rmin EXCEPT ![self] = Head(stack[self]).rmin]
+                                   /\ radj' = [radj EXCEPT ![self] = Head(stack[self]).radj]
+                                   /\ rprv' = [rprv EXCEPT ![self] = Head(stack[self]).rprv]
+                                   /\ rsi' = [rsi EXCEPT ![self] = Head(stack[self]).rsi]
+                                   /\ rsj' = [rsj EXCEPT ![self] = Head(stack[self]).rsj]
+                                   /\ rlate' = [rlate EXCEPT ![self] = Head(stack[self]).rlate]
+                                   /\ rf0' = [rf0 EXCEPT ![self] = Head(stack[self]).rf0]
+                                   /\ rbh' = [rbh EXCEPT ![self] = Head(stack[self]).rbh]
+                                   /\ rf' = [rf EXCEPT ![self] = Head(stack[self]).rf]
+                                   /\ rr' = [rr EXCEPT ![self] = Head(stack[self]).rr]
+                                   /\ rpad' = [rpad EXCEPT ![self] = Head(stack[self]).rpad]
+                                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                                   /\ UNCHANGED << nnx, fl, fc, fnx, fci >>
+                        /\ UNCHANGED << nst, nbe, pool >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nbl, fil, 
+                             inlist, cell, nalloc, ninc, plk, tid, pinc, bfst, 
+                             blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, 
+                             held, lvl, rv, opi, afr, acl, detaching, adv, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rn, ecnt, ef, el, ewas, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 TF2(self) == /\ pc[self] = "TF2"
              /\ rok' = [rok EXCEPT ![self] = TRUE]
@@ -5092,30 +4884,31 @@ TF2(self) == /\ pc[self] = "TF2"
              /\ rsi' = [rsi EXCEPT ![self] = Head(stack[self]).rsi]
              /\ rsj' = [rsj EXCEPT ![self] = Head(stack[self]).rsj]
              /\ rlate' = [rlate EXCEPT ![self] = Head(stack[self]).rlate]
+             /\ rf0' = [rf0 EXCEPT ![self] = Head(stack[self]).rf0]
+             /\ rbh' = [rbh EXCEPT ![self] = Head(stack[self]).rbh]
              /\ rf' = [rf EXCEPT ![self] = Head(stack[self]).rf]
              /\ rr' = [rr EXCEPT ![self] = Head(stack[self]).rr]
-             /\ rsk' = [rsk EXCEPT ![self] = Head(stack[self]).rsk]
+             /\ rpad' = [rpad EXCEPT ![self] = Head(stack[self]).rpad]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rn, ecnt, 
-                             ef, el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                             wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, 
-                             xx, xcap, xu, xr, xph, xpt >>
+                             ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TryRetire(self) == TR1(self) \/ TS2(self) \/ TS3(self) \/ TS4(self)
-                      \/ TS5(self) \/ TG1(self) \/ TG2(self) \/ TN2(self)
-                      \/ TN3(self) \/ TN4(self) \/ InsertRollback(self)
-                      \/ TL1(self) \/ TL2(self) \/ TL3(self) \/ TF1(self)
-                      \/ TF2(self)
+                      \/ TS5(self) \/ TG1(self) \/ TG2(self) \/ TN1(self)
+                      \/ TN2(self) \/ TN3(self) \/ TN4(self)
+                      \/ InsertRollback(self) \/ TL1(self) \/ TL2(self)
+                      \/ TL3(self) \/ TN5(self) \/ TN6(self) \/ TN7(self)
+                      \/ TN8(self) \/ TF1(self) \/ TF2(self)
 
 RE1(self) == /\ pc[self] = "RE1"
              /\ /\ nst' = [nst EXCEPT ![rn[self]] = "retired"]
@@ -5135,20 +4928,19 @@ RE1(self) == /\ pc[self] = "RE1"
              /\ IF MutHelpFirst \/ ecnt'[self] % RetireFreq # 0
                    THEN /\ pc' = [pc EXCEPT ![self] = "RE4"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "RE2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nnx, cell, nalloc, pool, ninc, plk, tid, 
-                             pinc, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                             held, lvl, gdep, rok, opi, afr, acl, detaching, 
-                             adv, errs, stack, which, ah, aseen, rt, pk, ph, 
-                             pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nnx, fil, 
+                             inlist, sub, cell, nalloc, pool, ninc, plk, tid, 
+                             pinc, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                             lvl, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
                              dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
                              tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
                              swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ef, el, ewas, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ef, el, ewas, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 RE2(self) == /\ pc[self] = "RE2"
              /\ IF bfst[self] = NULL
@@ -5164,8 +4956,8 @@ RE2(self) == /\ pc[self] = "RE2"
                         /\ rn' = [rn EXCEPT ![self] = Head(stack[self]).rn]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << nbl, bfst, blst, bcnt, inr, rf, rr, 
-                                        rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                        rsi, rsj, rlate >>
+                                        rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                        rsi, rsj, rlate, rf0, rbh >>
                    ELSE /\ /\ bcnt' = [bcnt EXCEPT ![self] = 0]
                            /\ bfst' = [bfst EXCEPT ![self] = NULL]
                            /\ blst' = [blst EXCEPT ![self] = NULL]
@@ -5175,8 +4967,8 @@ RE2(self) == /\ pc[self] = "RE2"
                            /\ inr' = [inr EXCEPT ![self] = TRUE]
                            /\ nbl' = [nbl EXCEPT ![blst[self]] = RNODE(bfst[self])]
                         /\ /\ rf' = [rf EXCEPT ![self] = ef'[self]]
+                           /\ rpad' = [rpad EXCEPT ![self] = FALSE]
                            /\ rr' = [rr EXCEPT ![self] = el'[self]]
-                           /\ rsk' = [rsk EXCEPT ![self] = NoSkip]
                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TryRetire",
                                                                     pc        |->  "RE3",
                                                                     rmx       |->  rmx[self],
@@ -5188,9 +4980,11 @@ RE2(self) == /\ pc[self] = "RE2"
                                                                     rsi       |->  rsi[self],
                                                                     rsj       |->  rsj[self],
                                                                     rlate     |->  rlate[self],
+                                                                    rf0       |->  rf0[self],
+                                                                    rbh       |->  rbh[self],
                                                                     rf        |->  rf[self],
                                                                     rr        |->  rr[self],
-                                                                    rsk       |->  rsk[self] ] >>
+                                                                    rpad      |->  rpad[self] ] >>
                                                                 \o stack[self]]
                         /\ rmx' = [rmx EXCEPT ![self] = 0]
                         /\ ri' = [ri EXCEPT ![self] = 0]
@@ -5201,21 +4995,21 @@ RE2(self) == /\ pc[self] = "RE2"
                         /\ rsi' = [rsi EXCEPT ![self] = 0]
                         /\ rsj' = [rsj EXCEPT ![self] = 0]
                         /\ rlate' = [rlate EXCEPT ![self] = {}]
+                        /\ rf0' = [rf0 EXCEPT ![self] = NULL]
+                        /\ rbh' = [rbh EXCEPT ![self] = NULL]
                         /\ pc' = [pc EXCEPT ![self] = "TR1"]
                         /\ UNCHANGED << errs, rn, ecnt >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, acnt, plc, flst, lcnt, cep, 
-                             dep, cbe, held, lvl, gdep, rv, rok, opi, afr, acl, 
-                             detaching, adv, which, ah, aseen, rt, pk, ph, pt, 
-                             pe, ai, am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                             di, fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                             dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                             spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                             hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                             pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                             fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                             xph, xpt >>
+                             cbe, held, lvl, rv, rok, opi, afr, acl, detaching, 
+                             adv, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, 
+                             wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 RE3(self) == /\ pc[self] = "RE3"
              /\ IF rok[self] = FALSE
@@ -5248,24 +5042,22 @@ RE3(self) == /\ pc[self] = "RE3"
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "RE4"]
                         /\ UNCHANGED << stack, rn, ecnt, ef, el, ewas >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, cell, nalloc, pool, ninc, plk, 
-                             tid, pinc, acnt, flst, lcnt, cep, dep, cbe, held, 
-                             lvl, gdep, rv, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             fil, inlist, sub, cell, nalloc, pool, ninc, plk, 
+                             tid, pinc, acnt, flst, lcnt, cep, cbe, held, lvl, 
+                             rv, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 RE4(self) == /\ pc[self] = "RE4"
              /\ acnt' = [acnt EXCEPT ![self] = (acnt[self] + 1) % EpochFreq]
-             /\ IF acnt'[self] # AdvanceAt /\ ~(plc[self] /\ ~MutNoPlacedAdvance)
+             /\ IF acnt'[self] # AdvanceAt /\ ~plc[self]
                    THEN /\ plc' = [plc EXCEPT ![self] = FALSE]
                         /\ IF MutHelpFirst /\ ecnt[self] % RetireFreq = 0
                               THEN /\ pc' = [pc EXCEPT ![self] = "RE2"]
@@ -5293,20 +5085,19 @@ RE4(self) == /\ pc[self] = "RE4"
                                    /\ pc' = [pc EXCEPT ![self] = "RE5"]
                                    /\ UNCHANGED << stack, ah, aseen >>
                         /\ UNCHANGED << rn, ecnt, ef, el, ewas >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             which, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, rt, tf, tacc, 
                              tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
                              tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
                              sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 RE5(self) == /\ pc[self] = "RE5"
              /\ /\ ewas' = [ewas EXCEPT ![self] = inr[self]]
@@ -5321,21 +5112,20 @@ RE5(self) == /\ pc[self] = "RE5"
              /\ hmx' = [hmx EXCEPT ![self] = 0]
              /\ hx' = [hx EXCEPT ![self] = 0]
              /\ pc' = [pc EXCEPT ![self] = "HR1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, held, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, held, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                             fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                             xr, xph, xpt >>
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 RE6(self) == /\ pc[self] = "RE6"
              /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
@@ -5352,20 +5142,19 @@ RE6(self) == /\ pc[self] = "RE6"
                         /\ ewas' = [ewas EXCEPT ![self] = Head(stack[self]).ewas]
                         /\ rn' = [rn EXCEPT ![self] = Head(stack[self]).rn]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
+                             acnt, plc, flst, lcnt, cep, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, errs, ah, aseen, rt, tf, 
                              tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
                              tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
                              dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 Retire(self) == RE1(self) \/ RE2(self) \/ RE3(self) \/ RE4(self)
                    \/ RE5(self) \/ RE6(self)
@@ -5375,70 +5164,189 @@ PN1(self) == /\ pc[self] = "PN1"
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
                         /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                        /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                        /\ UNCHANGED << pinc, errs, ah, aseen, ce, ix, dt, dlo >>
+                        /\ UNCHANGED << pinc, ah, aseen >>
                    ELSE /\ IF pinc[self] > 0
                               THEN /\ pinc' = [pinc EXCEPT ![self] = pinc[self] + 1]
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                                    /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
                                    /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                                   /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                   /\ UNCHANGED << errs, ah, aseen, ce, ix, dt, 
-                                                   dlo >>
-                              ELSE /\ IF ep = SkipAt(self)
-                                         THEN /\ /\ errs' = (errs \cup (IF ep # gdep[self] THEN {"pin_skips_drain"} ELSE {}))
-                                                 /\ pinc' = [pinc EXCEPT ![self] = 1]
-                                              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                              /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
-                                              /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
-                                              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                                              /\ UNCHANGED << ah, aseen, ce, 
-                                                              ix, dt, dlo >>
-                                         ELSE /\ /\ pa' = [pa EXCEPT ![self] = PinAttempts]
-                                                 /\ pce' = [pce EXCEPT ![self] = ep]
-                                                 /\ pinc' = [pinc EXCEPT ![self] = 1]
-                                              /\ IF tid[self] = NoTid
-                                                    THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
-                                                                                                  pc        |->  "PNU",
-                                                                                                  ah        |->  ah[self],
-                                                                                                  aseen     |->  aseen[self] ] >>
-                                                                                              \o stack[self]]
-                                                         /\ ah' = [ah EXCEPT ![self] = 0]
-                                                         /\ aseen' = [aseen EXCEPT ![self] = {}]
-                                                         /\ pc' = [pc EXCEPT ![self] = "AT0"]
-                                                         /\ UNCHANGED << ce, 
-                                                                         ix, 
-                                                                         dt, 
-                                                                         dlo >>
-                                                    ELSE /\ /\ ce' = [ce EXCEPT ![self] = pce'[self]]
-                                                            /\ dt' = [dt EXCEPT ![self] = tid[self]]
-                                                            /\ ix' = [ix EXCEPT ![self] = 0]
-                                                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "DoUpdate",
-                                                                                                     pc        |->  "PNC",
-                                                                                                     dlo       |->  dlo[self],
-                                                                                                     ce        |->  ce[self],
-                                                                                                     ix        |->  ix[self],
-                                                                                                     dt        |->  dt[self] ] >>
-                                                                                                 \o stack[self]]
-                                                         /\ dlo' = [dlo EXCEPT ![self] = 0]
-                                                         /\ pc' = [pc EXCEPT ![self] = "DU1"]
-                                                         /\ UNCHANGED << ah, 
-                                                                         aseen >>
-                                              /\ errs' = errs
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                                   /\ UNCHANGED << ah, aseen >>
+                              ELSE /\ pinc' = [pinc EXCEPT ![self] = 1]
+                                   /\ IF tid[self] = NoTid
+                                         THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
+                                                                                       pc        |->  "PNE",
+                                                                                       ah        |->  ah[self],
+                                                                                       aseen     |->  aseen[self] ] >>
+                                                                                   \o stack[self]]
+                                              /\ ah' = [ah EXCEPT ![self] = 0]
+                                              /\ aseen' = [aseen EXCEPT ![self] = {}]
+                                              /\ pc' = [pc EXCEPT ![self] = "AT0"]
+                                         ELSE /\ pc' = [pc EXCEPT ![self] = "PNE"]
+                                              /\ UNCHANGED << stack, ah, aseen >>
+                                   /\ UNCHANGED << pce, pa, pl >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, which, rt, 
-                             pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                             trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                             tloc, tlc, dwas, dl, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, rt, tf, tacc, 
+                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, ul, lc, lp, lpi, le, la, uc, 
+                             wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+PNE(self) == /\ pc[self] = "PNE"
+             /\ IF MutPinSkips /\ ep = cep[self]
+                   THEN /\ rv' = [rv EXCEPT ![self] = 0]
+                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                        /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
+                        /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                        /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
+                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                        /\ sep' = sep
+                   ELSE /\ IF ~MutTagLate
+                              THEN /\ sep' = [sep EXCEPT ![tid[self]][0].lo = UntagV(sep[tid[self]][0].lo)]
+                              ELSE /\ TRUE
+                                   /\ sep' = sep
+                        /\ pc' = [pc EXCEPT ![self] = "PNX"]
+                        /\ UNCHANGED << rv, stack, pce, pa, pl >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
+                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rok, opi, 
+                             afr, acl, detaching, adv, errs, ah, aseen, rt, tf, 
+                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
+                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, ul, lc, lp, lpi, le, la, 
+                             uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+PNX(self) == /\ pc[self] = "PNX"
+             /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
+                /\ pl' = [pl EXCEPT ![self] = fst[tid[self]][0].lo]
+             /\ pc' = [pc EXCEPT ![self] = "PNX2"]
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
+                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
+                             flst, lcnt, cep, cbe, inr, held, lvl, rv, rok, 
+                             opi, afr, acl, detaching, adv, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
+
+PNX2(self) == /\ pc[self] = "PNX2"
+              /\ IF MutTagLate
+                    THEN /\ sep' = [sep EXCEPT ![tid[self]][0].lo = UntagV(sep[tid[self]][0].lo)]
+                    ELSE /\ TRUE
+                         /\ sep' = sep
+              /\ pc' = [pc EXCEPT ![self] = "PNG"]
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, 
+                              nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                              acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                              rv, rok, opi, afr, acl, detaching, adv, errs, 
+                              stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                              dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                              tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                              swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                              hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                              rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                              ewas, pce, pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                              wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+PNG(self) == /\ pc[self] = "PNG"
+             /\ pce' = [pce EXCEPT ![self] = ep]
+             /\ pc' = [pc EXCEPT ![self] = "PNT"]
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
+
+PNT(self) == /\ pc[self] = "PNT"
+             /\ IF pl[self] \notin {NULL, INV}
+                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                    pc        |->  "PNF",
+                                                                    tnx       |->  tnx[self],
+                                                                    trf       |->  trf[self],
+                                                                    tf        |->  tf[self],
+                                                                    tacc      |->  tacc[self],
+                                                                    tcache    |->  tcache[self] ] >>
+                                                                \o stack[self]]
+                           /\ tacc' = [tacc EXCEPT ![self] = flst[self]]
+                           /\ tcache' = [tcache EXCEPT ![self] = 1]
+                           /\ tf' = [tf EXCEPT ![self] = pl[self]]
+                        /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                        /\ trf' = [trf EXCEPT ![self] = NULL]
+                        /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "PNF"]
+                        /\ UNCHANGED << stack, tf, tacc, tcache, tnx, trf >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, dn, di, fl, fc, fnx, fci, tt, tdo, 
+                             twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
+                             tg, kl, kt, swas, spe, ssq, sfi, spr, sce, sex, 
+                             sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, 
+                             hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                             radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                             ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+PNF(self) == /\ pc[self] = "PNF"
+             /\ IF pce[self] = cep[self]
+                   THEN /\ /\ cbe' = [cbe EXCEPT ![self] = pce[self]]
+                           /\ rv' = [rv EXCEPT ![self] = 0]
+                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                        /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
+                        /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                        /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
+                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                   ELSE /\ pl' = [pl EXCEPT ![self] = NULL]
+                        /\ pa' = [pa EXCEPT ![self] = PinAttempts]
+                        /\ pc' = [pc EXCEPT ![self] = "PNU"]
+                        /\ UNCHANGED << cbe, rv, stack, pce >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, inr, held, lvl, rok, 
+                             opi, afr, acl, detaching, adv, errs, ah, aseen, 
+                             rt, tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                             fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                             ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                             spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                             hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, 
+                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                             rbh, rn, ecnt, ef, el, ewas, ul, lc, lp, lpi, le, 
+                             la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 PNU(self) == /\ pc[self] = "PNU"
              /\ /\ ce' = [ce EXCEPT ![self] = pce[self]]
@@ -5453,179 +5361,388 @@ PNU(self) == /\ pc[self] = "PNU"
                                                      \o stack[self]]
              /\ dlo' = [dlo EXCEPT ![self] = 0]
              /\ pc' = [pc EXCEPT ![self] = "DU1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
                              sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 PNC(self) == /\ pc[self] = "PNC"
-             /\ IF pa[self] = 1
+             /\ IF MutNoPinRecheck
                    THEN /\ rv' = [rv EXCEPT ![self] = 0]
-                        /\ /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
-                           /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
-                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SlowPath",
-                                                                    pc        |->  Head(stack[self]).pc,
-                                                                    swas      |->  swas[self],
-                                                                    spe       |->  spe[self],
-                                                                    ssq       |->  ssq[self],
-                                                                    sfi       |->  sfi[self],
-                                                                    spr       |->  spr[self],
-                                                                    sce       |->  sce[self],
-                                                                    sex       |->  sex[self],
-                                                                    sre       |->  sre[self],
-                                                                    sps       |->  sps[self] ] >>
-                                                                \o Tail(stack[self])]
-                        /\ swas' = [swas EXCEPT ![self] = FALSE]
-                        /\ spe' = [spe EXCEPT ![self] = 0]
-                        /\ ssq' = [ssq EXCEPT ![self] = 0]
-                        /\ sfi' = [sfi EXCEPT ![self] = NULL]
-                        /\ spr' = [spr EXCEPT ![self] = FALSE]
-                        /\ sce' = [sce EXCEPT ![self] = 0]
-                        /\ sex' = [sex EXCEPT ![self] = NULL]
-                        /\ sre' = [sre EXCEPT ![self] = 0]
-                        /\ sps' = [sps EXCEPT ![self] = 0]
-                        /\ pc' = [pc EXCEPT ![self] = "SP1"]
-                   ELSE /\ IF ep = rv[self]
-                              THEN /\ rv' = [rv EXCEPT ![self] = 0]
-                                   /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                                   /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
-                                   /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
-                                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-                              ELSE /\ /\ pa' = [pa EXCEPT ![self] = pa[self] - 1]
-                                      /\ pce' = [pce EXCEPT ![self] = ep]
-                                      /\ rv' = [rv EXCEPT ![self] = 0]
-                                   /\ pc' = [pc EXCEPT ![self] = "PNU"]
-                                   /\ stack' = stack
+                        /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                        /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
+                        /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                        /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
+                        /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << swas, spe, ssq, sfi, spr, sce, sex, 
                                         sre, sps >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                   ELSE /\ IF pa[self] = 1
+                              THEN /\ rv' = [rv EXCEPT ![self] = 0]
+                                   /\ /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                                      /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
+                                      /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
+                                      /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "SlowPath",
+                                                                               pc        |->  Head(stack[self]).pc,
+                                                                               swas      |->  swas[self],
+                                                                               spe       |->  spe[self],
+                                                                               ssq       |->  ssq[self],
+                                                                               sfi       |->  sfi[self],
+                                                                               spr       |->  spr[self],
+                                                                               sce       |->  sce[self],
+                                                                               sex       |->  sex[self],
+                                                                               sre       |->  sre[self],
+                                                                               sps       |->  sps[self] ] >>
+                                                                           \o Tail(stack[self])]
+                                   /\ swas' = [swas EXCEPT ![self] = FALSE]
+                                   /\ spe' = [spe EXCEPT ![self] = 0]
+                                   /\ ssq' = [ssq EXCEPT ![self] = 0]
+                                   /\ sfi' = [sfi EXCEPT ![self] = NULL]
+                                   /\ spr' = [spr EXCEPT ![self] = FALSE]
+                                   /\ sce' = [sce EXCEPT ![self] = 0]
+                                   /\ sex' = [sex EXCEPT ![self] = NULL]
+                                   /\ sre' = [sre EXCEPT ![self] = 0]
+                                   /\ sps' = [sps EXCEPT ![self] = 0]
+                                   /\ pc' = [pc EXCEPT ![self] = "SP1"]
+                              ELSE /\ IF ep = rv[self]
+                                         THEN /\ rv' = [rv EXCEPT ![self] = 0]
+                                              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                              /\ pce' = [pce EXCEPT ![self] = Head(stack[self]).pce]
+                                              /\ pa' = [pa EXCEPT ![self] = Head(stack[self]).pa]
+                                              /\ pl' = [pl EXCEPT ![self] = Head(stack[self]).pl]
+                                              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                                         ELSE /\ /\ pa' = [pa EXCEPT ![self] = pa[self] - 1]
+                                                 /\ pce' = [pce EXCEPT ![self] = ep]
+                                                 /\ rv' = [rv EXCEPT ![self] = 0]
+                                              /\ pc' = [pc EXCEPT ![self] = "PNU"]
+                                              /\ UNCHANGED << stack, pl >>
+                                   /\ UNCHANGED << swas, spe, ssq, sfi, spr, 
+                                                   sce, sex, sre, sps >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
-Pin(self) == PN1(self) \/ PNU(self) \/ PNC(self)
+Pin(self) == PN1(self) \/ PNE(self) \/ PNX(self) \/ PNX2(self) \/ PNG(self)
+                \/ PNT(self) \/ PNF(self) \/ PNU(self) \/ PNC(self)
 
 UP1(self) == /\ pc[self] = "UP1"
              /\ held' = [held EXCEPT ![self] = {h \in held[self] : h[2] # lvl[self]}]
              /\ IF NoHandle(self)
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                        /\ ul' = [ul EXCEPT ![self] = Head(stack[self]).ul]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ pinc' = pinc
-                   ELSE /\ IF pinc[self] = 1 /\ cep[self] = UNC
-                              THEN /\ pinc' = [pinc EXCEPT ![self] = IF MutUnnested THEN 0 ELSE 1]
-                                   /\ pc' = [pc EXCEPT ![self] = "UP2"]
-                                   /\ stack' = stack
+                   ELSE /\ IF pinc[self] = 1 \/ (MutLeavePinned /\ pinc[self] > 1)
+                              THEN /\ pinc' = [pinc EXCEPT ![self] = pinc[self] - 1]
+                                   /\ IF MutNoLeave
+                                         THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                              /\ ul' = [ul EXCEPT ![self] = Head(stack[self]).ul]
+                                              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                                         ELSE /\ IF MutDrainFirst
+                                                    THEN /\ pc' = [pc EXCEPT ![self] = "LeaveActive"]
+                                                    ELSE /\ pc' = [pc EXCEPT ![self] = "LeaveMark"]
+                                              /\ UNCHANGED << stack, ul >>
                               ELSE /\ pinc' = [pinc EXCEPT ![self] = IF pinc[self] = 0 THEN 0 ELSE pinc[self] - 1]
                                    /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                                   /\ ul' = [ul EXCEPT ![self] = Head(stack[self]).ul]
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
+                             flst, lcnt, cep, cbe, inr, lvl, rv, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, tf, 
                              tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
                              tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
                              dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
                              sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, pce, pa, pl, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
-UP2(self) == /\ pc[self] = "UP2"
-             /\ /\ ce' = [ce EXCEPT ![self] = ep]
-                /\ dt' = [dt EXCEPT ![self] = tid[self]]
-                /\ ix' = [ix EXCEPT ![self] = 0]
-                /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "DoUpdate",
-                                                         pc        |->  "UP3",
-                                                         dlo       |->  dlo[self],
-                                                         ce        |->  ce[self],
-                                                         ix        |->  ix[self],
-                                                         dt        |->  dt[self] ] >>
-                                                     \o stack[self]]
-             /\ dlo' = [dlo EXCEPT ![self] = 0]
-             /\ pc' = [pc EXCEPT ![self] = "DU1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+LeaveMark(self) == /\ pc[self] = "LeaveMark"
+                   /\ /\ cep' = [cep EXCEPT ![self] = IF cep[self] = UNC THEN 0 ELSE cep[self]]
+                      /\ sep' = [sep EXCEPT ![tid[self]][0].lo = TagV(IF UntagV(sep[tid[self]][0].lo) = UNC THEN 0 ELSE UntagV(sep[tid[self]][0].lo))]
+                   /\ pc' = [pc EXCEPT ![self] = "Leave"]
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, cbe, inr, 
+                                   held, lvl, rv, rok, opi, afr, acl, 
+                                   detaching, adv, errs, stack, ah, aseen, rt, 
+                                   tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                   fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                   dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                                   spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                                   hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
+                                   hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                   radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                   ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                                   lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                                   xf, xl, xx, xr >>
 
-UP3(self) == /\ pc[self] = "UP3"
-             /\ /\ pinc' = [pinc EXCEPT ![self] = 0]
-                /\ rv' = [rv EXCEPT ![self] = 0]
-             /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-             /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
-                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
-                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+Leave(self) == /\ pc[self] = "Leave"
+               /\ ul' = [ul EXCEPT ![self] = fst[tid[self]][0].lo]
+               /\ IF MutLeaveStore
+                     THEN /\ pc' = [pc EXCEPT ![self] = "LeaveStore"]
+                          /\ UNCHANGED << fst, stack, tf, tacc, tcache, tnx, 
+                                          trf >>
+                     ELSE /\ fst' = [fst EXCEPT ![tid[self]][0].lo = INV]
+                          /\ IF ul'[self] \notin {NULL, INV}
+                                THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                                 pc        |->  "LeaveDrain",
+                                                                                 tnx       |->  tnx[self],
+                                                                                 trf       |->  trf[self],
+                                                                                 tf        |->  tf[self],
+                                                                                 tacc      |->  tacc[self],
+                                                                                 tcache    |->  tcache[self] ] >>
+                                                                             \o stack[self]]
+                                        /\ tacc' = [tacc EXCEPT ![self] = flst[self]]
+                                        /\ tcache' = [tcache EXCEPT ![self] = 1]
+                                        /\ tf' = [tf EXCEPT ![self] = ul'[self]]
+                                     /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                                     /\ trf' = [trf EXCEPT ![self] = NULL]
+                                     /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                                ELSE /\ pc' = [pc EXCEPT ![self] = "LeaveDrain"]
+                                     /\ UNCHANGED << stack, tf, tacc, tcache, 
+                                                     tnx, trf >>
+               /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, nnx, 
+                               nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                               pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                               acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                               rv, rok, opi, afr, acl, detaching, adv, errs, 
+                               ah, aseen, rt, dn, di, fl, fc, fnx, fci, tt, 
+                               tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                               sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                               sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                               hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                               rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                               rn, ecnt, ef, el, ewas, pce, pa, pl, lc, lp, 
+                               lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                               xl, xx, xr >>
 
-Unpin(self) == UP1(self) \/ UP2(self) \/ UP3(self)
+LeaveDrain(self) == /\ pc[self] = "LeaveDrain"
+                    /\ IF flst[self] # NULL
+                          THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
+                                                                           pc        |->  Head(stack[self]).pc,
+                                                                           dwas      |->  dwas[self],
+                                                                           dl        |->  dl[self] ] >>
+                                                                       \o Tail(stack[self])]
+                                  /\ ul' = [ul EXCEPT ![self] = Head(stack[self]).ul]
+                               /\ dwas' = [dwas EXCEPT ![self] = FALSE]
+                               /\ dl' = [dl EXCEPT ![self] = NULL]
+                               /\ pc' = [pc EXCEPT ![self] = "DF1"]
+                          ELSE /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                               /\ ul' = [ul EXCEPT ![self] = Head(stack[self]).ul]
+                               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                               /\ UNCHANGED << dwas, dl >>
+                    /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                    nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
+                                    cell, nalloc, pool, ninc, plk, tid, pinc, 
+                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                    cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                    afr, acl, detaching, adv, errs, ah, aseen, 
+                                    rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                                    fc, fnx, fci, tt, tdo, twas, tloc, tlc, ce, 
+                                    ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
+                                    ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
+                                    hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                                    hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, 
+                                    rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                                    ef, el, ewas, pce, pa, pl, lc, lp, lpi, le, 
+                                    la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                    xx, xr >>
+
+LeaveStore(self) == /\ pc[self] = "LeaveStore"
+                    /\ fst' = [fst EXCEPT ![tid[self]][0].lo = INV]
+                    /\ IF ul[self] \notin {NULL, INV}
+                          THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                           pc        |->  "LeaveStore2",
+                                                                           tnx       |->  tnx[self],
+                                                                           trf       |->  trf[self],
+                                                                           tf        |->  tf[self],
+                                                                           tacc      |->  tacc[self],
+                                                                           tcache    |->  tcache[self] ] >>
+                                                                       \o stack[self]]
+                                  /\ tacc' = [tacc EXCEPT ![self] = flst[self]]
+                                  /\ tcache' = [tcache EXCEPT ![self] = 1]
+                                  /\ tf' = [tf EXCEPT ![self] = ul[self]]
+                               /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                               /\ trf' = [trf EXCEPT ![self] = NULL]
+                               /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                          ELSE /\ pc' = [pc EXCEPT ![self] = "LeaveStore2"]
+                               /\ UNCHANGED << stack, tf, tacc, tcache, tnx, 
+                                               trf >>
+                    /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                    nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                    nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                    blst, bcnt, acnt, plc, flst, lcnt, cep, 
+                                    cbe, inr, held, lvl, rv, rok, opi, afr, 
+                                    acl, detaching, adv, errs, ah, aseen, rt, 
+                                    dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
+                                    tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
+                                    tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                                    sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                                    hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
+                                    rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                                    rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                                    pce, pa, pl, ul, lc, lp, lpi, le, la, uc, 
+                                    wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+LeaveStore2(self) == /\ pc[self] = "LeaveStore2"
+                     /\ pc' = [pc EXCEPT ![self] = "LeaveDrain"]
+                     /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                     nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
+                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
+                                     bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                     cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                     afr, acl, detaching, adv, errs, stack, ah, 
+                                     aseen, rt, tf, tacc, tcache, tnx, trf, dn, 
+                                     di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                                     tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, 
+                                     kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                                     sex, sre, sps, hm, hmx, hx, he, hme, hh, 
+                                     hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                                     rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                     rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                     ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                     la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                     xx, xr >>
+
+LeaveActive(self) == /\ pc[self] = "LeaveActive"
+                     /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
+                        /\ ul' = [ul EXCEPT ![self] = fst[tid[self]][0].lo]
+                     /\ IF ul'[self] \notin {NULL, INV}
+                           THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                            pc        |->  "LeaveActiveDrain",
+                                                                            tnx       |->  tnx[self],
+                                                                            trf       |->  trf[self],
+                                                                            tf        |->  tf[self],
+                                                                            tacc      |->  tacc[self],
+                                                                            tcache    |->  tcache[self] ] >>
+                                                                        \o stack[self]]
+                                   /\ tacc' = [tacc EXCEPT ![self] = flst[self]]
+                                   /\ tcache' = [tcache EXCEPT ![self] = 1]
+                                   /\ tf' = [tf EXCEPT ![self] = ul'[self]]
+                                /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                                /\ trf' = [trf EXCEPT ![self] = NULL]
+                                /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                           ELSE /\ pc' = [pc EXCEPT ![self] = "LeaveActiveDrain"]
+                                /\ UNCHANGED << stack, tf, tacc, tcache, tnx, 
+                                                trf >>
+                     /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                     nnx, nbl, nro, nbe, fil, inlist, sub, 
+                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
+                                     bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                     cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                     afr, acl, detaching, adv, errs, ah, aseen, 
+                                     rt, dn, di, fl, fc, fnx, fci, tt, tdo, 
+                                     twas, tloc, tlc, dwas, dl, ce, ix, dt, 
+                                     dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                                     spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                                     hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                                     rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                     rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, 
+                                     el, ewas, pce, pa, pl, lc, lp, lpi, le, 
+                                     la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                     xx, xr >>
+
+LeaveActiveDrain(self) == /\ pc[self] = "LeaveActiveDrain"
+                          /\ IF flst[self] # NULL
+                                THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
+                                                                              pc        |->  "LeaveLate",
+                                                                              dwas      |->  dwas[self],
+                                                                              dl        |->  dl[self] ] >>
+                                                                          \o stack[self]]
+                                     /\ dwas' = [dwas EXCEPT ![self] = FALSE]
+                                     /\ dl' = [dl EXCEPT ![self] = NULL]
+                                     /\ pc' = [pc EXCEPT ![self] = "DF1"]
+                                ELSE /\ pc' = [pc EXCEPT ![self] = "LeaveLate"]
+                                     /\ UNCHANGED << stack, dwas, dl >>
+                          /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, 
+                                          res, nst, nnx, nbl, nro, nbe, fil, 
+                                          inlist, sub, cell, nalloc, pool, 
+                                          ninc, plk, tid, pinc, bfst, blst, 
+                                          bcnt, acnt, plc, flst, lcnt, cep, 
+                                          cbe, inr, held, lvl, rv, rok, opi, 
+                                          afr, acl, detaching, adv, errs, ah, 
+                                          aseen, rt, tf, tacc, tcache, tnx, 
+                                          trf, dn, di, fl, fc, fnx, fci, tt, 
+                                          tdo, twas, tloc, tlc, ce, ix, dt, 
+                                          dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                                          sfi, spr, sce, sex, sre, sps, hm, 
+                                          hmx, hx, he, hme, hh, hsq, hce, hol, 
+                                          hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                                          rl, rmin, radj, rprv, rsi, rsj, 
+                                          rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                          ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                                          le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                                          xf, xl, xx, xr >>
+
+LeaveLate(self) == /\ pc[self] = "LeaveLate"
+                   /\ fst' = [fst EXCEPT ![tid[self]][0].lo = INV]
+                   /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
+                   /\ ul' = [ul EXCEPT ![self] = Head(stack[self]).ul]
+                   /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                   inr, held, lvl, rv, rok, opi, afr, acl, 
+                                   detaching, adv, errs, ah, aseen, rt, tf, 
+                                   tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                   fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                                   ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                                   sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
+                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
+                                   rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                   rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                   ewas, pce, pa, pl, lc, lp, lpi, le, la, uc, 
+                                   wc, wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
+
+Unpin(self) == UP1(self) \/ LeaveMark(self) \/ Leave(self)
+                  \/ LeaveDrain(self) \/ LeaveStore(self)
+                  \/ LeaveStore2(self) \/ LeaveActive(self)
+                  \/ LeaveActiveDrain(self) \/ LeaveLate(self)
 
 LD1(self) == /\ pc[self] = "LD1"
              /\ /\ lp' = [lp EXCEPT ![self] = cell[lc[self]]]
                 /\ lpi' = [lpi EXCEPT ![self] = Inc(cell[lc[self]])]
              /\ pc' = [pc EXCEPT ![self] = "LD2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 LD2(self) == /\ pc[self] = "LD2"
              /\ IF ep <= cep[self] \/ MutNoEraCheck \/ NoHandle(self)
@@ -5641,21 +5758,20 @@ LD2(self) == /\ pc[self] = "LD2"
                            /\ le' = [le EXCEPT ![self] = ep]
                         /\ pc' = [pc EXCEPT ![self] = "LD3"]
                         /\ UNCHANGED << held, stack, lc, lp, lpi >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 LD3(self) == /\ pc[self] = "LD3"
              /\ IF la[self] = 1 /\ ~MutNoEscalate
@@ -5687,40 +5803,38 @@ LD3(self) == /\ pc[self] = "LD3"
                                                  /\ sep' = [sep EXCEPT ![tid[self]][0].lo = le[self]]
                                    /\ pc' = [pc EXCEPT ![self] = "LD4"]
                                    /\ UNCHANGED << stack, ce, ix, dt, dlo >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, nbl, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, dep, cbe, inr, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, 
+                             flst, lcnt, cbe, inr, held, lvl, rv, rok, opi, 
+                             afr, acl, detaching, adv, errs, ah, aseen, rt, tf, 
                              tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
                              tt, tdo, twas, tloc, tlc, dwas, dl, sk, tg, kl, 
                              kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
                              hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, uc, wc, wn, nn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 LD4(self) == /\ pc[self] = "LD4"
              /\ /\ lp' = [lp EXCEPT ![self] = cell[lc[self]]]
                 /\ lpi' = [lpi EXCEPT ![self] = Inc(cell[lc[self]])]
              /\ pc' = [pc EXCEPT ![self] = "LD5"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
 
 LD5(self) == /\ pc[self] = "LD5"
              /\ IF ep = le[self]
@@ -5735,21 +5849,20 @@ LD5(self) == /\ pc[self] = "LD5"
                    ELSE /\ le' = [le EXCEPT ![self] = ep]
                         /\ pc' = [pc EXCEPT ![self] = "LD3"]
                         /\ UNCHANGED << held, stack, lc, lp, lpi, la >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 LD6(self) == /\ pc[self] = "LD6"
              /\ held' = [held EXCEPT ![self] = held[self] \cup Held(self, cell[lc[self]], "p", Inc(cell[lc[self]]))]
@@ -5760,21 +5873,20 @@ LD6(self) == /\ pc[self] = "LD6"
              /\ la' = [la EXCEPT ![self] = Head(stack[self]).la]
              /\ lc' = [lc EXCEPT ![self] = Head(stack[self]).lc]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                             xr >>
 
 Load(self) == LD1(self) \/ LD2(self) \/ LD3(self) \/ LD4(self) \/ LD5(self)
                  \/ LD6(self)
@@ -5784,21 +5896,20 @@ LU1(self) == /\ pc[self] = "LU1"
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
              /\ uc' = [uc EXCEPT ![self] = Head(stack[self]).uc]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, wc, wn, nn, fsv, fx, ff, fl2, xsv, 
-                             xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
 
 LoadU(self) == LU1(self)
 
@@ -5816,7 +5927,7 @@ WR1(self) == /\ pc[self] = "WR1"
                                         held, rv, errs, stack, rn, ecnt, ef, 
                                         el, ewas, wc >>
                    ELSE /\ Assert(nalloc < MaxNodes, 
-                                  "Failure of assertion at line 323, column 5 of macro called at line 1224, column 9.")
+                                  "Failure of assertion at line 351, column 5 of macro called at line 1324, column 9.")
                         /\ /\ nalloc' = nalloc + 1
                            /\ nst' = [nst EXCEPT ![nalloc + 1] = "live"]
                         /\ /\ cbe' = [cbe EXCEPT ![self] = Stamp(self)]
@@ -5851,19 +5962,18 @@ WR1(self) == /\ pc[self] = "WR1"
                                    /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                                    /\ UNCHANGED << rn, ecnt, ef, el, ewas >>
                         /\ UNCHANGED << pool, ninc, plk >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, inr, lvl, gdep, rok, opi, 
-                             afr, acl, detaching, adv, which, ah, aseen, rt, 
-                             pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                             trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                             tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                             kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                             hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, pce, pa, lc, lp, lpi, le, la, uc, 
-                             nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, fil, 
+                             inlist, sub, tid, pinc, bfst, blst, bcnt, acnt, 
+                             plc, flst, lcnt, cep, inr, lvl, rok, opi, afr, 
+                             acl, detaching, adv, ah, aseen, rt, tf, tacc, 
+                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
 
 WR2(self) == /\ pc[self] = "WR2"
              /\ IF ~MutStaleReuse
@@ -5913,20 +6023,18 @@ WR2(self) == /\ pc[self] = "WR2"
                               ELSE /\ pc' = [pc EXCEPT ![self] = "WR3"]
                                    /\ UNCHANGED << stack, rn, ecnt, ef, el, 
                                                    ewas, wn >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nalloc, pool, ninc, plk, tid, pinc, 
-                             bfst, blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                             inr, lvl, gdep, rok, opi, afr, acl, detaching, 
-                             adv, which, ah, aseen, rt, pk, ph, pt, pe, ai, am, 
-                             ac, tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
-                             fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
-                             ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
-                             spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, pce, 
-                             pa, lc, lp, lpi, le, la, uc, wc, nn, fsv, fx, ff, 
-                             fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, fil, 
+                             inlist, sub, nalloc, pool, ninc, plk, tid, pinc, 
+                             bfst, blst, bcnt, acnt, plc, flst, lcnt, cep, inr, 
+                             lvl, rok, opi, afr, acl, detaching, adv, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, pce, pa, pl, ul, lc, lp, lpi, le, 
+                             la, uc, wc, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 WR3(self) == /\ pc[self] = "WR3"
              /\ plk' = IF MutPoolLock THEN 0 ELSE plk
@@ -5934,21 +6042,20 @@ WR3(self) == /\ pc[self] = "WR3"
              /\ wn' = [wn EXCEPT ![self] = Head(stack[self]).wn]
              /\ wc' = [wc EXCEPT ![self] = Head(stack[self]).wc]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, tid, pinc, bfst, blst, bcnt, acnt, 
-                             plc, flst, lcnt, cep, dep, cbe, inr, held, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             plc, flst, lcnt, cep, cbe, inr, held, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, nn, fsv, ff, fl2, 
+                             xf, xl, xx, xr >>
 
 Write(self) == WR1(self) \/ WR2(self) \/ WR3(self)
 
@@ -5965,7 +6072,7 @@ RN1(self) == /\ pc[self] = "RN1"
                         /\ UNCHANGED << nnx, nbl, nro, nbe, nalloc, cbe, errs, 
                                         stack, rn, ecnt, ef, el, ewas >>
                    ELSE /\ Assert(nalloc < MaxNodes, 
-                                  "Failure of assertion at line 323, column 5 of macro called at line 1266, column 9.")
+                                  "Failure of assertion at line 351, column 5 of macro called at line 1366, column 9.")
                         /\ /\ nalloc' = nalloc + 1
                            /\ nst' = [nst EXCEPT ![nalloc + 1] = "live"]
                         /\ /\ cbe' = [cbe EXCEPT ![self] = Stamp(self)]
@@ -5995,19 +6102,18 @@ RN1(self) == /\ pc[self] = "RN1"
                                    /\ ewas' = [ewas EXCEPT ![self] = FALSE]
                                    /\ pc' = [pc EXCEPT ![self] = "RE1"]
                         /\ UNCHANGED << pool, ninc, plk >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, cell, tid, pinc, bfst, blst, bcnt, acnt, 
-                             plc, flst, lcnt, cep, dep, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, which, ah, 
-                             aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
-                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
-                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, pce, pa, lc, 
-                             lp, lpi, le, la, uc, wc, wn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, fil, 
+                             inlist, sub, cell, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, inr, held, lvl, rv, 
+                             rok, opi, afr, acl, detaching, adv, ah, aseen, rt, 
+                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                             fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
+                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             fsv, ff, fl2, xf, xl, xx, xr >>
 
 RN2(self) == /\ pc[self] = "RN2"
              /\ IF ~MutStaleReuse
@@ -6039,145 +6145,66 @@ RN2(self) == /\ pc[self] = "RN2"
                         /\ el' = [el EXCEPT ![self] = NULL]
                         /\ ewas' = [ewas EXCEPT ![self] = FALSE]
                         /\ pc' = [pc EXCEPT ![self] = "RE1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, cell, nalloc, pool, ninc, plk, tid, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, fil, 
+                             inlist, sub, cell, nalloc, pool, ninc, plk, tid, 
                              pinc, bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                             cep, dep, inr, held, lvl, gdep, rv, rok, opi, afr, 
-                             acl, detaching, adv, which, ah, aseen, rt, pk, ph, 
-                             pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
-                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
-                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, pce, pa, lc, lp, lpi, le, la, uc, 
-                             wc, wn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             cep, inr, held, lvl, rv, rok, opi, afr, acl, 
+                             detaching, adv, ah, aseen, rt, tf, tacc, tcache, 
+                             tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
+                             tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
+                             kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
+                             hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, pce, pa, pl, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, fsv, ff, fl2, xf, xl, 
+                             xx, xr >>
 
 RetireNew(self) == RN1(self) \/ RN2(self)
 
 FL1(self) == /\ pc[self] = "FL1"
-             /\ IF (tid[self] = NoTid
-                    /\ (MutFlushNeedsTid \/ (orphaned = 0 /\ (bfst[self] = NULL \/ MutFlushSkipsBatch))))
-                   \/ inr[self]
+             /\ IF (tid[self] = NoTid /\ bfst[self] = NULL) \/ inr[self]
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
                         /\ fsv' = [fsv EXCEPT ![self] = Head(stack[self]).fsv]
-                        /\ fx' = [fx EXCEPT ![self] = Head(stack[self]).fx]
                         /\ ff' = [ff EXCEPT ![self] = Head(stack[self]).ff]
                         /\ fl2' = [fl2 EXCEPT ![self] = Head(stack[self]).fl2]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << pinc, inr, ah, aseen >>
                    ELSE /\ /\ fsv' = [fsv EXCEPT ![self] = pinc[self]]
                            /\ inr' = [inr EXCEPT ![self] = TRUE]
-                           /\ pinc' = [pinc EXCEPT ![self] = pinc[self] + 1]
-                        /\ IF tid[self] = NoTid /\ pinc'[self] = 1
+                           /\ pinc' = [pinc EXCEPT ![self] = IF MutNestedDtors THEN pinc[self] + 1 ELSE pinc[self]]
+                        /\ IF tid[self] = NoTid
                               THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
-                                                                            pc        |->  "FL2",
+                                                                            pc        |->  "FL4",
                                                                             ah        |->  ah[self],
                                                                             aseen     |->  aseen[self] ] >>
                                                                         \o stack[self]]
                                    /\ ah' = [ah EXCEPT ![self] = 0]
                                    /\ aseen' = [aseen EXCEPT ![self] = {}]
                                    /\ pc' = [pc EXCEPT ![self] = "AT0"]
-                              ELSE /\ IF tid[self] = NoTid
-                                         THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AllocTid",
-                                                                                       pc        |->  "FL3",
-                                                                                       ah        |->  ah[self],
-                                                                                       aseen     |->  aseen[self] ] >>
-                                                                                   \o stack[self]]
-                                              /\ ah' = [ah EXCEPT ![self] = 0]
-                                              /\ aseen' = [aseen EXCEPT ![self] = {}]
-                                              /\ pc' = [pc EXCEPT ![self] = "AT0"]
-                                         ELSE /\ IF pinc'[self] # 1
-                                                    THEN /\ pc' = [pc EXCEPT ![self] = "FL3"]
-                                                    ELSE /\ pc' = [pc EXCEPT ![self] = "FL2"]
-                                              /\ UNCHANGED << stack, ah, aseen >>
-                        /\ UNCHANGED << fx, ff, fl2 >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                              ELSE /\ pc' = [pc EXCEPT ![self] = "FL4"]
+                                   /\ UNCHANGED << stack, ah, aseen >>
+                        /\ UNCHANGED << ff, fl2 >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-                             tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                             tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                             kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                             hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
-
-FL2(self) == /\ pc[self] = "FL2"
-             /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = IF MutFlushDeact THEN INV ELSE NULL]
-                /\ fx' = [fx EXCEPT ![self] = fst[tid[self]][0].lo]
-             /\ IF fx'[self] \notin {NULL, INV}
-                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
-                                                                    pc        |->  "FL3",
-                                                                    tdo       |->  tdo[self],
-                                                                    twas      |->  twas[self],
-                                                                    tloc      |->  tloc[self],
-                                                                    tlc       |->  tlc[self],
-                                                                    tt        |->  tt[self] ] >>
-                                                                \o stack[self]]
-                           /\ tt' = [tt EXCEPT ![self] = fx'[self]]
-                        /\ tdo' = [tdo EXCEPT ![self] = FALSE]
-                        /\ twas' = [twas EXCEPT ![self] = FALSE]
-                        /\ tloc' = [tloc EXCEPT ![self] = NULL]
-                        /\ tlc' = [tlc EXCEPT ![self] = 0]
-                        /\ pc' = [pc EXCEPT ![self] = "TC1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "FL3"]
-                        /\ UNCHANGED << stack, tt, tdo, twas, tloc, tlc >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
-                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
-                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
-
-FL3(self) == /\ pc[self] = "FL3"
-             /\ fx' = [fx EXCEPT ![self] = NULL]
-             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AdoptOrphans",
-                                                      pc        |->  "FL4",
-                                                      ai        |->  ai[self],
-                                                      am        |->  am[self],
-                                                      ac        |->  ac[self] ] >>
-                                                  \o stack[self]]
-             /\ ai' = [ai EXCEPT ![self] = 0]
-             /\ am' = [am EXCEPT ![self] = 0]
-             /\ ac' = [ac EXCEPT ![self] = NULL]
-             /\ pc' = [pc EXCEPT ![self] = "AD0"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, tf, 
-                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
-                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                             hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                             xu, xr, xph, xpt >>
+                             flst, lcnt, cep, cbe, held, lvl, rv, rok, opi, 
+                             afr, acl, detaching, adv, errs, rt, tf, tacc, 
+                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, xf, xl, xx, xr >>
 
 FL4(self) == /\ pc[self] = "FL4"
              /\ IF bfst[self] = NULL
                    THEN /\ ff' = [ff EXCEPT ![self] = NULL]
-                        /\ pc' = [pc EXCEPT ![self] = "FL6"]
+                        /\ pc' = [pc EXCEPT ![self] = "FL8"]
                         /\ UNCHANGED << nbl, bfst, blst, bcnt, stack, rf, rr, 
-                                        rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                        rsi, rsj, rlate, fl2 >>
+                                        rpad, rmx, ri, rl, rmin, radj, rprv, 
+                                        rsi, rsj, rlate, rf0, rbh, fl2 >>
                    ELSE /\ /\ bcnt' = [bcnt EXCEPT ![self] = 0]
                            /\ bfst' = [bfst EXCEPT ![self] = NULL]
                            /\ blst' = [blst EXCEPT ![self] = NULL]
@@ -6185,8 +6212,8 @@ FL4(self) == /\ pc[self] = "FL4"
                            /\ fl2' = [fl2 EXCEPT ![self] = blst[self]]
                            /\ nbl' = [nbl EXCEPT ![blst[self]] = RNODE(bfst[self])]
                         /\ /\ rf' = [rf EXCEPT ![self] = ff'[self]]
+                           /\ rpad' = [rpad EXCEPT ![self] = TRUE]
                            /\ rr' = [rr EXCEPT ![self] = fl2'[self]]
-                           /\ rsk' = [rsk EXCEPT ![self] = IF fsv[self] = 0 /\ ~MutFlushDeact THEN tid[self] ELSE NoSkip]
                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TryRetire",
                                                                     pc        |->  "FL6",
                                                                     rmx       |->  rmx[self],
@@ -6198,9 +6225,11 @@ FL4(self) == /\ pc[self] = "FL4"
                                                                     rsi       |->  rsi[self],
                                                                     rsj       |->  rsj[self],
                                                                     rlate     |->  rlate[self],
+                                                                    rf0       |->  rf0[self],
+                                                                    rbh       |->  rbh[self],
                                                                     rf        |->  rf[self],
                                                                     rr        |->  rr[self],
-                                                                    rsk       |->  rsk[self] ] >>
+                                                                    rpad      |->  rpad[self] ] >>
                                                                 \o stack[self]]
                         /\ rmx' = [rmx EXCEPT ![self] = 0]
                         /\ ri' = [ri EXCEPT ![self] = 0]
@@ -6211,44 +6240,25 @@ FL4(self) == /\ pc[self] = "FL4"
                         /\ rsi' = [rsi EXCEPT ![self] = 0]
                         /\ rsj' = [rsj EXCEPT ![self] = 0]
                         /\ rlate' = [rlate EXCEPT ![self] = {}]
+                        /\ rf0' = [rf0 EXCEPT ![self] = NULL]
+                        /\ rbh' = [rbh EXCEPT ![self] = NULL]
                         /\ pc' = [pc EXCEPT ![self] = "TR1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nro, nbe, cell, nalloc, pool, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nro, nbe, fil, inlist, sub, cell, nalloc, pool, 
                              ninc, plk, tid, pinc, acnt, plc, flst, lcnt, cep, 
-                             dep, cbe, inr, held, lvl, gdep, rv, rok, opi, afr, 
-                             acl, detaching, adv, errs, which, ah, aseen, rt, 
-                             pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                             trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                             tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                             kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                             hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                             le, la, uc, wc, wn, nn, fsv, fx, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+                             cbe, inr, held, lvl, rv, rok, opi, afr, acl, 
+                             detaching, adv, errs, ah, aseen, rt, tf, tacc, 
+                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rn, ecnt, ef, el, ewas, pce, 
+                             pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                             fsv, xf, xl, xx, xr >>
 
 FL6(self) == /\ pc[self] = "FL6"
-             /\ IF ff[self] # NULL /\ rok[self] = FALSE
-                   THEN /\ LET f0 == ff[self] IN
-                             LET r0 == fl2[self] IN
-                               LET ch == Chain(ff[self], fl2[self]) IN
-                                 IF bfst[self] = NULL
-                                    THEN /\ /\ bcnt' = [bcnt EXCEPT ![self] = Len(ch)]
-                                            /\ bfst' = [bfst EXCEPT ![self] = f0]
-                                            /\ blst' = [blst EXCEPT ![self] = r0]
-                                         /\ UNCHANGED << nbl, nro, nbe >>
-                                    ELSE /\ nbe' = [nbe EXCEPT ![blst[self]] = Min2(nbe[blst[self]], nbe[r0])]
-                                         /\ nbl' = [n \in Nodes |-> IF n \in Range(ch) THEN blst[self] ELSE nbl[n]]
-                                         /\ nro' = [nro EXCEPT ![r0] = bfst[self]]
-                                         /\ /\ bcnt' = [bcnt EXCEPT ![self] = bcnt[self] + Len(ch)]
-                                            /\ bfst' = [bfst EXCEPT ![self] = f0]
-                                         /\ blst' = blst
-                   ELSE /\ TRUE
-                        /\ UNCHANGED << nbl, nro, nbe, bfst, blst, bcnt >>
-             /\ rok' = [rok EXCEPT ![self] = TRUE]
-             /\ IF MutFlushDeact /\ fsv[self] = 0
-                   THEN /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
-                   ELSE /\ TRUE
-                        /\ fst' = fst
+             /\ Assert(rok[self], 
+                       "Failure of assertion at line 1413, column 5.")
              /\ /\ hm' = [hm EXCEPT ![self] = tid[self]]
                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "HelpRead",
                                                          pc        |->  "FL7",
@@ -6259,177 +6269,87 @@ FL6(self) == /\ pc[self] = "FL6"
              /\ hmx' = [hmx EXCEPT ![self] = 0]
              /\ hx' = [hx EXCEPT ![self] = 0]
              /\ pc' = [pc EXCEPT ![self] = "HR1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
-                             res, nst, nnx, cell, nalloc, pool, ninc, plk, tid, 
-                             pinc, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                             held, lvl, gdep, rv, opi, afr, acl, detaching, 
-                             adv, errs, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xx, xcap, xu, xr, xph, xpt >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, he, hme, hh, hsq, 
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                             lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                             xx, xr >>
 
 FL7(self) == /\ pc[self] = "FL7"
              /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
                 /\ cbe' = [cbe EXCEPT ![self] = IF MutStaleBirth THEN cbe[self] ELSE ep + 1]
                 /\ ep' = ep + 1
+             /\ pc' = [pc EXCEPT ![self] = "FL8"]
+             /\ UNCHANGED << slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
+                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
+                             acnt, plc, flst, lcnt, cep, inr, held, lvl, rv, 
+                             rok, opi, afr, acl, detaching, errs, stack, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
+                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
+                             ff, fl2, xf, xl, xx, xr >>
+
+FL8(self) == /\ pc[self] = "FL8"
              /\ IF flst[self] # NULL
                    THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
-                                                                 pc        |->  "FlushClear",
+                                                                 pc        |->  "FL8b",
                                                                  dwas      |->  dwas[self],
                                                                  dl        |->  dl[self] ] >>
                                                              \o stack[self]]
                         /\ dwas' = [dwas EXCEPT ![self] = FALSE]
                         /\ dl' = [dl EXCEPT ![self] = NULL]
                         /\ pc' = [pc EXCEPT ![self] = "DF1"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "FlushClear"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "FL8b"]
                         /\ UNCHANGED << stack, dwas, dl >>
-             /\ UNCHANGED << slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, inr, held, lvl, 
-                             gdep, rv, rok, opi, afr, acl, detaching, errs, 
-                             which, ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                             tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                             fci, tt, tdo, twas, tloc, tlc, ce, ix, dt, dlo, 
-                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                             xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, ce, ix, 
+                             dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                             lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                             xx, xr >>
 
-FlushClear(self) == /\ pc[self] = "FlushClear"
-                    /\ IF fsv[self] # 0 \/ MutFlushUnc
-                          THEN /\ pc' = [pc EXCEPT ![self] = "FL9"]
-                               /\ UNCHANGED << fst, stack, tt, tdo, twas, tloc, 
-                                               tlc, ce, ix, dt, dlo, fx >>
-                          ELSE /\ IF MutFlushKeep /\ cep[self] = UNC
-                                     THEN /\ /\ ce' = [ce EXCEPT ![self] = ep]
-                                             /\ dt' = [dt EXCEPT ![self] = tid[self]]
-                                             /\ ix' = [ix EXCEPT ![self] = 0]
-                                             /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "DoUpdate",
-                                                                                      pc        |->  "FL9",
-                                                                                      dlo       |->  dlo[self],
-                                                                                      ce        |->  ce[self],
-                                                                                      ix        |->  ix[self],
-                                                                                      dt        |->  dt[self] ] >>
-                                                                                  \o stack[self]]
-                                          /\ dlo' = [dlo EXCEPT ![self] = 0]
-                                          /\ pc' = [pc EXCEPT ![self] = "DU1"]
-                                          /\ UNCHANGED << fst, tt, tdo, twas, 
-                                                          tloc, tlc, fx >>
-                                     ELSE /\ IF MutFlushKeep
-                                                THEN /\ pc' = [pc EXCEPT ![self] = "FL9"]
-                                                     /\ UNCHANGED << fst, 
-                                                                     stack, tt, 
-                                                                     tdo, twas, 
-                                                                     tloc, tlc, 
-                                                                     fx >>
-                                                ELSE /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
-                                                        /\ fx' = [fx EXCEPT ![self] = fst[tid[self]][0].lo]
-                                                     /\ IF fx'[self] \notin {NULL, INV}
-                                                           THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
-                                                                                                            pc        |->  "FlushClear2",
-                                                                                                            tdo       |->  tdo[self],
-                                                                                                            twas      |->  twas[self],
-                                                                                                            tloc      |->  tloc[self],
-                                                                                                            tlc       |->  tlc[self],
-                                                                                                            tt        |->  tt[self] ] >>
-                                                                                                        \o stack[self]]
-                                                                   /\ tt' = [tt EXCEPT ![self] = fx'[self]]
-                                                                /\ tdo' = [tdo EXCEPT ![self] = FALSE]
-                                                                /\ twas' = [twas EXCEPT ![self] = FALSE]
-                                                                /\ tloc' = [tloc EXCEPT ![self] = NULL]
-                                                                /\ tlc' = [tlc EXCEPT ![self] = 0]
-                                                                /\ pc' = [pc EXCEPT ![self] = "TC1"]
-                                                           ELSE /\ pc' = [pc EXCEPT ![self] = "FlushClear2"]
-                                                                /\ UNCHANGED << stack, 
-                                                                                tt, 
-                                                                                tdo, 
-                                                                                twas, 
-                                                                                tloc, 
-                                                                                tlc >>
-                                          /\ UNCHANGED << ce, ix, dt, dlo >>
-                    /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                    lkO, sep, res, nst, nnx, nbl, nro, nbe, 
-                                    cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                    cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                    rok, opi, afr, acl, detaching, adv, errs, 
-                                    which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                                    am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                                    fl, fc, fnx, fci, dwas, dl, sk, tg, kl, kt, 
-                                    swas, spe, ssq, sfi, spr, sce, sex, sre, 
-                                    sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                    hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                                    rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                    ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                    le, la, uc, wc, wn, nn, fsv, ff, fl2, xsv, 
-                                    xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
-
-FlushClear2(self) == /\ pc[self] = "FlushClear2"
-                     /\ fx' = [fx EXCEPT ![self] = NULL]
-                     /\ IF flst[self] # NULL
-                           THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
-                                                                         pc        |->  "FlushClear3",
-                                                                         dwas      |->  dwas[self],
-                                                                         dl        |->  dl[self] ] >>
-                                                                     \o stack[self]]
-                                /\ dwas' = [dwas EXCEPT ![self] = FALSE]
-                                /\ dl' = [dl EXCEPT ![self] = NULL]
-                                /\ pc' = [pc EXCEPT ![self] = "DF1"]
-                           ELSE /\ pc' = [pc EXCEPT ![self] = "FlushClear3"]
-                                /\ UNCHANGED << stack, dwas, dl >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, fst, sep, res, nst, nnx, nbl, nro, 
-                                     nbe, cell, nalloc, pool, ninc, plk, tid, 
-                                     pinc, bfst, blst, bcnt, acnt, plc, flst, 
-                                     lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                                     rv, rok, opi, afr, acl, detaching, adv, 
-                                     errs, which, ah, aseen, rt, pk, ph, pt, 
-                                     pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                                     trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
-                                     twas, tloc, tlc, ce, ix, dt, dlo, sk, tg, 
-                                     kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                                     sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                                     hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                     rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                     rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                     lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                     ff, fl2, xsv, xown, xf, xl, xx, xcap, xu, 
-                                     xr, xph, xpt >>
-
-FlushClear3(self) == /\ pc[self] = "FlushClear3"
-                     /\ /\ cep' = [cep EXCEPT ![self] = 0]
-                        /\ dep' = [dep EXCEPT ![self] = 0]
-                        /\ gdep' = [gdep EXCEPT ![self] = 0]
-                        /\ sep' = [sep EXCEPT ![tid[self]][0].lo = 0]
-                     /\ pc' = [pc EXCEPT ![self] = "FL9"]
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, fst, res, nst, nnx, nbl, nro, nbe, 
-                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                     bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                     cbe, inr, held, lvl, rv, rok, opi, afr, 
-                                     acl, detaching, adv, errs, stack, which, 
-                                     ah, aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                                     tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                                     fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                                     dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                                     swas, spe, ssq, sfi, spr, sce, sex, sre, 
-                                     sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                     hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                                     rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                     ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                     xpt >>
+FL8b(self) == /\ pc[self] = "FL8b"
+              /\ IF bfst[self] # NULL
+                    THEN /\ pc' = [pc EXCEPT ![self] = "FL4"]
+                    ELSE /\ pc' = [pc EXCEPT ![self] = "FL9"]
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                              nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
+                              bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, held, 
+                              lvl, rv, rok, opi, afr, acl, detaching, adv, 
+                              errs, stack, ah, aseen, rt, tf, tacc, tcache, 
+                              tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
+                              twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
+                              tg, kl, kt, swas, spe, ssq, sfi, spr, sce, sex, 
+                              sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                              hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                              rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                              ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                              le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                              xr >>
 
 FL9(self) == /\ pc[self] = "FL9"
              /\ /\ inr' = [inr EXCEPT ![self] = FALSE]
@@ -6437,43 +6357,33 @@ FL9(self) == /\ pc[self] = "FL9"
                 /\ rv' = [rv EXCEPT ![self] = 0]
              /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
              /\ fsv' = [fsv EXCEPT ![self] = Head(stack[self]).fsv]
-             /\ fx' = [fx EXCEPT ![self] = Head(stack[self]).fx]
              /\ ff' = [ff EXCEPT ![self] = Head(stack[self]).ff]
              /\ fl2' = [fl2 EXCEPT ![self] = Head(stack[self]).fl2]
              /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, held, lvl, gdep, rok, 
-                             opi, afr, acl, detaching, adv, errs, which, ah, 
-                             aseen, rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
-                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
-                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                             hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                             rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                             el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                             wn, nn, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                             xpt >>
+                             flst, lcnt, cep, cbe, held, lvl, rok, opi, afr, 
+                             acl, detaching, adv, errs, ah, aseen, rt, tf, 
+                             tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                             tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, 
+                             dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                             sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
+                             hce, hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                             rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, 
+                             rn, ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, 
+                             lpi, le, la, uc, wc, wn, nn, xf, xl, xx, xr >>
 
-Flush(self) == FL1(self) \/ FL2(self) \/ FL3(self) \/ FL4(self)
-                  \/ FL6(self) \/ FL7(self) \/ FlushClear(self)
-                  \/ FlushClear2(self) \/ FlushClear3(self) \/ FL9(self)
+Flush(self) == FL1(self) \/ FL4(self) \/ FL6(self) \/ FL7(self)
+                  \/ FL8(self) \/ FL8b(self) \/ FL9(self)
 
 EX1(self) == /\ pc[self] = "EX1"
              /\ IF tid[self] = NoTid /\ (bfst[self] = NULL \/ MutExitSkipsBatch)
                    THEN /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-                        /\ xsv' = [xsv EXCEPT ![self] = Head(stack[self]).xsv]
-                        /\ xown' = [xown EXCEPT ![self] = Head(stack[self]).xown]
                         /\ xf' = [xf EXCEPT ![self] = Head(stack[self]).xf]
                         /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
                         /\ xx' = [xx EXCEPT ![self] = Head(stack[self]).xx]
-                        /\ xcap' = [xcap EXCEPT ![self] = Head(stack[self]).xcap]
-                        /\ xu' = [xu EXCEPT ![self] = Head(stack[self]).xu]
                         /\ xr' = [xr EXCEPT ![self] = Head(stack[self]).xr]
-                        /\ xph' = [xph EXCEPT ![self] = Head(stack[self]).xph]
-                        /\ xpt' = [xpt EXCEPT ![self] = Head(stack[self]).xpt]
                         /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
                         /\ UNCHANGED << pinc, inr, ah, aseen >>
                    ELSE /\ IF tid[self] = NoTid
@@ -6485,227 +6395,225 @@ EX1(self) == /\ pc[self] = "EX1"
                                    /\ ah' = [ah EXCEPT ![self] = 0]
                                    /\ aseen' = [aseen EXCEPT ![self] = {}]
                                    /\ pc' = [pc EXCEPT ![self] = "AT0"]
-                                   /\ UNCHANGED << pinc, inr, xsv, xown >>
+                                   /\ UNCHANGED << pinc, inr >>
                               ELSE /\ /\ inr' = [inr EXCEPT ![self] = TRUE]
-                                      /\ pinc' = [pinc EXCEPT ![self] = pinc[self] + 1]
-                                      /\ xown' = [xown EXCEPT ![self] = IF pinc[self] = 0 THEN tid[self] ELSE NoSkip]
-                                      /\ xsv' = [xsv EXCEPT ![self] = pinc[self]]
-                                   /\ pc' = [pc EXCEPT ![self] = "ExitAdopt"]
+                                      /\ pinc' = [pinc EXCEPT ![self] = IF MutNestedDtors THEN pinc[self] + 1 ELSE 0]
+                                   /\ pc' = [pc EXCEPT ![self] = "ExitMark"]
                                    /\ UNCHANGED << stack, ah, aseen >>
-                        /\ UNCHANGED << xf, xl, xx, xcap, xu, xr, xph, xpt >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                        /\ UNCHANGED << xf, xl, xx, xr >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, held, lvl, gdep, rv, 
-                             rok, opi, afr, acl, detaching, adv, errs, which, 
-                             rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-                             tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                             tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                             kt, swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                             hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                             hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                             rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                             lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                             fl2 >>
+                             flst, lcnt, cep, cbe, held, lvl, rv, rok, opi, 
+                             afr, acl, detaching, adv, errs, rt, tf, tacc, 
+                             tcache, tnx, trf, dn, di, fl, fc, fnx, fci, tt, 
+                             tdo, twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                             sk, tg, kl, kt, swas, spe, ssq, sfi, spr, sce, 
+                             sex, sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                             hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, 
+                             rmin, radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                             ecnt, ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                             le, la, uc, wc, wn, nn, fsv, ff, fl2 >>
 
-ExitAdopt(self) == /\ pc[self] = "ExitAdopt"
-                   /\ IF ~MutExitNoAdopt
-                         THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "AdoptOrphans",
-                                                                       pc        |->  "ExitSubmit",
-                                                                       ai        |->  ai[self],
-                                                                       am        |->  am[self],
-                                                                       ac        |->  ac[self] ] >>
-                                                                   \o stack[self]]
-                              /\ ai' = [ai EXCEPT ![self] = 0]
-                              /\ am' = [am EXCEPT ![self] = 0]
-                              /\ ac' = [ac EXCEPT ![self] = NULL]
-                              /\ pc' = [pc EXCEPT ![self] = "AD0"]
-                         ELSE /\ pc' = [pc EXCEPT ![self] = "ExitSubmit"]
-                              /\ UNCHANGED << stack, ai, am, ac >>
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, fst, sep, res, nst, nnx, nbl, nro, nbe, 
-                                   cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                   bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                   rok, opi, afr, acl, detaching, adv, errs, 
-                                   which, ah, aseen, rt, pk, ph, pt, pe, tf, 
-                                   tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
-                                   fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
-                                   ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                   sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                                   he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                                   rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                                   rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                                   pce, pa, lc, lp, lpi, le, la, uc, wc, wn, 
-                                   nn, fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, 
-                                   xcap, xu, xr, xph, xpt >>
+ExitMark(self) == /\ pc[self] = "ExitMark"
+                  /\ /\ cep' = [cep EXCEPT ![self] = IF cep[self] = UNC THEN 0 ELSE cep[self]]
+                     /\ sep' = [sep EXCEPT ![tid[self]][0].lo = TagV(IF UntagV(sep[tid[self]][0].lo) = UNC THEN 0 ELSE UntagV(sep[tid[self]][0].lo))]
+                  /\ pc' = [pc EXCEPT ![self] = "ExitLeave"]
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, res, nst, nnx, 
+                                  nbl, nro, nbe, fil, inlist, sub, cell, 
+                                  nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                  blst, bcnt, acnt, plc, flst, lcnt, cbe, inr, 
+                                  held, lvl, rv, rok, opi, afr, acl, detaching, 
+                                  adv, errs, stack, ah, aseen, rt, tf, tacc, 
+                                  tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
+                                  tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
+                                  dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                                  spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                                  hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                                  rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                  rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                                  pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, 
+                                  wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
-ExitSubmit(self) == /\ pc[self] = "ExitSubmit"
-                    /\ xr' = [xr EXCEPT ![self] = xr[self] + 1]
-                    /\ IF bfst[self] = NULL
-                          THEN /\ pc' = [pc EXCEPT ![self] = "ExitTake"]
-                               /\ UNCHANGED << nbl, bfst, blst, bcnt, stack, 
-                                               rf, rr, rsk, rmx, ri, rl, rmin, 
-                                               radj, rprv, rsi, rsj, rlate, xf, 
-                                               xl >>
-                          ELSE /\ /\ bcnt' = [bcnt EXCEPT ![self] = 0]
-                                  /\ bfst' = [bfst EXCEPT ![self] = NULL]
-                                  /\ blst' = [blst EXCEPT ![self] = NULL]
-                                  /\ nbl' = [nbl EXCEPT ![blst[self]] = RNODE(bfst[self])]
-                                  /\ xf' = [xf EXCEPT ![self] = bfst[self]]
-                                  /\ xl' = [xl EXCEPT ![self] = blst[self]]
-                               /\ /\ rf' = [rf EXCEPT ![self] = xf'[self]]
-                                  /\ rr' = [rr EXCEPT ![self] = xl'[self]]
-                                  /\ rsk' = [rsk EXCEPT ![self] = IF MutExitInactive THEN NoSkip ELSE xown[self]]
-                                  /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TryRetire",
-                                                                           pc        |->  "ExitSubmit2",
-                                                                           rmx       |->  rmx[self],
-                                                                           ri        |->  ri[self],
-                                                                           rl        |->  rl[self],
-                                                                           rmin      |->  rmin[self],
-                                                                           radj      |->  radj[self],
-                                                                           rprv      |->  rprv[self],
-                                                                           rsi       |->  rsi[self],
-                                                                           rsj       |->  rsj[self],
-                                                                           rlate     |->  rlate[self],
-                                                                           rf        |->  rf[self],
-                                                                           rr        |->  rr[self],
-                                                                           rsk       |->  rsk[self] ] >>
+ExitLeave(self) == /\ pc[self] = "ExitLeave"
+                   /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = INV]
+                      /\ xx' = [xx EXCEPT ![self] = fst[tid[self]][0].lo]
+                   /\ IF xx'[self] \notin {NULL, INV}
+                         THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
+                                                                          pc        |->  "ExitLeave2",
+                                                                          tnx       |->  tnx[self],
+                                                                          trf       |->  trf[self],
+                                                                          tf        |->  tf[self],
+                                                                          tacc      |->  tacc[self],
+                                                                          tcache    |->  tcache[self] ] >>
+                                                                      \o stack[self]]
+                                 /\ tacc' = [tacc EXCEPT ![self] = flst[self]]
+                                 /\ tcache' = [tcache EXCEPT ![self] = 1]
+                                 /\ tf' = [tf EXCEPT ![self] = xx'[self]]
+                              /\ tnx' = [tnx EXCEPT ![self] = NULL]
+                              /\ trf' = [trf EXCEPT ![self] = NULL]
+                              /\ pc' = [pc EXCEPT ![self] = "TV1"]
+                         ELSE /\ pc' = [pc EXCEPT ![self] = "ExitLeave2"]
+                              /\ UNCHANGED << stack, tf, tacc, tcache, tnx, 
+                                              trf >>
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, sep, res, nst, 
+                                   nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                   blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                   inr, held, lvl, rv, rok, opi, afr, acl, 
+                                   detaching, adv, errs, ah, aseen, rt, dn, di, 
+                                   fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
+                                   dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                                   swas, spe, ssq, sfi, spr, sce, sex, sre, 
+                                   sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
+                                   hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                                   rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                   rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                                   ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                   fsv, ff, fl2, xf, xl, xr >>
+
+ExitLeave2(self) == /\ pc[self] = "ExitLeave2"
+                    /\ xx' = [xx EXCEPT ![self] = NULL]
+                    /\ IF MutTidEarly
+                          THEN /\ /\ rt' = [rt EXCEPT ![self] = tid[self]]
+                                  /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ReleaseTid",
+                                                                           pc        |->  "ExitPlace",
+                                                                           rt        |->  rt[self] ] >>
                                                                        \o stack[self]]
-                               /\ rmx' = [rmx EXCEPT ![self] = 0]
-                               /\ ri' = [ri EXCEPT ![self] = 0]
-                               /\ rl' = [rl EXCEPT ![self] = NULL]
-                               /\ rmin' = [rmin EXCEPT ![self] = 0]
-                               /\ radj' = [radj EXCEPT ![self] = 0]
-                               /\ rprv' = [rprv EXCEPT ![self] = NULL]
-                               /\ rsi' = [rsi EXCEPT ![self] = 0]
-                               /\ rsj' = [rsj EXCEPT ![self] = 0]
-                               /\ rlate' = [rlate EXCEPT ![self] = {}]
-                               /\ pc' = [pc EXCEPT ![self] = "TR1"]
-                    /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                    lkO, fst, sep, res, nst, nnx, nro, nbe, 
+                               /\ pc' = [pc EXCEPT ![self] = "RL0"]
+                          ELSE /\ pc' = [pc EXCEPT ![self] = "ExitPlace"]
+                               /\ UNCHANGED << stack, rt >>
+                    /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                    nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                    acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                                    held, lvl, gdep, rv, rok, opi, afr, acl, 
-                                    detaching, adv, errs, which, ah, aseen, rt, 
-                                    pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                                    tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                                    tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
-                                    dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                                    sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                                    he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                                    rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                                    lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                    fl2, xsv, xown, xx, xcap, xu, xph, xpt >>
+                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
+                                    cep, cbe, inr, held, lvl, rv, rok, opi, 
+                                    afr, acl, detaching, adv, errs, ah, aseen, 
+                                    tf, tacc, tcache, tnx, trf, dn, di, fl, fc, 
+                                    fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
+                                    dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
+                                    spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                                    hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
+                                    hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                                    radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, 
+                                    ecnt, ef, el, ewas, pce, pa, pl, ul, lc, 
+                                    lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                                    fl2, xf, xl, xr >>
 
-ExitSubmit2(self) == /\ pc[self] = "ExitSubmit2"
-                     /\ IF rok[self] = FALSE
-                           THEN /\ /\ nnx' = [nnx EXCEPT ![xl[self]] = xph[self]]
-                                   /\ xph' = [xph EXCEPT ![self] = xl[self]]
-                                   /\ xpt' = [xpt EXCEPT ![self] = IF xpt[self] = NULL THEN xl[self] ELSE xpt[self]]
-                                /\ rok' = [rok EXCEPT ![self] = TRUE]
-                                /\ pc' = [pc EXCEPT ![self] = "ExitTake"]
-                                /\ UNCHANGED << stack, hm, hmx, hx >>
-                           ELSE /\ IF MutNoPlacedAdvance
-                                      THEN /\ pc' = [pc EXCEPT ![self] = "ExitTake"]
-                                           /\ UNCHANGED << stack, hm, hmx, hx >>
-                                      ELSE /\ /\ hm' = [hm EXCEPT ![self] = tid[self]]
-                                              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "HelpRead",
-                                                                                       pc        |->  "ExitAdvance",
-                                                                                       hmx       |->  hmx[self],
-                                                                                       hx        |->  hx[self],
-                                                                                       hm        |->  hm[self] ] >>
-                                                                                   \o stack[self]]
-                                           /\ hmx' = [hmx EXCEPT ![self] = 0]
-                                           /\ hx' = [hx EXCEPT ![self] = 0]
-                                           /\ pc' = [pc EXCEPT ![self] = "HR1"]
-                                /\ UNCHANGED << nnx, rok, xph, xpt >>
-                     /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                     lkO, fst, sep, res, nst, nbl, nro, nbe, 
-                                     cell, nalloc, pool, ninc, plk, tid, pinc, 
-                                     bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                     cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                     opi, afr, acl, detaching, adv, errs, 
-                                     which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                                     am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                     di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                                     tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, 
-                                     kl, kt, swas, spe, ssq, sfi, spr, sce, 
-                                     sex, sre, sps, he, hme, hh, hsq, hce, hol, 
-                                     hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                                     rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                     ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                     le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                     xsv, xown, xf, xl, xx, xcap, xu, xr >>
+ExitPlace(self) == /\ pc[self] = "ExitPlace"
+                   /\ xr' = [xr EXCEPT ![self] = xr[self] + 1]
+                   /\ IF bfst[self] = NULL
+                         THEN /\ pc' = [pc EXCEPT ![self] = "ExitFree"]
+                              /\ UNCHANGED << nbl, bfst, blst, bcnt, stack, rf, 
+                                              rr, rpad, rmx, ri, rl, rmin, 
+                                              radj, rprv, rsi, rsj, rlate, rf0, 
+                                              rbh, xf, xl >>
+                         ELSE /\ /\ bcnt' = [bcnt EXCEPT ![self] = 0]
+                                 /\ bfst' = [bfst EXCEPT ![self] = NULL]
+                                 /\ blst' = [blst EXCEPT ![self] = NULL]
+                                 /\ nbl' = [nbl EXCEPT ![blst[self]] = RNODE(bfst[self])]
+                                 /\ xf' = [xf EXCEPT ![self] = bfst[self]]
+                                 /\ xl' = [xl EXCEPT ![self] = blst[self]]
+                              /\ /\ rf' = [rf EXCEPT ![self] = xf'[self]]
+                                 /\ rpad' = [rpad EXCEPT ![self] = TRUE]
+                                 /\ rr' = [rr EXCEPT ![self] = xl'[self]]
+                                 /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TryRetire",
+                                                                          pc        |->  "ExitHelp",
+                                                                          rmx       |->  rmx[self],
+                                                                          ri        |->  ri[self],
+                                                                          rl        |->  rl[self],
+                                                                          rmin      |->  rmin[self],
+                                                                          radj      |->  radj[self],
+                                                                          rprv      |->  rprv[self],
+                                                                          rsi       |->  rsi[self],
+                                                                          rsj       |->  rsj[self],
+                                                                          rlate     |->  rlate[self],
+                                                                          rf0       |->  rf0[self],
+                                                                          rbh       |->  rbh[self],
+                                                                          rf        |->  rf[self],
+                                                                          rr        |->  rr[self],
+                                                                          rpad      |->  rpad[self] ] >>
+                                                                      \o stack[self]]
+                              /\ rmx' = [rmx EXCEPT ![self] = 0]
+                              /\ ri' = [ri EXCEPT ![self] = 0]
+                              /\ rl' = [rl EXCEPT ![self] = NULL]
+                              /\ rmin' = [rmin EXCEPT ![self] = 0]
+                              /\ radj' = [radj EXCEPT ![self] = 0]
+                              /\ rprv' = [rprv EXCEPT ![self] = NULL]
+                              /\ rsi' = [rsi EXCEPT ![self] = 0]
+                              /\ rsj' = [rsj EXCEPT ![self] = 0]
+                              /\ rlate' = [rlate EXCEPT ![self] = {}]
+                              /\ rf0' = [rf0 EXCEPT ![self] = NULL]
+                              /\ rbh' = [rbh EXCEPT ![self] = NULL]
+                              /\ pc' = [pc EXCEPT ![self] = "TR1"]
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                   nst, nnx, nro, nbe, fil, inlist, sub, cell, 
+                                   nalloc, pool, ninc, plk, tid, pinc, acnt, 
+                                   plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                                   rv, rok, opi, afr, acl, detaching, adv, 
+                                   errs, ah, aseen, rt, tf, tacc, tcache, tnx, 
+                                   trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
+                                   twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, 
+                                   sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
+                                   sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+                                   hh, hsq, hce, hol, hoh, hps, hep, rn, ecnt, 
+                                   ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, 
+                                   le, la, uc, wc, wn, nn, fsv, ff, fl2, xx >>
+
+ExitHelp(self) == /\ pc[self] = "ExitHelp"
+                  /\ Assert(rok[self], 
+                            "Failure of assertion at line 1466, column 5.")
+                  /\ /\ hm' = [hm EXCEPT ![self] = tid[self]]
+                     /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "HelpRead",
+                                                              pc        |->  "ExitAdvance",
+                                                              hmx       |->  hmx[self],
+                                                              hx        |->  hx[self],
+                                                              hm        |->  hm[self] ] >>
+                                                          \o stack[self]]
+                  /\ hmx' = [hmx EXCEPT ![self] = 0]
+                  /\ hx' = [hx EXCEPT ![self] = 0]
+                  /\ pc' = [pc EXCEPT ![self] = "HR1"]
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                  nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
+                                  nalloc, pool, ninc, plk, tid, pinc, bfst, 
+                                  blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                  inr, held, lvl, rv, rok, opi, afr, acl, 
+                                  detaching, adv, errs, ah, aseen, rt, tf, 
+                                  tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                  fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, 
+                                  ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
+                                  sfi, spr, sce, sex, sre, sps, he, hme, hh, 
+                                  hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
+                                  rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                                  rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, 
+                                  pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                                  nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 ExitAdvance(self) == /\ pc[self] = "ExitAdvance"
                      /\ /\ adv' = [adv EXCEPT ![self] = ep + 1]
                         /\ cbe' = [cbe EXCEPT ![self] = IF MutStaleBirth THEN cbe[self] ELSE ep + 1]
                         /\ ep' = ep + 1
-                     /\ pc' = [pc EXCEPT ![self] = "ExitTake"]
-                     /\ UNCHANGED << slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                     fst, sep, res, nst, nnx, nbl, nro, nbe, 
+                     /\ pc' = [pc EXCEPT ![self] = "ExitFree"]
+                     /\ UNCHANGED << slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                     nnx, nbl, nro, nbe, fil, inlist, sub, 
                                      cell, nalloc, pool, ninc, plk, tid, pinc, 
                                      bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                     cep, dep, inr, held, lvl, gdep, rv, rok, 
-                                     opi, afr, acl, detaching, errs, stack, 
-                                     which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                                     am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                     di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                                     cep, inr, held, lvl, rv, rok, opi, afr, 
+                                     acl, detaching, errs, stack, ah, aseen, 
+                                     rt, tf, tacc, tcache, tnx, trf, dn, di, 
+                                     fl, fc, fnx, fci, tt, tdo, twas, tloc, 
                                      tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, 
                                      kl, kt, swas, spe, ssq, sfi, spr, sce, 
                                      sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                                     hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                     rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                     rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                     lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                     fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                     xu, xr, xph, xpt >>
-
-ExitTake(self) == /\ pc[self] = "ExitTake"
-                  /\ IF xown[self] = NoSkip \/ MutExitInactive
-                        THEN /\ pc' = [pc EXCEPT ![self] = "ExitFree"]
-                             /\ UNCHANGED << fst, stack, tt, tdo, twas, tloc, 
-                                             tlc, xx >>
-                        ELSE /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = NULL]
-                                /\ xx' = [xx EXCEPT ![self] = fst[tid[self]][0].lo]
-                             /\ IF xx'[self] \notin {NULL, INV}
-                                   THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
-                                                                                    pc        |->  "ExitFree",
-                                                                                    tdo       |->  tdo[self],
-                                                                                    twas      |->  twas[self],
-                                                                                    tloc      |->  tloc[self],
-                                                                                    tlc       |->  tlc[self],
-                                                                                    tt        |->  tt[self] ] >>
-                                                                                \o stack[self]]
-                                           /\ tt' = [tt EXCEPT ![self] = xx'[self]]
-                                        /\ tdo' = [tdo EXCEPT ![self] = FALSE]
-                                        /\ twas' = [twas EXCEPT ![self] = FALSE]
-                                        /\ tloc' = [tloc EXCEPT ![self] = NULL]
-                                        /\ tlc' = [tlc EXCEPT ![self] = 0]
-                                        /\ pc' = [pc EXCEPT ![self] = "TC1"]
-                                   ELSE /\ pc' = [pc EXCEPT ![self] = "ExitFree"]
-                                        /\ UNCHANGED << stack, tt, tdo, twas, 
-                                                        tloc, tlc >>
-                  /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                  sep, res, nst, nnx, nbl, nro, nbe, cell, 
-                                  nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                  blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                                  cbe, inr, held, lvl, gdep, rv, rok, opi, afr, 
-                                  acl, detaching, adv, errs, which, ah, aseen, 
-                                  rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                                  tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                                  dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                                  swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                                  hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                                  hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, 
-                                  radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                                  el, ewas, pce, pa, lc, lp, lpi, le, la, uc, 
-                                  wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                                  xl, xcap, xu, xr, xph, xpt >>
+                                     hsq, hce, hol, hoh, hps, hep, rf, rr, 
+                                     rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                     rsj, rlate, rf0, rbh, rn, ecnt, ef, el, 
+                                     ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                                     la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, 
+                                     xx, xr >>
 
 ExitFree(self) == /\ pc[self] = "ExitFree"
-                  /\ IF flst[self] # NULL /\ ~MutExitInactive
+                  /\ IF flst[self] # NULL
                         THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
                                                                       pc        |->  "ExitRound",
                                                                       dwas      |->  dwas[self],
@@ -6716,343 +6624,42 @@ ExitFree(self) == /\ pc[self] = "ExitFree"
                              /\ pc' = [pc EXCEPT ![self] = "DF1"]
                         ELSE /\ pc' = [pc EXCEPT ![self] = "ExitRound"]
                              /\ UNCHANGED << stack, dwas, dl >>
-                  /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                                  fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+                  /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                                  nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                   nalloc, pool, ninc, plk, tid, pinc, bfst, 
-                                  blst, bcnt, acnt, plc, flst, lcnt, cep, dep, 
-                                  cbe, inr, held, lvl, gdep, rv, rok, opi, afr, 
-                                  acl, detaching, adv, errs, which, ah, aseen, 
-                                  rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, 
-                                  tcache, tnx, trf, dn, di, fl, fc, fnx, fci, 
-                                  tt, tdo, twas, tloc, tlc, ce, ix, dt, dlo, 
-                                  sk, tg, kl, kt, swas, spe, ssq, sfi, spr, 
-                                  sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                                  hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                  rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                  rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                                  lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                                  fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, 
-                                  xph, xpt >>
+                                  blst, bcnt, acnt, plc, flst, lcnt, cep, cbe, 
+                                  inr, held, lvl, rv, rok, opi, afr, acl, 
+                                  detaching, adv, errs, ah, aseen, rt, tf, 
+                                  tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                                  fci, tt, tdo, twas, tloc, tlc, ce, ix, dt, 
+                                  dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                                  spr, sce, sex, sre, sps, hm, hmx, hx, he, 
+                                  hme, hh, hsq, hce, hol, hoh, hps, hep, rf, 
+                                  rr, rpad, rmx, ri, rl, rmin, radj, rprv, rsi, 
+                                  rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                                  pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, 
+                                  wn, nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 ExitRound(self) == /\ pc[self] = "ExitRound"
-                   /\ IF (MutExitLoop /\ bfst[self] # NULL)
-                         \/ (~MutExitLoop /\ ~MutExitInactive /\ xr[self] < ExitRounds)
-                         THEN /\ pc' = [pc EXCEPT ![self] = "ExitSubmit"]
-                         ELSE /\ pc' = [pc EXCEPT ![self] = "ExitParkRest"]
-                   /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                   lkO, fst, sep, res, nst, nnx, nbl, nro, nbe, 
+                   /\ IF bfst[self] # NULL
+                         THEN /\ pc' = [pc EXCEPT ![self] = "ExitPlace"]
+                         ELSE /\ pc' = [pc EXCEPT ![self] = "EX12b"]
+                   /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, 
+                                   nst, nnx, nbl, nro, nbe, fil, inlist, sub, 
                                    cell, nalloc, pool, ninc, plk, tid, pinc, 
                                    bfst, blst, bcnt, acnt, plc, flst, lcnt, 
-                                   cep, dep, cbe, inr, held, lvl, gdep, rv, 
-                                   rok, opi, afr, acl, detaching, adv, errs, 
-                                   stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                                   ai, am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                                   di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                                   tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                   kt, swas, spe, ssq, sfi, spr, sce, sex, sre, 
+                                   cep, cbe, inr, held, lvl, rv, rok, opi, afr, 
+                                   acl, detaching, adv, errs, stack, ah, aseen, 
+                                   rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                                   fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
+                                   dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                                   swas, spe, ssq, sfi, spr, sce, sex, sre, 
                                    sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                                   hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, 
-                                   rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                                   ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, 
-                                   le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                                   xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                   xpt >>
-
-ExitParkRest(self) == /\ pc[self] = "ExitParkRest"
-                      /\ IF bfst[self] # NULL
-                            THEN /\ /\ bcnt' = [bcnt EXCEPT ![self] = 0]
-                                    /\ bfst' = [bfst EXCEPT ![self] = NULL]
-                                    /\ blst' = [blst EXCEPT ![self] = NULL]
-                                    /\ nbl' = [nbl EXCEPT ![blst[self]] = RNODE(bfst[self])]
-                                    /\ nnx' = [nnx EXCEPT ![blst[self]] = xph[self]]
-                                    /\ xph' = [xph EXCEPT ![self] = blst[self]]
-                                    /\ xpt' = [xpt EXCEPT ![self] = IF xpt[self] = NULL THEN blst[self] ELSE xpt[self]]
-                            ELSE /\ TRUE
-                                 /\ UNCHANGED << nnx, nbl, bfst, blst, bcnt, 
-                                                 xph, xpt >>
-                      /\ pc' = [pc EXCEPT ![self] = "EX6"]
-                      /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, 
-                                      lkO, fst, sep, res, nst, nro, nbe, cell, 
-                                      nalloc, pool, ninc, plk, tid, pinc, acnt, 
-                                      plc, flst, lcnt, cep, dep, cbe, inr, 
-                                      held, lvl, gdep, rv, rok, opi, afr, acl, 
-                                      detaching, adv, errs, stack, which, ah, 
-                                      aseen, rt, pk, ph, pt, pe, ai, am, ac, 
-                                      tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                                      fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                                      dwas, dl, ce, ix, dt, dlo, sk, tg, kl, 
-                                      kt, swas, spe, ssq, sfi, spr, sce, sex, 
-                                      sre, sps, hm, hmx, hx, he, hme, hh, hsq, 
-                                      hce, hol, hoh, hps, hep, rf, rr, rsk, 
-                                      rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                                      rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                                      lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, 
-                                      fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                                      xu, xr >>
-
-EX6(self) == /\ pc[self] = "EX6"
-             /\ sep' = [sep EXCEPT ![tid[self]][0].lo = 0]
-             /\ pc' = [pc EXCEPT ![self] = "EX7"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
-                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
-
-EX7(self) == /\ pc[self] = "EX7"
-             /\ /\ fst' = [fst EXCEPT ![tid[self]][0].lo = INV]
-                /\ xx' = [xx EXCEPT ![self] = fst[tid[self]][0].lo]
-             /\ IF xx'[self] \notin {NULL, INV}
-                   THEN /\ xcap' = [xcap EXCEPT ![self] = <<xx'[self]>>]
-                   ELSE /\ TRUE
-                        /\ xcap' = xcap
-             /\ pc' = [pc EXCEPT ![self] = "EX7b"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, sep, 
-                             res, nst, nnx, nbl, nro, nbe, cell, nalloc, pool, 
-                             ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, plc, 
-                             flst, lcnt, cep, dep, cbe, inr, held, lvl, gdep, 
-                             rv, rok, opi, afr, acl, detaching, adv, errs, 
-                             stack, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                             fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                             ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                             sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                             hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xu, xr, xph, xpt >>
-
-EX7b(self) == /\ pc[self] = "EX7b"
-              /\ sep' = [sep EXCEPT ![tid[self]][2].lo = 0]
-              /\ pc' = [pc EXCEPT ![self] = "EX7c"]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                              acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, stack, which, ah, aseen, rt, pk, ph, 
-                              pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
-                              dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                              tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                              swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
-                              hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
-                              hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, 
-                              rsi, rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, 
-                              lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
-
-EX7c(self) == /\ pc[self] = "EX7c"
-              /\ /\ fst' = [fst EXCEPT ![tid[self]][2].lo = INV]
-                 /\ xx' = [xx EXCEPT ![self] = fst[tid[self]][2].lo]
-              /\ IF xx'[self] \notin {NULL, INV}
-                    THEN /\ xcap' = [xcap EXCEPT ![self] = Append(xcap[self], xx'[self])]
-                    ELSE /\ TRUE
-                         /\ xcap' = xcap
-              /\ IF MutTidEarly
-                    THEN /\ /\ rt' = [rt EXCEPT ![self] = tid[self]]
-                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ReleaseTid",
-                                                                     pc        |->  "EX8",
-                                                                     rt        |->  rt[self] ] >>
-                                                                 \o stack[self]]
-                         /\ pc' = [pc EXCEPT ![self] = "RL0"]
-                    ELSE /\ pc' = [pc EXCEPT ![self] = "EX8"]
-                         /\ UNCHANGED << stack, rt >>
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                              acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                              lvl, gdep, rv, rok, opi, afr, acl, detaching, 
-                              adv, errs, which, ah, aseen, pk, ph, pt, pe, ai, 
-                              am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xu, xr, xph, xpt >>
-
-EX8(self) == /\ pc[self] = "EX8"
-             /\ IF xcap[self] = <<>> /\ MutExitInactive
-                   THEN /\ pc' = [pc EXCEPT ![self] = "EX11"]
-                        /\ UNCHANGED << stack, tf, tacc, tcache, tnx, trf, tt, 
-                                        tdo, twas, tloc, tlc, xx, xcap >>
-                   ELSE /\ IF xcap[self] = <<>>
-                              THEN /\ pc' = [pc EXCEPT ![self] = "EX12"]
-                                   /\ UNCHANGED << stack, tf, tacc, tcache, 
-                                                   tnx, trf, tt, tdo, twas, 
-                                                   tloc, tlc, xx, xcap >>
-                              ELSE /\ IF MutExitInactive
-                                         THEN /\ /\ xcap' = [xcap EXCEPT ![self] = Tail(xcap[self])]
-                                                 /\ xx' = [xx EXCEPT ![self] = Head(xcap[self])]
-                                              /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "TIC",
-                                                                                          pc        |->  "EX8",
-                                                                                          tdo       |->  tdo[self],
-                                                                                          twas      |->  twas[self],
-                                                                                          tloc      |->  tloc[self],
-                                                                                          tlc       |->  tlc[self],
-                                                                                          tt        |->  tt[self] ] >>
-                                                                                      \o stack[self]]
-                                                 /\ tt' = [tt EXCEPT ![self] = xx'[self]]
-                                              /\ tdo' = [tdo EXCEPT ![self] = FALSE]
-                                              /\ twas' = [twas EXCEPT ![self] = FALSE]
-                                              /\ tloc' = [tloc EXCEPT ![self] = NULL]
-                                              /\ tlc' = [tlc EXCEPT ![self] = 0]
-                                              /\ pc' = [pc EXCEPT ![self] = "TC1"]
-                                              /\ UNCHANGED << tf, tacc, tcache, 
-                                                              tnx, trf >>
-                                         ELSE /\ /\ xcap' = [xcap EXCEPT ![self] = Tail(xcap[self])]
-                                                 /\ xx' = [xx EXCEPT ![self] = Head(xcap[self])]
-                                              /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Traverse",
-                                                                                          pc        |->  "EX9",
-                                                                                          tnx       |->  tnx[self],
-                                                                                          trf       |->  trf[self],
-                                                                                          tf        |->  tf[self],
-                                                                                          tacc      |->  tacc[self],
-                                                                                          tcache    |->  tcache[self] ] >>
-                                                                                      \o stack[self]]
-                                                 /\ tacc' = [tacc EXCEPT ![self] = NULL]
-                                                 /\ tcache' = [tcache EXCEPT ![self] = 0]
-                                                 /\ tf' = [tf EXCEPT ![self] = xx'[self]]
-                                              /\ tnx' = [tnx EXCEPT ![self] = NULL]
-                                              /\ trf' = [trf EXCEPT ![self] = NULL]
-                                              /\ pc' = [pc EXCEPT ![self] = "TV1"]
-                                              /\ UNCHANGED << tt, tdo, twas, 
-                                                              tloc, tlc >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, dn, di, fl, fc, fnx, fci, dwas, dl, ce, 
-                             ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
-                             spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, hh, 
-                             hsq, hce, hol, hoh, hps, hep, rf, rr, rsk, rmx, 
-                             ri, rl, rmin, radj, rprv, rsi, rsj, rlate, rn, 
-                             ecnt, ef, el, ewas, pce, pa, lc, lp, lpi, le, la, 
-                             uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, xf, 
-                             xl, xu, xr, xph, xpt >>
-
-EX9(self) == /\ pc[self] = "EX9"
-             /\ /\ rv' = [rv EXCEPT ![self] = 0]
-                /\ xu' = [xu EXCEPT ![self] = rv[self]]
-             /\ pc' = [pc EXCEPT ![self] = "EX10"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
-                             pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xr, xph, xpt >>
-
-EX10(self) == /\ pc[self] = "EX10"
-              /\ IF xu[self] = NULL
-                    THEN /\ pc' = [pc EXCEPT ![self] = "EX8"]
-                         /\ UNCHANGED << nnx, nro, xu, xph, xpt >>
-                    ELSE /\ /\ nnx' = [nnx EXCEPT ![xu[self]] = xph[self]]
-                            /\ nro' = [nro EXCEPT ![xu[self]] = BIAS]
-                            /\ xph' = [xph EXCEPT ![self] = xu[self]]
-                            /\ xpt' = [xpt EXCEPT ![self] = IF xpt[self] = NULL THEN xu[self] ELSE xpt[self]]
-                            /\ xu' = [xu EXCEPT ![self] = nnx[xu[self]]]
-                         /\ pc' = [pc EXCEPT ![self] = "EX10"]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nbl, nbe, cell, nalloc, pool, 
-                              ninc, plk, tid, pinc, bfst, blst, bcnt, acnt, 
-                              plc, flst, lcnt, cep, dep, cbe, inr, held, lvl, 
-                              gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                              errs, stack, which, ah, aseen, rt, pk, ph, pt, 
-                              pe, ai, am, ac, tf, tacc, tcache, tnx, trf, dn, 
-                              di, fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, 
-                              dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                              spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                              rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
-                              rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                              lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xr >>
-
-EX11(self) == /\ pc[self] = "EX11"
-              /\ IF MutExitInactive /\ flst[self] # NULL
-                    THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Drain",
-                                                                  pc        |->  "EX12",
-                                                                  dwas      |->  dwas[self],
-                                                                  dl        |->  dl[self] ] >>
-                                                              \o stack[self]]
-                         /\ dwas' = [dwas EXCEPT ![self] = FALSE]
-                         /\ dl' = [dl EXCEPT ![self] = NULL]
-                         /\ pc' = [pc EXCEPT ![self] = "DF1"]
-                    ELSE /\ pc' = [pc EXCEPT ![self] = "EX12"]
-                         /\ UNCHANGED << stack, dwas, dl >>
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
-                              nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                              held, lvl, gdep, rv, rok, opi, afr, acl, 
-                              detaching, adv, errs, which, ah, aseen, rt, pk, 
-                              ph, pt, pe, ai, am, ac, tf, tacc, tcache, tnx, 
-                              trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
-                              tloc, tlc, ce, ix, dt, dlo, sk, tg, kl, kt, swas, 
-                              spe, ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, 
-                              hx, he, hme, hh, hsq, hce, hol, hoh, hps, hep, 
-                              rf, rr, rsk, rmx, ri, rl, rmin, radj, rprv, rsi, 
-                              rsj, rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, 
-                              lp, lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, 
-                              fl2, xsv, xown, xf, xl, xx, xcap, xu, xr, xph, 
-                              xpt >>
-
-EX12(self) == /\ pc[self] = "EX12"
-              /\ IF xph[self] # NULL
-                    THEN /\ /\ ph' = [ph EXCEPT ![self] = xph[self]]
-                            /\ pk' = [pk EXCEPT ![self] = tid[self]]
-                            /\ pt' = [pt EXCEPT ![self] = xpt[self]]
-                            /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "ParkOrphans",
-                                                                     pc        |->  "EX12b",
-                                                                     pe        |->  pe[self],
-                                                                     pk        |->  pk[self],
-                                                                     ph        |->  ph[self],
-                                                                     pt        |->  pt[self] ] >>
-                                                                 \o stack[self]]
-                         /\ pe' = [pe EXCEPT ![self] = NULL]
-                         /\ pc' = [pc EXCEPT ![self] = "PK0"]
-                    ELSE /\ pc' = [pc EXCEPT ![self] = "EX12b"]
-                         /\ UNCHANGED << stack, pk, ph, pt, pe >>
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
-                              nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                              bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                              held, lvl, gdep, rv, rok, opi, afr, acl, 
-                              detaching, adv, errs, which, ah, aseen, rt, ai, 
-                              am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
-                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
-                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
-                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
-                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                              rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                              rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                              lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                              xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                                   hol, hoh, hps, hep, rf, rr, rpad, rmx, ri, 
+                                   rl, rmin, radj, rprv, rsi, rsj, rlate, rf0, 
+                                   rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                                   ul, lc, lp, lpi, le, la, uc, wc, wn, nn, 
+                                   fsv, ff, fl2, xf, xl, xx, xr >>
 
 EX12b(self) == /\ pc[self] = "EX12b"
                /\ IF ~MutTidEarly
@@ -7064,105 +6671,96 @@ EX12b(self) == /\ pc[self] = "EX12b"
                           /\ pc' = [pc EXCEPT ![self] = "RL0"]
                      ELSE /\ pc' = [pc EXCEPT ![self] = "EX13"]
                           /\ UNCHANGED << stack, rt >>
-               /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                               fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+               /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                               nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                                nalloc, pool, ninc, plk, tid, pinc, bfst, blst, 
-                               bcnt, acnt, plc, flst, lcnt, cep, dep, cbe, inr, 
-                               held, lvl, gdep, rv, rok, opi, afr, acl, 
-                               detaching, adv, errs, which, ah, aseen, pk, ph, 
-                               pt, pe, ai, am, ac, tf, tacc, tcache, tnx, trf, 
-                               dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
-                               tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
-                               swas, spe, ssq, sfi, spr, sce, sex, sre, sps, 
-                               hm, hmx, hx, he, hme, hh, hsq, hce, hol, hoh, 
-                               hps, hep, rf, rr, rsk, rmx, ri, rl, rmin, radj, 
-                               rprv, rsi, rsj, rlate, rn, ecnt, ef, el, ewas, 
-                               pce, pa, lc, lp, lpi, le, la, uc, wc, wn, nn, 
-                               fsv, fx, ff, fl2, xsv, xown, xf, xl, xx, xcap, 
-                               xu, xr, xph, xpt >>
+                               bcnt, acnt, plc, flst, lcnt, cep, cbe, inr, 
+                               held, lvl, rv, rok, opi, afr, acl, detaching, 
+                               adv, errs, ah, aseen, tf, tacc, tcache, tnx, 
+                               trf, dn, di, fl, fc, fnx, fci, tt, tdo, twas, 
+                               tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, 
+                               kl, kt, swas, spe, ssq, sfi, spr, sce, sex, sre, 
+                               sps, hm, hmx, hx, he, hme, hh, hsq, hce, hol, 
+                               hoh, hps, hep, rf, rr, rpad, rmx, ri, rl, rmin, 
+                               radj, rprv, rsi, rsj, rlate, rf0, rbh, rn, ecnt, 
+                               ef, el, ewas, pce, pa, pl, ul, lc, lp, lpi, le, 
+                               la, uc, wc, wn, nn, fsv, ff, fl2, xf, xl, xx, 
+                               xr >>
 
 EX13(self) == /\ pc[self] = "EX13"
               /\ /\ cep' = [cep EXCEPT ![self] = 0]
-                 /\ dep' = [dep EXCEPT ![self] = 0]
-                 /\ gdep' = [gdep EXCEPT ![self] = 0]
                  /\ inr' = [inr EXCEPT ![self] = FALSE]
-                 /\ pinc' = [pinc EXCEPT ![self] = xsv[self]]
+                 /\ pinc' = [pinc EXCEPT ![self] = IF MutNestedDtors THEN pinc[self] - 1 ELSE 0]
                  /\ tid' = [tid EXCEPT ![self] = NoTid]
               /\ pc' = [pc EXCEPT ![self] = Head(stack[self]).pc]
-              /\ xsv' = [xsv EXCEPT ![self] = Head(stack[self]).xsv]
-              /\ xown' = [xown EXCEPT ![self] = Head(stack[self]).xown]
               /\ xf' = [xf EXCEPT ![self] = Head(stack[self]).xf]
               /\ xl' = [xl EXCEPT ![self] = Head(stack[self]).xl]
               /\ xx' = [xx EXCEPT ![self] = Head(stack[self]).xx]
-              /\ xcap' = [xcap EXCEPT ![self] = Head(stack[self]).xcap]
-              /\ xu' = [xu EXCEPT ![self] = Head(stack[self]).xu]
               /\ xr' = [xr EXCEPT ![self] = Head(stack[self]).xr]
-              /\ xph' = [xph EXCEPT ![self] = Head(stack[self]).xph]
-              /\ xpt' = [xpt EXCEPT ![self] = Head(stack[self]).xpt]
               /\ stack' = [stack EXCEPT ![self] = Tail(stack[self])]
-              /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, 
-                              fst, sep, res, nst, nnx, nbl, nro, nbe, cell, 
+              /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, 
+                              nnx, nbl, nro, nbe, fil, inlist, sub, cell, 
                               nalloc, pool, ninc, plk, bfst, blst, bcnt, acnt, 
                               plc, flst, lcnt, cbe, held, lvl, rv, rok, opi, 
-                              afr, acl, detaching, adv, errs, which, ah, aseen, 
-                              rt, pk, ph, pt, pe, ai, am, ac, tf, tacc, tcache, 
-                              tnx, trf, dn, di, fl, fc, fnx, fci, tt, tdo, 
-                              twas, tloc, tlc, dwas, dl, ce, ix, dt, dlo, sk, 
-                              tg, kl, kt, swas, spe, ssq, sfi, spr, sce, sex, 
-                              sre, sps, hm, hmx, hx, he, hme, hh, hsq, hce, 
-                              hol, hoh, hps, hep, rf, rr, rsk, rmx, ri, rl, 
-                              rmin, radj, rprv, rsi, rsj, rlate, rn, ecnt, ef, 
-                              el, ewas, pce, pa, lc, lp, lpi, le, la, uc, wc, 
-                              wn, nn, fsv, fx, ff, fl2 >>
+                              afr, acl, detaching, adv, errs, ah, aseen, rt, 
+                              tf, tacc, tcache, tnx, trf, dn, di, fl, fc, fnx, 
+                              fci, tt, tdo, twas, tloc, tlc, dwas, dl, ce, ix, 
+                              dt, dlo, sk, tg, kl, kt, swas, spe, ssq, sfi, 
+                              spr, sce, sex, sre, sps, hm, hmx, hx, he, hme, 
+                              hh, hsq, hce, hol, hoh, hps, hep, rf, rr, rpad, 
+                              rmx, ri, rl, rmin, radj, rprv, rsi, rsj, rlate, 
+                              rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, pl, 
+                              ul, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                              fl2 >>
 
-Exit(self) == EX1(self) \/ ExitAdopt(self) \/ ExitSubmit(self)
-                 \/ ExitSubmit2(self) \/ ExitAdvance(self)
-                 \/ ExitTake(self) \/ ExitFree(self) \/ ExitRound(self)
-                 \/ ExitParkRest(self) \/ EX6(self) \/ EX7(self)
-                 \/ EX7b(self) \/ EX7c(self) \/ EX8(self) \/ EX9(self)
-                 \/ EX10(self) \/ EX11(self) \/ EX12(self) \/ EX12b(self)
-                 \/ EX13(self)
+Exit(self) == EX1(self) \/ ExitMark(self) \/ ExitLeave(self)
+                 \/ ExitLeave2(self) \/ ExitPlace(self) \/ ExitHelp(self)
+                 \/ ExitAdvance(self) \/ ExitFree(self) \/ ExitRound(self)
+                 \/ EX12b(self) \/ EX13(self)
 
 TH2(self) == /\ pc[self] = "TH2"
              /\ opi' = [opi EXCEPT ![self] = opi[self] + 1]
              /\ IF opi'[self] > Len(Prog[self])
                    THEN /\ pc' = [pc EXCEPT ![self] = "Done"]
-                        /\ UNCHANGED << stack, pce, pa, lc, lp, lpi, le, la, 
-                                        uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, 
-                                        xown, xf, xl, xx, xcap, xu, xr, xph, 
-                                        xpt >>
+                        /\ UNCHANGED << stack, pce, pa, pl, ul, lc, lp, lpi, 
+                                        le, la, uc, wc, wn, nn, fsv, ff, fl2, 
+                                        xf, xl, xx, xr >>
                    ELSE /\ IF Prog[self][opi'[self]].k = "idle"
                               THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
                                                                             pc        |->  "TI2",
                                                                             pce       |->  pce[self],
-                                                                            pa        |->  pa[self] ] >>
+                                                                            pa        |->  pa[self],
+                                                                            pl        |->  pl[self] ] >>
                                                                         \o stack[self]]
                                    /\ pce' = [pce EXCEPT ![self] = 0]
                                    /\ pa' = [pa EXCEPT ![self] = 0]
+                                   /\ pl' = [pl EXCEPT ![self] = NULL]
                                    /\ pc' = [pc EXCEPT ![self] = "PN1"]
-                                   /\ UNCHANGED << lc, lp, lpi, le, la, uc, wc, 
-                                                   wn, nn, fsv, fx, ff, fl2, 
-                                                   xsv, xown, xf, xl, xx, xcap, 
-                                                   xu, xr, xph, xpt >>
+                                   /\ UNCHANGED << ul, lc, lp, lpi, le, la, uc, 
+                                                   wc, wn, nn, fsv, ff, fl2, 
+                                                   xf, xl, xx, xr >>
                               ELSE /\ IF Prog[self][opi'[self]].k = "pin"
                                          THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
                                                                                        pc        |->  "TH2",
                                                                                        pce       |->  pce[self],
-                                                                                       pa        |->  pa[self] ] >>
+                                                                                       pa        |->  pa[self],
+                                                                                       pl        |->  pl[self] ] >>
                                                                                    \o stack[self]]
                                               /\ pce' = [pce EXCEPT ![self] = 0]
                                               /\ pa' = [pa EXCEPT ![self] = 0]
+                                              /\ pl' = [pl EXCEPT ![self] = NULL]
                                               /\ pc' = [pc EXCEPT ![self] = "PN1"]
-                                              /\ UNCHANGED << lc, lp, lpi, le, 
-                                                              la, uc, wc, wn, 
-                                                              nn, fsv, fx, ff, 
-                                                              fl2, xsv, xown, 
-                                                              xf, xl, xx, xcap, 
-                                                              xu, xr, xph, xpt >>
+                                              /\ UNCHANGED << ul, lc, lp, lpi, 
+                                                              le, la, uc, wc, 
+                                                              wn, nn, fsv, ff, 
+                                                              fl2, xf, xl, xx, 
+                                                              xr >>
                                          ELSE /\ IF Prog[self][opi'[self]].k = "unpin"
                                                     THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Unpin",
-                                                                                                  pc        |->  "TH2" ] >>
+                                                                                                  pc        |->  "TH2",
+                                                                                                  ul        |->  ul[self] ] >>
                                                                                               \o stack[self]]
+                                                         /\ ul' = [ul EXCEPT ![self] = NULL]
                                                          /\ pc' = [pc EXCEPT ![self] = "UP1"]
                                                          /\ UNCHANGED << lc, 
                                                                          lp, 
@@ -7174,19 +6772,12 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                          wn, 
                                                                          nn, 
                                                                          fsv, 
-                                                                         fx, 
                                                                          ff, 
                                                                          fl2, 
-                                                                         xsv, 
-                                                                         xown, 
                                                                          xf, 
                                                                          xl, 
                                                                          xx, 
-                                                                         xcap, 
-                                                                         xu, 
-                                                                         xr, 
-                                                                         xph, 
-                                                                         xpt >>
+                                                                         xr >>
                                                     ELSE /\ IF Prog[self][opi'[self]].k = "ld"
                                                                THEN /\ /\ lc' = [lc EXCEPT ![self] = Prog[self][opi'[self]].c]
                                                                        /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Load",
@@ -7207,19 +6798,12 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                     wn, 
                                                                                     nn, 
                                                                                     fsv, 
-                                                                                    fx, 
                                                                                     ff, 
                                                                                     fl2, 
-                                                                                    xsv, 
-                                                                                    xown, 
                                                                                     xf, 
                                                                                     xl, 
                                                                                     xx, 
-                                                                                    xcap, 
-                                                                                    xu, 
-                                                                                    xr, 
-                                                                                    xph, 
-                                                                                    xpt >>
+                                                                                    xr >>
                                                                ELSE /\ IF Prog[self][opi'[self]].k = "lu"
                                                                           THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "LoadU",
                                                                                                                            pc        |->  "TH2",
@@ -7231,19 +6815,12 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                wn, 
                                                                                                nn, 
                                                                                                fsv, 
-                                                                                               fx, 
                                                                                                ff, 
                                                                                                fl2, 
-                                                                                               xsv, 
-                                                                                               xown, 
                                                                                                xf, 
                                                                                                xl, 
                                                                                                xx, 
-                                                                                               xcap, 
-                                                                                               xu, 
-                                                                                               xr, 
-                                                                                               xph, 
-                                                                                               xpt >>
+                                                                                               xr >>
                                                                           ELSE /\ IF Prog[self][opi'[self]].k = "wr"
                                                                                      THEN /\ /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Write",
                                                                                                                                       pc        |->  "TH2",
@@ -7255,19 +6832,12 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                           /\ pc' = [pc EXCEPT ![self] = "WR1"]
                                                                                           /\ UNCHANGED << nn, 
                                                                                                           fsv, 
-                                                                                                          fx, 
                                                                                                           ff, 
                                                                                                           fl2, 
-                                                                                                          xsv, 
-                                                                                                          xown, 
                                                                                                           xf, 
                                                                                                           xl, 
                                                                                                           xx, 
-                                                                                                          xcap, 
-                                                                                                          xu, 
-                                                                                                          xr, 
-                                                                                                          xph, 
-                                                                                                          xpt >>
+                                                                                                          xr >>
                                                                                      ELSE /\ IF Prog[self][opi'[self]].k = "rt"
                                                                                                 THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "RetireNew",
                                                                                                                                               pc        |->  "TH2",
@@ -7276,66 +6846,39 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                      /\ nn' = [nn EXCEPT ![self] = NULL]
                                                                                                      /\ pc' = [pc EXCEPT ![self] = "RN1"]
                                                                                                      /\ UNCHANGED << fsv, 
-                                                                                                                     fx, 
                                                                                                                      ff, 
                                                                                                                      fl2, 
-                                                                                                                     xsv, 
-                                                                                                                     xown, 
                                                                                                                      xf, 
                                                                                                                      xl, 
                                                                                                                      xx, 
-                                                                                                                     xcap, 
-                                                                                                                     xu, 
-                                                                                                                     xr, 
-                                                                                                                     xph, 
-                                                                                                                     xpt >>
+                                                                                                                     xr >>
                                                                                                 ELSE /\ IF Prog[self][opi'[self]].k = "fl"
                                                                                                            THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Flush",
                                                                                                                                                          pc        |->  "TH2",
                                                                                                                                                          fsv       |->  fsv[self],
-                                                                                                                                                         fx        |->  fx[self],
                                                                                                                                                          ff        |->  ff[self],
                                                                                                                                                          fl2       |->  fl2[self] ] >>
                                                                                                                                                      \o stack[self]]
                                                                                                                 /\ fsv' = [fsv EXCEPT ![self] = 0]
-                                                                                                                /\ fx' = [fx EXCEPT ![self] = NULL]
                                                                                                                 /\ ff' = [ff EXCEPT ![self] = NULL]
                                                                                                                 /\ fl2' = [fl2 EXCEPT ![self] = NULL]
                                                                                                                 /\ pc' = [pc EXCEPT ![self] = "FL1"]
-                                                                                                                /\ UNCHANGED << xsv, 
-                                                                                                                                xown, 
-                                                                                                                                xf, 
+                                                                                                                /\ UNCHANGED << xf, 
                                                                                                                                 xl, 
                                                                                                                                 xx, 
-                                                                                                                                xcap, 
-                                                                                                                                xu, 
-                                                                                                                                xr, 
-                                                                                                                                xph, 
-                                                                                                                                xpt >>
+                                                                                                                                xr >>
                                                                                                            ELSE /\ IF Prog[self][opi'[self]].k = "ex"
                                                                                                                       THEN /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Exit",
                                                                                                                                                                     pc        |->  "TH2",
-                                                                                                                                                                    xsv       |->  xsv[self],
-                                                                                                                                                                    xown      |->  xown[self],
                                                                                                                                                                     xf        |->  xf[self],
                                                                                                                                                                     xl        |->  xl[self],
                                                                                                                                                                     xx        |->  xx[self],
-                                                                                                                                                                    xcap      |->  xcap[self],
-                                                                                                                                                                    xu        |->  xu[self],
-                                                                                                                                                                    xr        |->  xr[self],
-                                                                                                                                                                    xph       |->  xph[self],
-                                                                                                                                                                    xpt       |->  xpt[self] ] >>
+                                                                                                                                                                    xr        |->  xr[self] ] >>
                                                                                                                                                                 \o stack[self]]
-                                                                                                                           /\ xsv' = [xsv EXCEPT ![self] = 0]
-                                                                                                                           /\ xown' = [xown EXCEPT ![self] = NoSkip]
                                                                                                                            /\ xf' = [xf EXCEPT ![self] = NULL]
                                                                                                                            /\ xl' = [xl EXCEPT ![self] = NULL]
                                                                                                                            /\ xx' = [xx EXCEPT ![self] = NULL]
-                                                                                                                           /\ xcap' = [xcap EXCEPT ![self] = <<>>]
-                                                                                                                           /\ xu' = [xu EXCEPT ![self] = NULL]
                                                                                                                            /\ xr' = [xr EXCEPT ![self] = 0]
-                                                                                                                           /\ xph' = [xph EXCEPT ![self] = NULL]
-                                                                                                                           /\ xpt' = [xpt EXCEPT ![self] = NULL]
                                                                                                                            /\ pc' = [pc EXCEPT ![self] = "EX1"]
                                                                                                                       ELSE /\ IF Prog[self][opi'[self]].k = "join"
                                                                                                                                  THEN /\ pc' = [pc EXCEPT ![self] = "THJ"]
@@ -7345,18 +6888,11 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                                                                                        THEN /\ pc' = [pc EXCEPT ![self] = "THA"]
                                                                                                                                                        ELSE /\ pc' = [pc EXCEPT ![self] = "THJ"]
                                                                                                                            /\ UNCHANGED << stack, 
-                                                                                                                                           xsv, 
-                                                                                                                                           xown, 
                                                                                                                                            xf, 
                                                                                                                                            xl, 
                                                                                                                                            xx, 
-                                                                                                                                           xcap, 
-                                                                                                                                           xu, 
-                                                                                                                                           xr, 
-                                                                                                                                           xph, 
-                                                                                                                                           xpt >>
+                                                                                                                                           xr >>
                                                                                                                 /\ UNCHANGED << fsv, 
-                                                                                                                                fx, 
                                                                                                                                 ff, 
                                                                                                                                 fl2 >>
                                                                                                      /\ nn' = nn
@@ -7368,123 +6904,122 @@ TH2(self) == /\ pc[self] = "TH2"
                                                                                     lpi, 
                                                                                     le, 
                                                                                     la >>
-                                              /\ UNCHANGED << pce, pa >>
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+                                                         /\ ul' = ul
+                                              /\ UNCHANGED << pce, pa, pl >>
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas >>
 
 THJ(self) == /\ pc[self] = "THJ"
              /\ pc[Prog[self][opi[self]].c] = "Done"
              /\ pc' = [pc EXCEPT ![self] = "TH2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 THR(self) == /\ pc[self] = "THR"
              /\ rel # {}
              /\ pc' = [pc EXCEPT ![self] = "TH2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 THA(self) == /\ pc[self] = "THA"
              /\ opi[Prog[self][opi[self]].c] > Prog[self][opi[self]].n \/ pc[Prog[self][opi[self]].c] = "Done"
              /\ pc' = [pc EXCEPT ![self] = "TH2"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, stack, which, ah, aseen, rt, pk, ph, pt, pe, 
-                             ai, am, ac, tf, tacc, tcache, tnx, trf, dn, di, 
-                             fl, fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, 
-                             dl, ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, 
-                             ssq, sfi, spr, sce, sex, sre, sps, hm, hmx, hx, 
-                             he, hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, 
+                             stack, ah, aseen, rt, tf, tacc, tcache, tnx, trf, 
+                             dn, di, fl, fc, fnx, fci, tt, tdo, twas, tloc, 
+                             tlc, dwas, dl, ce, ix, dt, dlo, sk, tg, kl, kt, 
+                             swas, spe, ssq, sfi, spr, sce, sex, sre, sps, hm, 
+                             hmx, hx, he, hme, hh, hsq, hce, hol, hoh, hps, 
+                             hep, rf, rr, rpad, rmx, ri, rl, rmin, radj, rprv, 
+                             rsi, rsj, rlate, rf0, rbh, rn, ecnt, ef, el, ewas, 
+                             pce, pa, pl, ul, lc, lp, lpi, le, la, uc, wc, wn, 
+                             nn, fsv, ff, fl2, xf, xl, xx, xr >>
 
 TI2(self) == /\ pc[self] = "TI2"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Unpin",
-                                                      pc        |->  "TI3" ] >>
+                                                      pc        |->  "TI3",
+                                                      ul        |->  ul[self] ] >>
                                                   \o stack[self]]
+             /\ ul' = [ul EXCEPT ![self] = NULL]
              /\ pc' = [pc EXCEPT ![self] = "UP1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, pce, pa, lc, lp, 
-                             lpi, le, la, uc, wc, wn, nn, fsv, fx, ff, fl2, 
-                             xsv, xown, xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, pce, pa, 
+                             pl, lc, lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, 
+                             fl2, xf, xl, xx, xr >>
 
 TI3(self) == /\ pc[self] = "TI3"
              /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "Pin",
                                                       pc        |->  "TI2",
                                                       pce       |->  pce[self],
-                                                      pa        |->  pa[self] ] >>
+                                                      pa        |->  pa[self],
+                                                      pl        |->  pl[self] ] >>
                                                   \o stack[self]]
              /\ pce' = [pce EXCEPT ![self] = 0]
              /\ pa' = [pa EXCEPT ![self] = 0]
+             /\ pl' = [pl EXCEPT ![self] = NULL]
              /\ pc' = [pc EXCEPT ![self] = "PN1"]
-             /\ UNCHANGED << ep, slow, ntid, rel, orw, orphaned, lkT, lkO, fst, 
-                             sep, res, nst, nnx, nbl, nro, nbe, cell, nalloc, 
+             /\ UNCHANGED << ep, slow, ntid, rel, lkT, fst, sep, res, nst, nnx, 
+                             nbl, nro, nbe, fil, inlist, sub, cell, nalloc, 
                              pool, ninc, plk, tid, pinc, bfst, blst, bcnt, 
-                             acnt, plc, flst, lcnt, cep, dep, cbe, inr, held, 
-                             lvl, gdep, rv, rok, opi, afr, acl, detaching, adv, 
-                             errs, which, ah, aseen, rt, pk, ph, pt, pe, ai, 
-                             am, ac, tf, tacc, tcache, tnx, trf, dn, di, fl, 
+                             acnt, plc, flst, lcnt, cep, cbe, inr, held, lvl, 
+                             rv, rok, opi, afr, acl, detaching, adv, errs, ah, 
+                             aseen, rt, tf, tacc, tcache, tnx, trf, dn, di, fl, 
                              fc, fnx, fci, tt, tdo, twas, tloc, tlc, dwas, dl, 
                              ce, ix, dt, dlo, sk, tg, kl, kt, swas, spe, ssq, 
                              sfi, spr, sce, sex, sre, sps, hm, hmx, hx, he, 
                              hme, hh, hsq, hce, hol, hoh, hps, hep, rf, rr, 
-                             rsk, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
-                             rlate, rn, ecnt, ef, el, ewas, lc, lp, lpi, le, 
-                             la, uc, wc, wn, nn, fsv, fx, ff, fl2, xsv, xown, 
-                             xf, xl, xx, xcap, xu, xr, xph, xpt >>
+                             rpad, rmx, ri, rl, rmin, radj, rprv, rsi, rsj, 
+                             rlate, rf0, rbh, rn, ecnt, ef, el, ewas, ul, lc, 
+                             lp, lpi, le, la, uc, wc, wn, nn, fsv, ff, fl2, xf, 
+                             xl, xx, xr >>
 
 Th(self) == TH2(self) \/ THJ(self) \/ THR(self) \/ THA(self) \/ TI2(self)
                \/ TI3(self)
@@ -7494,8 +7029,7 @@ Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
                /\ UNCHANGED vars
 
 Next == (\E self \in ProcSet:  \/ SpinLock(self) \/ AllocTid(self)
-                               \/ ReleaseTid(self) \/ ParkOrphans(self)
-                               \/ AdoptOrphans(self) \/ Traverse(self)
+                               \/ ReleaseTid(self) \/ Traverse(self)
                                \/ Destroy(self) \/ FreeBatch(self)
                                \/ TIC(self) \/ Drain(self) \/ DoUpdate(self)
                                \/ Detach(self) \/ SlowPath(self)
@@ -7535,7 +7069,7 @@ Tick(t) ==
     ELSE [wf[t] EXCEPT ![Len(wf[t])].n = @ + 1]
 
 TStep(t) ==
-    \/ Th(t) \/ SpinLock(t) \/ AllocTid(t) \/ ReleaseTid(t) \/ ParkOrphans(t) \/ AdoptOrphans(t)
+    \/ Th(t) \/ SpinLock(t) \/ AllocTid(t) \/ ReleaseTid(t)
     \/ Traverse(t) \/ Destroy(t) \/ FreeBatch(t) \/ TIC(t) \/ Drain(t)
     \/ DoUpdate(t) \/ Detach(t) \/ SlowPath(t) \/ HelpRead(t) \/ HelpThread(t)
     \/ TryRetire(t) \/ Retire(t) \/ Pin(t) \/ Unpin(t) \/ Load(t) \/ LoadU(t) \/ Write(t)
@@ -7558,7 +7092,10 @@ EpochBound == ep <= MaxEpoch
 \* loop at most twice, a detach retries only for the try_retires past their scan
 \* when the era closed, one per thread and nesting level of its destructors (detach_nodes),
 \* alloc_tid claims at most one bit per released id and retries its compare_exchange at most once
-\* per id another thread took (slot.rs), an exit runs EXIT_ROUNDS rounds.
+\* per id another thread took (slot.rs), and an exit (or a flush) places its batch once and then
+\* once more per destructor run that retired, its slot being inactive meanwhile so no other
+\* thread's retire lands in it: at most 1 + DtorRuns rounds, DtorRuns the destructor programs
+\* that can run (one per id with a program, per life of that id).
 \* Recycling changes none of these. Only the detach bound involves nodes, through the nesting of
 \* destructors, which DtorDepth counts by node id. A node's next life starts only once its
 \* destructor has ended (the take needs the node in the pool, and the destructor's last step is
@@ -7566,6 +7103,10 @@ EpochBound == ep <= MaxEpoch
 \* still at most one level per id with a destructor program.
 DtorDepth == Cardinality({n \in Nodes : Dtor[n] # <<>>})
 DetachBound == 2 + Cardinality(Threads) * (1 + DtorDepth)
+RECURSIVE SumOver(_, _)
+SumOver(f, S) == IF S = {} THEN 0 ELSE LET x == CHOOSE y \in S : TRUE IN f[x] + SumOver(f, S \ {x})
+DtorRuns == SumOver([n \in Nodes |-> IF Dtor[n] # <<>> THEN 1 + ninc[n] ELSE 0], Nodes)
+Rounds == 1 + DtorRuns
 LoopBounds ==
     \A t \in Threads :
         /\ sps[t] <= MaxTid + 2
@@ -7574,7 +7115,7 @@ LoopBounds ==
         /\ kt[t] <= DetachBound
         /\ acl[t] <= MaxTid
         /\ afr[t] <= MaxTid
-        /\ xr[t] <= ExitRounds
+        /\ xr[t] <= Rounds
 
 \* Every operation's steps, the destructors it runs apart (each of their operations is counted on
 \* its own), within a bound that depends on T, the constants and the retirement history only:
@@ -7593,9 +7134,6 @@ LoopBounds ==
 \* id-count bound respected there too.) Without Recycle no id is ever taken back, every ninc
 \* stays 0, and Objects is MaxNodes, the bound before recycling.
 \*
-\* The sum of f over the set S (f a function, S a finite part of its domain).
-RECURSIVE SumOver(_, _)
-SumOver(f, S) == IF S = {} THEN 0 ELSE LET x == CHOOSE y \in S : TRUE IN f[x] + SumOver(f, S \ {x})
 \* Node objects so far: one first life per id (MaxNodes, which bounds the fresh allocations),
 \* plus one per take from the pool (the sum of every id's incarnation count).
 Objects == MaxNodes + SumOver(ninc, Nodes)
@@ -7612,7 +7150,9 @@ TravCtl == 1
 FreeCtl == 1
 DrainCtl == 2 + FreeCtl
 TICCtl == 3 + FreeCtl + TravCtl
-DoUpdCtl == 4 + TICCtl
+DoUpdCtl == 5 + TICCtl
+\* UP1, LeaveMark, Leave with its traversal, LeaveDrain with its drain.
+LeaveCtl == 4 + TravCtl + DrainCtl
 TidCtl == 4 + 2 * MaxTid + 2 * (MaxTid + 1)
 DetachCtl == 1 + 3 * DetachBound
 \* SP1-SP5; per pass SL1-SL7 with SL5b and a traversal; the self-completion (SL2a-SL2d, a
@@ -7623,27 +7163,31 @@ SlowCtl == 5 + (MaxTid + 2) * (8 + TICCtl) + (4 + DrainCtl) + (9 + DetachCtl + T
 \* that ends it), HandOverList, HelperLeave and its traversal, HT20 and a drain.
 HelpCtl == 4 + (MaxTid + 2) * (5 + DoUpdCtl) + (10 + DetachCtl + 2 * TICCtl + DrainCtl)
 HelpReadCtl == 3 + MaxTid * (1 + HelpCtl)
-TryCtl == 5 + 7 * MaxTid
+\* TR1, the scan (at most seven steps per thread), TN1, TF1, TF2.
+TryCtl == 6 + 7 * MaxTid
 RetireCtl == 7 + TryCtl + TidCtl + HelpReadCtl
-AdoptCtl == 6 + 2 * MaxTid
-PinCtl == 2 + TidCtl + PinAttempts * (2 + DoUpdCtl) + SlowCtl
-\* FL1-FL4, FL6, FL7, FlushClear-FlushClear3, FL9, a tid claimed, two traversals, two drains.
-\* The claim (TidCtl, the steps of alloc_tid) is new: a flush on a thread with no tid claims one
-\* when batches are parked, and a bound without those steps would not cover that flush.
-FlushCtl == 10 + TidCtl + 2 * TICCtl + 2 * DrainCtl + AdoptCtl + TryCtl + HelpReadCtl
+\* PN1, PNE, PNX, PNX2, PNG, PNT with its traversal, PNF, then the attempts (a do_update and PNC
+\* each) and the slow path.
+PinCtl == 7 + TravCtl + TidCtl + PinAttempts * (2 + DoUpdCtl) + SlowCtl
+\* One round of a flush or an exit: the placement (FL4 or ExitPlace, a try_retire), the help
+\* and the advance, the drain and the check.
+RoundCtl == 5 + TryCtl + HelpReadCtl + DrainCtl
+\* FL1 with a tid claimed, the rounds, FL9.
+FlushCtl == 2 + TidCtl + Rounds * RoundCtl
 \* The exit of a thread with no tid whose batch holds a value first claims one, then passes EX1
-\* once more: the last TidCtl + 1 count those steps, which the bound would otherwise leave out.
-ExitCtl == 20 + ExitRounds * (8 + TryCtl + TICCtl) + TidCtl + 6 + TidCtl + 1
+\* once more; then the leave (ExitMark, ExitLeave with its traversal, ExitLeave2), the rounds, EX12b,
+\* EX13.
+ExitCtl == 2 + TidCtl + 3 + TravCtl + Rounds * RoundCtl + 2
 OpBound(op) ==
     CASE op = "ld" -> 3 * LoadAttempts + 1
       [] op = "lu" -> 1
-      [] op = "unpin" -> 3 + DoUpdCtl + 16 * Hist
-      [] op = "pin" -> PinCtl + 16 * Hist
+      [] op = "unpin" -> LeaveCtl + 20 * Hist
+      [] op = "pin" -> PinCtl + 20 * Hist
       \* a write or a retire of a fresh node: its first step, the take from the pool (with
       \* Recycle), the retire's own steps, and the per-object work of the whole history
-      [] op \in {"wr", "rt"} -> 1 + TakeCtl + RetireCtl + 16 * Hist
-      [] op = "fl" -> FlushCtl + 16 * Hist
-      [] op = "ex" -> ExitCtl + 16 * Hist
+      [] op \in {"wr", "rt"} -> 1 + TakeCtl + RetireCtl + 20 * Hist
+      [] op = "fl" -> FlushCtl + 20 * Hist
+      [] op = "ex" -> ExitCtl + 20 * Hist
 \* No operation in progress has taken more steps than its bound. Hist is evaluated in the state
 \* checked, so with Recycle it counts the objects made so far, whose number only grows.
 WaitFree == \A t \in Threads : \A i \in DOMAIN wf[t] : wf[t][i].n <= OpBound(wf[t][i].op)
@@ -7665,9 +7209,6 @@ NoUseAfterFree ==
 NoDoubleFree == "double_free" \notin errs
 \* A retire at a batch boundary finalizes the batch its cells hold, never an emptied one.
 NoNullDeref == "null_deref" \notin errs
-\* An outermost pin traverses its slot list whenever the global epoch is not the epoch the
-\* slot published when it was last drained.
-PinDrains == "pin_skips_drain" \notin errs
 \* Words kovan never produces: an RNODE-marked or INVPTR list head, a handed-over pointer.
 WellFormed == errs \cap {"list_word", "handoff"} = {}
 RECURSIVE ListFrom(_, _)
@@ -7688,36 +7229,99 @@ BirthFresh == "stale_birth" \notin errs
 
 \* Between two operations of its own program, with no guard live.
 AtRest(t) == pc[t] \in {"TH2", "Done"} /\ stack[t] = <<>> /\ pinc[t] = 0
-\* No thread holds the unconditional reservation outside the critical section that escalated.
-EscalationBounded ==
-    \A t \in Threads : AtRest(t) /\ tid[t] # NoTid => sep[tid[t]][0].lo # UNC
 
-\* After a flush with no guard live, the thread's reservation publishes epoch 0 until it pins
-\* again: no batch retired from then on is placed in its slot.
-FlushReleases ==
+\* S3, the activity invariant. A reservation slot is active (its list word is not INVPTR) only
+\* while its owner holds a guard, or is between the outermost drop's lowering of the count and
+\* its exchange (the label Leave; ExitLeave for the exit, whose EX1 set the count to 0), or
+\* holds a node an insert exchanged into the left slot and has not rolled back yet (the insert
+\* at InsertRollback, whose compare-exchange takes it out or counts it): a slot nobody owns
+\* (its tid released, or never handed out) is inactive. So a thread with no live guard is
+\* counted by no batch: every scan skips INVPTR before it reads anything else.
+\* An insert that exchanged its node into slot j of tid i and has not yet resolved it: the
+\* rollback, the taken-back check (TN5, TN6) and what follows it.
+PostLabels == {"InsertRollback", "TL1", "TL2", "TL3", "TN5", "TN6", "TN7", "TN8"}
+PendingInsert(i, j) ==
+    \E t \in Threads : rsi[t] = i /\ rsj[t] = j
+        /\ (pc[t] \in PostLabels \/ \E k \in DOMAIN stack[t] : stack[t][k].pc \in PostLabels)
+Owner(i) == {t \in Threads : tid[t] = i}
+ActiveOnlyPinned ==
+    \A i \in Tids :
+        fst[i][0].lo # INV /\ ~PendingInsert(i, 0)
+        => \E t \in Owner(i) : pinc[t] > 0 \/ pc[t] \in {"LeaveMark", "Leave", "ExitMark", "ExitLeave"}
+
+\* No batch lands on a left slot and stays: whenever a slot's era word carries the left tag and
+\* its list word is not INVPTR, its owner is between the tag store and the exchange of its leave
+\* (the helper slot: HelperLeave2) or an insert is in flight on it. So the leave race (two inserts
+\* racing a leave) leaves nothing behind that nobody traverses.
+NoBatchOnLeftSlot ==
+    \A i \in Tids :
+        /\ (sep[i][0].lo < 0 /\ fst[i][0].lo # INV /\ ~PendingInsert(i, 0))
+              => \E t \in Owner(i) : pc[t] \in {"Leave", "ExitLeave"}
+        /\ (sep[i][2].lo < 0 /\ fst[i][2].lo # INV /\ ~PendingInsert(i, 2))
+              => \E t \in Threads : pc[t] = "HelperLeave2" /\ hme[t] = i
+
+\* The reservation of a pinned thread is active from the end of its pin's activation on: the read
+\* after a clear cannot find the slot inactive.
+PinnedIsActive ==
     \A t \in Threads :
-        (/\ pc[t] = "TH2" /\ stack[t] = <<>> /\ pinc[t] = 0 /\ tid[t] # NoTid
-         /\ opi[t] \in DOMAIN Prog[t] /\ Prog[t][opi[t]].k = "fl")
-        => sep[tid[t]][0].lo = 0
+        (tid[t] # NoTid /\ pinc[t] > 0 /\ ~Entering(t) /\ ~Deactivating(t)
+            /\ pc[t] # "PNX")
+            => fst[tid[t]][0].lo # INV
+
+\* An idle thread holds nothing: between the operations of its program, with no guard live, its
+\* reservation and its helper slot are inactive (an insert still resolving apart) and its free-list
+\* cache is empty.
+IdleHoldsNothing ==
+    \A t \in Threads :
+        (AtRest(t) /\ tid[t] # NoTid)
+            => /\ (fst[tid[t]][0].lo = INV \/ PendingInsert(tid[t], 0))
+               /\ (fst[tid[t]][2].lo = INV \/ PendingInsert(tid[t], 2))
+               /\ flst[t] = NULL
+
+\* S4: a live guard's published epoch is at least the birth of every node it loaded under
+\* protection (a load of a node born later met a later global epoch and raised the slot's
+\* epoch to it before it returned), so a batch holding such a node is placed in the slot.
+EraCoversBirth ==
+    \A t \in Threads : \A h \in held[t] :
+        h[3] = "p" => tid[t] # NoTid /\ sep[tid[t]][0].lo >= nbe[h[1]]
 
 \* In a section (or while its flush or exit runs destructors), a thread's cached epoch never
 \* exceeds the epoch its slot publishes: the fast path's compare is sound.
-DeactLabels == {"EX7", "EX7b", "EX7c", "EX8", "EX9", "EX10", "EX11", "EX12", "EX12b", "EX13"}
+ExitLabels == {"ExitMark", "ExitLeave", "ExitLeave2", "ExitPlace", "ExitHelp", "ExitAdvance", "ExitFree",
+               "ExitRound", "EX12b", "EX13"}
 Deactivating(t) ==
-    pc[t] \in DeactLabels \/ \E i \in DOMAIN stack[t] : stack[t][i].pc \in DeactLabels
+    pc[t] \in ExitLabels \/ \E i \in DOMAIN stack[t] : stack[t][i].pc \in ExitLabels
+\* The pin raises the count first and clears the era word's tag at PNE, so the check starts there.
+Entering(t) == pc[t] = "PNE" \/ \E i \in DOMAIN stack[t] : stack[t][i].pc = "PNE"
 CacheBelowPublished ==
     \A t \in Threads :
-        (pinc[t] > 0 /\ tid[t] # NoTid /\ ~Deactivating(t)) => cep[t] <= sep[tid[t]][0].lo
+        (pinc[t] > 0 /\ tid[t] # NoTid /\ ~Deactivating(t) /\ ~Entering(t)) => cep[t] <= sep[tid[t]][0].lo
 
-\* When every thread has exited, every retired node is freed or in a batch parked on the
-\* orphan list: no batch is lost.
+\* S2, exact counting. A submitted batch's count is the number of its nodes that sit in a
+\* slot list, exchanged in and neither rolled back nor traversed (the inlist ghost), whenever no
+\* placement of it is in flight: no increment lost (a node the owner's enter took while its
+\* insert rolled back is counted by the failed rollback), no double decrement (a traversed node
+\* leaves every list), and no count stuck above zero once every list let its nodes go.
+TryLabels == {"TR1", "TS2", "TS3", "TS4", "TS5", "TG1", "TG2", "TN1", "TN2", "TN3", "TN4",
+              "InsertRollback", "TL1", "TL2", "TL3", "TN5", "TN6", "TN7", "TN8", "TF1"}
+InFlight(r) ==
+    \E t \in Threads :
+        rr[t] = r /\ (pc[t] \in TryLabels \/ \E i \in DOMAIN stack[t] : stack[t][i].pc \in TryLabels)
+Members(r) == {n \in Nodes : nbl[n] = r}
+CountExact ==
+    \A r \in Nodes :
+        sub[r] /\ nst[r] = "retired" /\ ~InFlight(r)
+        => nro[r] = Cardinality({n \in Members(r) : inlist[n]})
+
+\* L2 as a state property: flush and the exit return holding no retired node, the batch and
+\* the cache both empty at their last step.
+FlushEmpty ==
+    \A t \in Threads : pc[t] \in {"FL9", "EX13"} => bfst[t] = NULL /\ flst[t] = NULL
+
+\* When every thread has exited, every retired node is freed: no batch is lost, and none is
+\* kept anywhere (a flush or an exit places its batch, padded, every time).
 Exited == \A t \in Threads : pc[t] = "Done" /\ tid[t] = NoTid
-RECURSIVE OrphChain(_, _)
-\* The batches of the chain parked at refs-node r, linked through next.
-OrphChain(r, acc) == IF r \notin Nodes \/ r \in acc THEN acc ELSE OrphChain(nnx[r], acc \cup {r})
-OrphanNodes ==
-    UNION {Range(Chain(Unmask(nbl[r]), r)) : r \in UNION {OrphChain(orw[i], {}) : i \in Tids}}
-NoLoss == Exited => \A n \in Nodes : nst[n] = "retired" => n \in OrphanNodes
+NoLoss == Exited => \A n \in Nodes : nst[n] # "retired"
 
 
 \* ---------------------------------------------------------------- witnesses
@@ -7730,18 +7334,18 @@ NoSlowW == \A t \in Threads : pc[t] # "SP1"
 NoHelpedW == \A t \in Threads : pc[t] # "HT10"
 NoHelperDetachW == \A t \in Threads : ~(pc[t] = "HT10" /\ rv[t] \notin {NULL, INV})
 NoUndoW == \A t \in Threads : pc[t] # "InsertRollback"
+\* "No insert takes its node back after reading the left tag": the re-check finds a left slot.
+NoInsertUndoW == \A t \in Threads : pc[t] # "TN6"
 NoBrokenLinkW == \A t \in Threads : pc[t] # "TL2"
 NoMergeW == \A t \in Threads : ~(pc[t] = "RE3" /\ rok[t] = FALSE)
-NoParkW == orphaned = 0
-NoAdoptW == \A t \in Threads : ~(pc[t] = "OrphanMerge" /\ ac[t] # NULL)
-\* "No flush ever claims a tid." A call of AllocTid that returns into flush (to FL2 or FL3) is
-\* made only by the new branch of FL1, on a thread with no tid while batches are parked or its
-\* own batch holds a value. TLC breaking this shows that the configuration reaches that branch,
-\* so the properties checked on the same scenario do cover it (RC_wit_flush_claim for the
-\* scenario of RC_flush_orphan, RC_wit_flush_batch_claim for that of RC_wf_unpinned_flush).
-NoFlushClaimW ==
-    \A t \in Threads : \A i \in DOMAIN stack[t] :
-        ~(stack[t][i].procedure = "AllocTid" /\ stack[t][i].pc \in {"FL2", "FL3"})
+\* "No leave captures a list": the outermost drop's exchange finds a batch's node in the slot.
+NoLeaveListW == \A t \in Threads : ~(pc[t] = "Leave" /\ fst[tid[t]][0].lo \notin {NULL, INV})
+\* "No placement pads": a flush or an exit makes a filler.
+NoPadW == \A n \in Nodes : ~fil[n]
+\* "No insert's rollback fails": the owner's enter took the node the insert exchanged into
+\* the left slot before the insert could take it back, so the insert counts it.
+NoTakenInsertW ==
+    \A t \in Threads : ~(pc[t] = "InsertRollback" /\ fst[rsi[t]][rsj[t]].lo # rf[t])
 \* "No exit ever claims a tid." A call of AllocTid that returns into the exit (to EX1) is made only
 \* by the new branch of EX1, on a thread with no tid whose batch holds a value. TLC breaking this
 \* shows that the configuration reaches that branch, so the properties checked on the same
@@ -7753,7 +7357,7 @@ NoRecycleW == \A t \in Threads : ~(pc[t] = "TidClaim3" /\ MinOf(aseen[t]) \in re
 NoCacheFreeW == \A t \in Threads : ~(pc[t] = "TC2" /\ tdo[t])
 NoReentrantTransitionW == \A t \in Threads : ~(lvl[t] > 0 /\ pc[t] = "PNC")
 NoClosedSkipW == \A t \in Threads : ~(pc[t] = "TS5" /\ \E tk \in detaching[ri[t]] : tk[2] + 1 = sep[ri[t]][0].hi)
-NoSecondRoundW == \A t \in Threads : ~(pc[t] = "ExitSubmit" /\ xr[t] = 1 /\ bfst[t] # NULL)
+NoSecondRoundW == \A t \in Threads : ~(pc[t] = "ExitPlace" /\ xr[t] = 1 /\ bfst[t] # NULL)
 \* (Recycle) a section holds a node in a later incarnation than its first: shows the
 \* configurations do reuse nodes while readers load them.
 NoHeldReusedW == \A t \in Threads : \A h \in held[t] : h[4] = 0
