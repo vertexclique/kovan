@@ -1,7 +1,10 @@
 import Kovan.Atom
+import Kovan.Bounds
 import Kovan.Channel
 import Kovan.FlushExit
 import Kovan.HopscotchShrink
+import Kovan.Leave
+import Kovan.LeaveTag
 import Kovan.HopscotchShrinkThreads
 import Kovan.Magazine
 import Kovan.Mvcc

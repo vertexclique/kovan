@@ -17,9 +17,9 @@
 //! - `no_batch_leak_with_few_pinned_threads` - the control case for the
 //!   above (8 distinct simultaneously-pinned slots, well under the
 //!   threshold); same reason.
-//! - `orphaned_partial_batch_is_adopted` - requires 80 distinct pinned
-//!   slots *and* a genuine thread-exit orphan-adoption event; neither
-//!   exists with one persistent thread.
+//! - `partial_batch_of_an_exiting_thread_is_placed_padded` - requires 80
+//!   distinct pinned slots *and* a genuine thread exit; neither exists with
+//!   one persistent thread.
 //! - `pin_completes_under_flush_storm` - a starvation/fairness regression
 //!   that only manifests under real concurrent contention between an
 //!   antagonist thread's flush() storm and this thread's pin() calls.
@@ -28,8 +28,8 @@
 //!   always pass regardless of whether the underlying starvation bug
 //!   exists, providing zero regression protection.
 //! - `thread_churn_frees_everything` - requires 32+ real OS threads
-//!   exiting and having their tids recycled after `deactivate_slots`'
-//!   exchange-based deactivation; no analogous event without real threads.
+//!   exiting and having their tids recycled after the exit's leave; no
+//!   analogous event without real threads.
 //!
 //! The 3 tests that survive check properties that don't depend on multiple
 //! threads to be true; each says exactly what cross-thread coverage it no
@@ -37,7 +37,7 @@
 //!
 //! `TEST_LOCK` below is not a concurrency test fixture - it's the same
 //! cross-test serialization the original file used, kept for the same
-//! reason: kovan's reclamation state (epoch, slots, orphans) is
+//! reason: kovan's reclamation state (epoch, slots) is
 //! process-global, and Rust's native test harness still runs the functions
 //! *in this file* as parallel OS threads by default, so one test's guard
 //! or retire activity can perturb another's exact drop counts even though

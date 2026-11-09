@@ -12,7 +12,9 @@
 #   bash proofs/tla/run_tlc.sh plan 8                  which share each configuration is in
 # The TLA+ tools come from $TLA2TOOLS when it names a tla2tools.jar, otherwise from
 # proofs/tla/.tools/tla2tools.jar, fetched on first use (release v1.7.4, TLC 2.19, the version every
-# recorded run used). TLC_WORKERS caps the workers of a passing configuration (default auto);
+# recorded run used). TLC_KIND=pass or TLC_KIND=violation keeps only the configurations whose
+# expected result is (or is not) pass, for `shard` and `plan` (CI checks the mutations in a stage of
+# their own, minutes long). TLC_WORKERS caps the workers of a passing configuration (default auto);
 # TLC_LIMIT the seconds each configuration may take (default 3600). A configuration expected to
 # break a property runs one worker, so breadth-first search keeps its trace the shortest, and the
 # trace is kept in <family>/<name>_counterexample.txt. Exit status 0 means every result matched.
@@ -32,7 +34,7 @@ costs() {
   local f
   for f in "$here"/*/EXPECTED.txt; do
     awk -v fam="$(basename "$(dirname "$f")")" -v rec="$(dirname "$f")/tlc-run.txt" \
-        -v ci="$here/ci-seconds.txt" -v pref="${TLC_COSTS:-ci}" '
+        -v ci="$here/ci-seconds.txt" -v pref="${TLC_COSTS:-ci}" -v kind="${TLC_KIND:-}" '
       function readrec() {
         while ((getline l < rec) > 0) {
           split(l, c, /[ \t]+/); if (c[4] ~ /^[0-9]+$/) sec[c[1]] = c[4]
@@ -44,7 +46,7 @@ costs() {
         }
       }
       BEGIN { if (pref == "local") { readci(); readrec() } else { readrec(); readci() } }
-      !/^#/ && NF {
+      !/^#/ && NF && (kind == "" || (kind == "pass") == ($3 == "pass")) {
         s = ($1 in sec) ? sec[$1] : 60
         printf "%s %s %d\n", fam, $1, (s < 1 ? 1 : s)
       }' "$f"
@@ -175,6 +177,9 @@ for n in "${names[@]}"; do
   else res="ERROR"; tail -40 "$log"; fi
   ok=yes; [ "$res" = "$exp" ] || { ok=NO; bad=1; }
   row=$(printf "$fmt" "$n" ${gen} "$((t1 - t0))" "$res" "$exp" "$ok"); echo "$row"; rows+="$row"$'\n'
+  # A mutation or witness that finds nothing: its program no longer reaches what it checks.
+  [ "$ok" = NO ] && [ "$exp" != pass ] && { [ "$res" = pass ] || [ "${res#no-verdict}" != "$res" ]; } &&
+    echo "  $n: expected $exp, found none: its program no longer reaches the path it checks"
   rm -rf "$meta"
 done
 if [ "$full" = 1 ]; then

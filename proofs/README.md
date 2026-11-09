@@ -74,12 +74,14 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 
 ## Coverage
 
-- `tla/reclaim/`: kovan's memory reclamation (pin, the protected load, retire, the traversal,
-  flush, a thread's exit and the hand-over of its id, the flush and the exit of a thread that
-  never pinned, a value retired after a thread's exit, a critical section after a thread's exit,
-  the recycling of retired nodes, the epoch's advance at a thread's first retire, the pin that
-  traverses what was attached to its slot, the exit that adopts what earlier exits parked), 116
-  configurations: 51 that must pass and 65 mutations and witnesses that must fail.
+- `tla/reclaim/`: kovan's memory reclamation (pin, which enters the slot, the protected load,
+  the guard's drop, which leaves the slot and frees what it held, retire, the traversal, flush
+  and a thread's exit, which place the partial batch padded with fillers, the hand-over of a
+  thread's id, the exit of a thread that never pinned, a value retired after a thread's exit, a
+  critical section after a thread's exit,
+  the recycling of retired nodes, the epoch's advance at a thread's first retire, the leave
+  against a concurrent insert and its rollback, a parked reader that never pins again), 138
+  configurations: 71 that must pass and 67 mutations and witnesses that must fail (the era tag and the pin's activation add 3 and 4; the count of the last CI run is the one that counts).
 - `tla/chained/`: `kovan_map::HashMap`, the chained map (the link words, the writes, the walks,
   the conditional writes, the freezing migration and clear), 47 configurations: 26 that must
   pass and 21 that must fail.
@@ -127,12 +129,20 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
   loads, retires and frees: with the header re-initialised on every take, no batch skips a reader
   that holds one of its nodes and no reader ever holds a node back in the pool; with the take that
   keeps a stale birth, a concrete run frees a node a reader holds.
-- `lean/Kovan/FlushExit.lean`: the flush and the exit of a thread that never pinned, for one
-  thread and every sequence of retires, flushes, pins and its exit: exactly when each returns at
-  once, claims a tid or runs; every value the thread retired or adopted is submitted or parked
-  once it has exited (and with the exit as it was before the fix, a value can be kept nowhere);
-  a thread that keeps flushing adopts every chain parked on `maxThreads` tids within
-  `maxThreads` flushes.
+- `lean/Kovan/FlushExit.lean`: flush and the exit, for one thread and every sequence of
+  retires, flushes, pins and its exit: exactly when each returns at once, claims a tid or runs;
+  every value the thread retired is submitted once it has exited, a flush and the exit leave
+  the batch empty whatever the destructors they ran retired (and with the exit as it was before
+  0.2.1, a value can be kept nowhere; with the placement as it was before 0.2.4, a flush could
+  return holding its batch).
+- `lean/Kovan/Leave.lean`: the leave at the outermost drop, for every size: the padded
+  placement assigns a node to every eligible slot with exactly the fillers needed, and freeing
+  the batch frees every node once and runs no user destructor for a filler; a batch's count on
+  the machine word is the inserts not yet traversed once submitted, never zero before, and
+  zero exactly when every inserted node was traversed; a slot is active only while its owner
+  holds a guard, is entering or is leaving; and an insert counts its node only when the owner's
+  enter or leave took it or the owner holds a guard, so a thread with no live guard is counted
+  by no batch.
 - `lean/Kovan/SegQueue.lean`: the segment queue's claim words on the code's own masks and shifts:
   a fetch-add never carries the index into the id; positions follow the words, wrap with the ids
   and never go back; `behind` and `classify` on wrapped ids answer as on ids counted without
