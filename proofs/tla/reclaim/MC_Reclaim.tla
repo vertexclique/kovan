@@ -44,6 +44,8 @@ DtorR3 == DtorOf(1, DRead(3))
 DtorRW2 == DtorOf(1, <<P, Ld(2), Wr(2), Rt, U>>)
 \* Node 1's drop retires a fresh node.
 DtorRt1 == DtorOf(1, <<Rt>>)
+\* Node 5's drop retires a fresh node.
+DtorRt5 == DtorOf(5, <<Rt>>)
 \* Node 1's drop retires two fresh nodes, then pins and unpins.
 DtorRtRtPU == DtorOf(1, <<Rt, Rt, P, U>>)
 \* Node 1's drop and node 3's drop each retire a fresh node (a chain of drops).
@@ -108,6 +110,20 @@ P_exit_tid == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), Rt, Rt, U, After(2,
 P_exit_tid_steal == [t \in {1, 2, 3} |-> CASE t = 1 -> <<Wr(1), Ex>>
                                           [] t = 2 -> <<After(3, 3), Wr(2), Rt, Rt>>
                                           [] t = 3 -> <<AwaitRel, P, Ld(2), U>>]
+\* A batch in two slot lists (count 2). Threads 1 and 2 pin; thread 3, once both have pinned,
+\* replaces cell 1 and retires two more nodes, so its batch of three is placed in both readers'
+\* slots. Each reader's drop traverses its list: the count goes 2, 1, 0 and the batch is freed
+\* by the second (early_free: by the first, while the other list still holds a node).
+P_count_two == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, U>>
+                                    [] t = 2 -> <<P, U>>
+                                    [] t = 3 -> <<After(1, 1), After(2, 1), Wr(1), Rt, Rt>>]
+\* A drop an exit runs finds no handle (exit_handle_unreachable). Thread 1 retires node 1 and
+\* exits: with no slot eligible the exit frees the batch at once and node 1's drop (DtorR2)
+\* pins and loads cell 2 in the exit. Thread 2 replaces cell 2 and retires one more node, so its
+\* batch of two, holding the value the drop loaded, is freed at once unless the drop's pin
+\* reserved it (the mutation: the drop pins nothing and its load checks no epoch).
+P_exit_handle == [t \in {1, 2} |-> IF t = 1 THEN <<Wr(1), Ex>>
+                                          ELSE <<Wr(2), Rt>>]
 \* One thread: a chain of drops that retire (node 1's retires node 3, node 3's node 4).
 P_exit_chain == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
 \* The same with one more pin before the exit: the retire's advances moved the epoch past the
@@ -331,6 +347,19 @@ P_exit_raw == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, After(2, 8), Ex
 \* helps thread 2 first.
 P_reenter == [t \in {1, 2} |-> IF t = 1 THEN <<P, Wr(1), Rt, U, P, U, Rt, Rt, P, U>>
                                         ELSE <<After(1, 6), P, U>>]
+\* A drop run by the full-cache free of a help re-enters the help (cache_copied). Threads 2 and
+\* 3 pin and stay in the slow path, each with a request pending (one attempt; the retires'
+\* advances move the epoch under both). Thread 1, with no guard, replaces cell 1 and retires
+\* five more nodes, RetireFreq 3: the first batch (nodes 1, 3, 4, born at the first epoch) is
+\* placed in both pending slots. The second (nodes 5 to 7) is born after both slots' eras, so no
+\* slot takes it and its count is zero at once: the submission puts it on thread 1's cache. The
+\* retire's help then takes thread 2's list (the first batch) and its traversal finds the cache
+\* full (cache 0): node 5's drop, run by that free, retires, and the help it makes reaches
+\* thread 3's request, whose traversal finds the same cache still in its cell (cache_copied)
+\* and frees the second batch again.
+P_reenter_help == [t \in {1, 2, 3} |-> CASE t = 1 -> <<Wr(1), Rt, Rt, Rt, Rt, Rt>>
+                                       [] t = 2 -> <<P, U>>
+                                       [] t = 3 -> <<P, U>>]
 \* A retire's help frees a batch (the version of the scenario above for a guard that releases
 \* its slot at the drop: no cache is left behind, so the batch comes from a pending slow path).
 \* Thread 2's pin has its slot active while thread 1, with no guard, replaces cell 1 (retiring

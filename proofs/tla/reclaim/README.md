@@ -857,6 +857,8 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_exit_raw` | A drop an exit runs reads a value born after the exiting thread's last transition, which another thread retires. | cells 2, nodes 13 | pass |
 | `RC_exit_tid` | A drop an exit runs reads a cell while another thread flushes; a third thread, spawned once a tid is released, takes the exiting thread's over and reads a value the second thread replaces and retires. | threads 3, cells 3, nodes 23, RF 3 | pass |
 | `RC_exit_tid_steal` | A drop an exit runs pins under the tid the exit released last, while a third thread, spawned after the release, holds a node loaded and a batch holding it is placed in its slot (`P_exit_tid_steal`). | threads 3, cells 3, nodes 11, RF 3 | pass |
+| `RC_count_two` | A batch placed in the slot lists of two pinned readers (`P_count_two`), each traversing its own list. | threads 3, tids 3, nodes 8, RF 3 | pass |
+| `RC_exit_handle` | A drop an exit runs loads a cell while another thread replaces and retires its value (`P_exit_handle`). | cells 2, nodes 10, RF 2 | pass |
 | `RC_exit_chain` | An exit whose drops retire in a chain. | threads 1, tids 1, nodes 5, EF 4 | pass |
 | `RC_exit_pad` | A thread exits with a batch of one node while a reader's slot is eligible: the exit pads and places it; the reader's drop traverses and frees it. | nodes 5 | pass |
 | `RC_flush_pad` | A flush short of nodes: one fresh node retired while another thread holds a reservation; one filler for that slot; the reader then drops its guard and parks. | nodes 5 | pass |
@@ -875,6 +877,7 @@ abbreviate `RetireFreq`, `EpochFreq`, `MaxCache` and `MaxEpoch`; recycle is `Rec
 | `RC_help_dtor` | A retire on a batch and epoch boundary helps a slow path; the help's drain runs a drop that retires. | nodes 6, EF 1, cache 0, pin attempts 1 | pass |
 | `RC_reenter` | A cached drop that retires, freed by a drop while another thread's pin, its epoch moved by retires, takes the slow path. | nodes 9, EF 1, cache 0 | pass |
 | `RC_reenter_rt` | The same, the cache freed by a retire's help of the slow path. | nodes 9, EF 1, cache 0 | pass |
+| `RC_reenter_help` | A drop run by the full-cache free of a help re-enters the help (`P_reenter_help`): three threads, two pending slow paths. | threads 3, tids 3, nodes 9, RF 3, EF 1, cache 0, pin attempts 1, epochs 12 | pass |
 | `RC_reentrant` | A retire outside any guard frees its batch at once; the drop it runs pins, enters, loads and drops its guard. | threads 1, tids 1, nodes 3 | pass |
 | `RC_slow_dtor` | A slow path detaching its list while a helper hands it over; a cached drop reads a cell, replaces it and retires what it read. | cells 2, nodes 8, RF 2, cache 0, pin attempts 1 | pass |
 | `RC_slow_frees` | A pending slow path with two batches placed in its slot, the first holding node 1, whose drop reads and replaces cell 2 (`P_slow_frees`). | cells 2, nodes 9, RF 2, EF 2, cache 0, pin attempts 1 | pass |

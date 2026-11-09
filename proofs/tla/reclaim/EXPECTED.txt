@@ -38,6 +38,7 @@ RC_wf_unpinned_exit                MC_Reclaim         pass
 RC_wf_unpinned_flush               MC_Reclaim         pass
 RC_exit_tid_steal                 MC_Reclaim         pass
 RC_mut_tid_released_early          MC_Reclaim         violated:NoUseAfterFree
+RC_reenter_help                    MC_Reclaim         pass
 RC_mut_cache_copied                MC_Reclaim         violated:NoDoubleFree
 RC_mut_help_before_submit          MC_Reclaim         violated:NoNullDeref
 RC_mut_ttas_locks                  MC_Reclaim         violated:Thread2Ends
@@ -92,6 +93,8 @@ RC_wit_stale_later                 MC_Reclaim         violated:NoStaleLaterW
 RC_wit_wf_reuse                    MC_Reclaim         violated:NoHeldReusedW
 RC_wit_wf_dtor_reuse               MC_Reclaim         violated:NoDtorReuseW
 RC_mut_cache_ahead                 MC_Reclaim         violated:CacheBelowPublished
+RC_count_two                       MC_Reclaim         pass
+RC_exit_handle                     MC_Reclaim         pass
 RC_mut_early_free                  MC_Reclaim         violated:ListsHoldNoFreed
 RC_mut_help_hands_pointer          MC_Reclaim         violated:WellFormed
 RC_mut_late_retire_dropped         MC_Reclaim         violated:NoLoss
