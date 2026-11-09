@@ -5,7 +5,8 @@ name: TLA+
 # proofs/tla/ (a directory with an EXPECTED.txt) out to 16 shares by the seconds it took on a CI
 # runner (proofs/tla/ci-seconds.txt, or its family's tlc-run.txt), and checks share k against
 # EXPECTED.txt. The configurations expected to break a property (the mutations and witnesses) run
-# in a stage of their own, 8 jobs with every worker of the runner (TLC_KIND=violation), so a change
+# in a stage of their own, 8 jobs (TLC_KIND=violation), one worker each so the property a mutation
+# breaks first is always the one EXPECTED.txt names, so a change
 # that stops a program reaching what it checks shows every such configuration in one report; the
 # 16 share jobs check the passing ones (TLC_KIND=pass). Both stages keep the same budget.
 # The jobs run at once, so a
@@ -60,7 +61,6 @@ jobs:
         run: .github/workflows/tla.sh
         env:
           TLC_KIND: violation
-          TLC_VIOLATION_WORKERS: auto
           TLC_SHARD: ${{ matrix.shard }}
           TLC_SHARDS: 8
           TLC_LIMIT: 3480
