@@ -20,9 +20,9 @@ impl Drop for CountedNode {
 fn test_retire_eventually_frees() {
     let drops = Arc::new(AtomicUsize::new(0));
 
-    // Use multiple threads to ensure epoch advancement occurs.
-    // Single-threaded retire only advances epoch every EPOCH_FREQ (128) retires,
-    // and batches need multiple epoch transitions before slots become eligible.
+    // Several threads, so the epoch moves: a thread advances it at its first
+    // allocation and every EPOCH_FREQ (128) after, and a batch skips the
+    // slots reserving an epoch below its values' births.
     let mut handles = vec![];
     for _ in 0..4 {
         let d = drops.clone();

@@ -44,27 +44,47 @@ Every crate goes to 0.2.4.
 
 ### Changed
 
-- kovan: every outermost `pin()` enters the slot (one exchange of the list word, one publication
-  of the current epoch, the stable-epoch attempts and the helping slow path as before); a pin
-  no longer skips when the global epoch is where the thread's last transition left it, since the
-  slot is inactive between sections. Test: `guard::tests::era::every_outermost_pin_enters`.
-- kovan: `flush()` advances the global epoch only when it placed a batch; with nothing retired it
-  returns at once, as `flush_pending` did. It no longer drains or deactivates the thread's own
-  slot, which the guard's drop now does. Test: `guard::tests::a_drop_that_retired_nothing_leaves_the_epoch`.
+- kovan: an outermost `pin()` activates the slot and nothing more: one exchange of the slot's list
+  word (what a retire left in it taken and traversed). It publishes no epoch: the epoch a
+  reservation covers is published by the first protected load that finds the global epoch moved
+  since the slot's last publication (one store, then the load again), as the algorithm's
+  `protect` does, so a pin and its drop cost one exchange each. The stable-epoch attempts and the
+  helping slow path of the pin are gone with the publication that needed them. Tests:
+  `guard::tests::era::every_outermost_pin_enters`,
+  `guard::tests::era::a_load_of_a_node_born_after_the_reservation_refreshes_the_published_epoch`,
+  `guard::tests::an_escalated_destructor_section_ends_with_its_drop` (the leave of an escalated
+  section resets the era word, so the next section's first load publishes a real epoch).
+- kovan: the epoch advances with allocations, as the algorithm's `alloc_node` does: a thread's
+  first allocation of a node (`RetiredNode::new`) and every 128th after advance the global epoch,
+  and a node's birth is the epoch read after that. A retire, a placement, a `flush()` and an exit
+  advance nothing. Tests:
+  `guard::tests::era::a_thread_advances_at_its_first_allocation_and_every_epoch_freq_th`,
+  `guard::tests::an_epoch_advance_refreshes_the_birth_stamp`.
+- kovan: a thread's reservation is a pointer-sized list word and a 64-bit era word, each a
+  target-native atomic. The 128-bit word pairs, their sequence numbers and the helping state they
+  carried are gone with the slow path, and so are the `portable-atomic` dependency, the
+  `+cmpxchg16b` target feature and the lock-based fallback: reclamation is lock-free and wait-free
+  on every target with 64-bit atomics, 32-bit ones (`i686`, `wasm32`) included. `.cargo/config.toml`
+  and the workflows set no target feature any more.
+- kovan: `flush()` returns at once with nothing retired, as `flush_pending` did, and needs no
+  thread ID: a placement goes to the reservations that hold one. It no longer drains or deactivates
+  the thread's own slot, which the guard's drop now does. Test:
+  `guard::tests::a_drop_that_retired_nothing_leaves_the_epoch`,
+  `guard::tests::flush_without_a_tid_or_a_batch_claims_none`.
 - kovan: a thread's exit leaves its slot first and then places what it holds, padded, repeating
   only for what the destructors it ran retired; its two fixed rounds and the batches it parked are
   gone, since a left slot takes nothing from other threads. Test:
   `guard::tests::exit_frees_a_chain_of_retiring_destructors`.
 - kovan: the destructors a drop, a flush or an exit runs run with the thread's slot inactive and
-  no guard live: a destructor's `pin()` is an outermost pin, which enters the slot for its own
+  no guard live: a destructor's `pin()` is an outermost pin, which activates the slot for its own
   section and leaves it at its end. Tests:
   `guard::tests::exit_destructors_enter_the_slot_for_their_own_sections`,
   `guard::tests::leave_keeps_the_batches_its_destructors_free`, the TLA+ mutation
   `RC_mut_nested_destructors`.
 - kovan: no public item was removed or changed in signature (`cargo semver-checks` passes). The
-  crate documentation's "Quiescence" section and the `Guard` documentation describe the leave;
-  the advice to call `flush()` before idling is withdrawn, as a thread with no live guard holds
-  nothing back.
+  crate documentation's "Progress Guarantees", "Architecture" and "Quiescence" sections and the
+  `Guard` documentation describe the protocol as it is; the advice to call `flush()` before idling
+  is withdrawn, as a thread with no live guard holds nothing back.
 
 ## 0.2.3
 

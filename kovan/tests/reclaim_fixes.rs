@@ -77,7 +77,7 @@ fn run_pinned_scenario(n_pinned: usize) -> (usize, usize) {
 /// phase cannot place the batch. The batch must be kept (accumulated) and
 /// submitted later - never dropped.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn no_batch_leak_with_many_pinned_threads() {
     let _l = test_lock();
     let (drops, expected) = run_pinned_scenario(80);
@@ -89,7 +89,7 @@ fn no_batch_leak_with_many_pinned_threads() {
 
 /// Control: the same scenario well under the slot threshold.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn no_batch_leak_with_few_pinned_threads() {
     let _l = test_lock();
     let (drops, expected) = run_pinned_scenario(8);
@@ -101,7 +101,7 @@ fn no_batch_leak_with_few_pinned_threads() {
 /// fillers, one per eligible slot beyond its nodes; the readers' drops free
 /// it, with no flush anywhere. Nothing leaks across thread exit.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn partial_batch_of_an_exiting_thread_is_placed_padded() {
     let _l = test_lock();
     DROPS.store(0, Ordering::SeqCst);
@@ -183,7 +183,7 @@ fn partial_batch_of_an_exiting_thread_is_placed_padded() {
 /// loaded in the current critical section (the slot list drain is deferred
 /// to the next pin boundary).
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn flush_under_live_guard_keeps_protection() {
     let _l = test_lock();
     static TARGET_DROPPED: AtomicBool = AtomicBool::new(false);
@@ -275,7 +275,7 @@ fn reentrant_destructor_chains_drop_exactly_once() {
 /// bounded convergence loop and the unconditional-reservation escalation
 /// under maximum epoch movement.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn loads_remain_valid_under_epoch_churn() {
     let _l = test_lock();
     const READERS: usize = 4;
@@ -331,10 +331,10 @@ fn loads_remain_valid_under_epoch_churn() {
 }
 
 /// Liveness: pin() must keep completing while another thread storms
-/// flush()/epoch advances. Regression for the unhelped-advance starvation
-/// (flush used to advance max_threads+2 times without helping).
+/// allocations (every 128th advances the epoch) and flushes. Regression for
+/// a starvation of the pin under epoch advances.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn pin_completes_under_flush_storm() {
     let _l = test_lock();
     let stop = Arc::new(AtomicBool::new(false));
@@ -344,7 +344,7 @@ fn pin_completes_under_flush_storm() {
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let a = kovan::Atom::new(7u64);
-                drop(a); // Atom::drop -> flush -> epoch advance
+                drop(a); // Atom::new allocates (the epoch clock), Atom::drop flushes
             }
         })
     };
@@ -371,7 +371,7 @@ fn pin_completes_under_flush_storm() {
 /// slot inactive) and tid recycling; everything must be freed after the
 /// unwind.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn thread_churn_frees_everything() {
     let _l = test_lock();
     DROPS.store(0, Ordering::SeqCst);

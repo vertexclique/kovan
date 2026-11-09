@@ -4,8 +4,6 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# The flag test.yml, its clippy job and miri.yml build with: 128-bit compare-and-swap on x86-64.
-cmpxchg := "-C target-feature=+cmpxchg16b"
 
 # Where elan installs lake (ELAN_HOME, by default ~/.elan), for the Lean recipes when lake is not
 # on PATH already.
@@ -30,14 +28,14 @@ fmt-check:
 # Lint every crate and every target (tests, benches, examples), warnings as errors (CI: test.yml, clippy)
 [group("lint")]
 clippy:
-    RUSTFLAGS="{{ cmpxchg }}" cargo clippy --workspace --all-targets -- -D warnings
-    RUSTFLAGS="{{ cmpxchg }}" cargo clippy --workspace --all-targets --features recycle -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --features recycle -- -D warnings
 
 # Lint kovan and kovan-map built without the standard library, warnings as errors (CI: test.yml, clippy)
 [group("lint")]
 clippy-no-std:
-    RUSTFLAGS="{{ cmpxchg }}" cargo clippy -p kovan --no-default-features --lib -- -D warnings
-    RUSTFLAGS="{{ cmpxchg }}" cargo clippy -p kovan-map --no-default-features --lib -- -D warnings
+    cargo clippy -p kovan --no-default-features --lib -- -D warnings
+    cargo clippy -p kovan-map --no-default-features --lib -- -D warnings
 
 # Build the API documentation with and without `recycle`, failing on any warning such as a broken link (CI: test.yml, doc)
 [group("lint")]
@@ -55,25 +53,25 @@ semver:
 # Build every crate (CI: test.yml, test and test-debug)
 [group("test")]
 build:
-    RUSTFLAGS="{{ cmpxchg }}" cargo build --workspace
+    cargo build --workspace
 
 # Run every test of every crate in debug mode, with overflow checks and debug assertions (CI: test.yml, test-debug)
 [group("test")]
 test:
-    RUSTFLAGS="{{ cmpxchg }}" cargo test --workspace
-    RUSTFLAGS="{{ cmpxchg }}" cargo test --workspace --features recycle
+    cargo test --workspace
+    cargo test --workspace --features recycle
 
 # Run every test of every crate optimized (CI: test.yml, test)
 [group("test")]
 test-release:
-    RUSTFLAGS="{{ cmpxchg }}" cargo test --workspace --release
-    RUSTFLAGS="{{ cmpxchg }}" cargo test --workspace --release --features recycle
+    cargo test --workspace --release
+    cargo test --workspace --release --features recycle
 
 # Build and test every crate with the nightly compiler and the nightly feature (CI: test.yml, test-nightly)
 [group("test")]
 test-nightly:
-    RUSTFLAGS="{{ cmpxchg }}" cargo +nightly build --workspace --features nightly
-    RUSTFLAGS="{{ cmpxchg }}" cargo +nightly test --workspace --release --features nightly
+    cargo +nightly build --workspace --features nightly
+    cargo +nightly test --workspace --release --features nightly
 
 # Run the whole suite on 32-bit x86 with real threads (CI: wasm.yml, i686; needs a 32-bit C toolchain)
 [group("test")]
@@ -84,12 +82,12 @@ test-i686:
 # Run the tests of one crate, for example `just test-crate kovan-map` (extra arguments go to cargo test)
 [group("test")]
 test-crate crate *args:
-    RUSTFLAGS="{{ cmpxchg }}" cargo test -p {{ crate }} {{ args }}
+    cargo test -p {{ crate }} {{ args }}
 
 # Run one test file of one crate, for example `just test-target kovan reclaim` (`just targets` lists them)
 [group("test")]
 test-target crate target *args:
-    RUSTFLAGS="{{ cmpxchg }}" cargo test -p {{ crate }} --test {{ target }} {{ args }}
+    cargo test -p {{ crate }} --test {{ target }} {{ args }}
 
 # List every test, benchmark and example target of every crate
 [group("test")]
@@ -99,23 +97,23 @@ targets:
 # Run one example program, for example `just example kovan simple`
 [group("test")]
 example crate name *args:
-    RUSTFLAGS="{{ cmpxchg }}" cargo run -p {{ crate }} --example {{ name }} {{ args }}
+    cargo run -p {{ crate }} --example {{ name }} {{ args }}
 
 # Explore thread interleavings with shuttle in every shuttle_* test of every crate (CI: test.yml, shuttle)
 [group("test")]
 shuttle:
-    RUSTFLAGS="{{ cmpxchg }}" bash .github/workflows/shuttle-test.sh
-    RUSTFLAGS="{{ cmpxchg }}" SHUTTLE_FEATURES=recycle bash .github/workflows/shuttle-test.sh
+    bash .github/workflows/shuttle-test.sh
+    SHUTTLE_FEATURES=recycle bash .github/workflows/shuttle-test.sh
 
 # Run one shuttle test, for example `just shuttle-target kovan-map shuttle_hopscotch`
 [group("test")]
 shuttle-target crate target:
-    RUSTFLAGS="{{ cmpxchg }}" cargo test -p {{ crate }} --features shuttle --release --test {{ target }}
+    cargo test -p {{ crate }} --features shuttle --release --test {{ target }}
 
 # Check kovan's tests for undefined behaviour under the Miri interpreter; cleans the build directory first, as CI does (CI: miri.yml)
 [group("test")]
 miri:
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-tree-borrows" RUSTFLAGS="{{ cmpxchg }}" RUSTUP_TOOLCHAIN=nightly bash .github/workflows/miri.sh
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-tree-borrows" RUSTUP_TOOLCHAIN=nightly bash .github/workflows/miri.sh
 
 # ---------------------------------------------------------------- wasm and 32-bit
 
@@ -169,22 +167,22 @@ width-check:
 # Build every benchmark for real, optimized, so a bench that only fails to link is caught (CI: test.yml, test)
 [group("bench")]
 bench-build:
-    RUSTFLAGS="{{ cmpxchg }}" cargo build --workspace --benches --release
+    cargo build --workspace --benches --release
 
 # Run one benchmark, for example `just bench kovan-map hopscotch_ops -- --quick` (`just targets` lists them)
 [group("bench")]
 bench crate target *args:
-    RUSTFLAGS="{{ cmpxchg }}" cargo bench -p {{ crate }} --bench {{ target }} {{ args }}
+    cargo bench -p {{ crate }} --bench {{ target }} {{ args }}
 
 # Run every benchmark of every crate, one after another (takes a long time)
 [group("bench")]
 bench-all *args:
-    RUSTFLAGS="{{ cmpxchg }}" cargo bench --workspace --benches {{ args }}
+    cargo bench --workspace --benches {{ args }}
 
 # Compare one crate's benchmarks between two revisions, in interleaved rounds, with the spread between rounds (tools/bench-ab.py), e.g. --base master --head HEAD -p kovan-map --bench hopscotch
 [group("bench")]
 bench-ab *args:
-    RUSTFLAGS="{{ cmpxchg }}" python3 tools/bench-ab.py {{ args }}
+    python3 tools/bench-ab.py {{ args }}
 
 # ---------------------------------------------------------------- proofs
 

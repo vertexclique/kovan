@@ -28,4 +28,3 @@ jobs:
           bash .github/workflows/miri.sh
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-tree-borrows"
-          RUSTFLAGS: "-C target-feature=+cmpxchg16b"

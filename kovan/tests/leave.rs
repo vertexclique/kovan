@@ -9,7 +9,7 @@
 //! the slots of every thread in the process decide which batches wait for
 //! which traversal.
 
-use kovan::{Atom, RetiredNode, flush, pin, retire};
+use kovan::{Atom, Atomic, RetiredNode, flush, pin, retire};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -247,20 +247,31 @@ fn an_inner_drop_keeps_the_outer_sections_protection() {
     assert_eq!(live.load(Ordering::SeqCst), 0);
 }
 
-/// A partial batch of three large values, then a flush, then the thread's
-/// exit, while another thread holds a guard: the batch is placed (padded)
-/// into the reader's slot, and the reader's drop frees it. The reader then
-/// parks: no flush, pin or exit runs on it.
+/// A partial batch of three large values born before a reader's
+/// reservation, then a flush, then the thread's exit, while the reader holds
+/// a guard under which it loaded (its slot publishes an epoch the values'
+/// births do not exceed): the batch is placed (padded) into the reader's
+/// slot, and the reader's drop frees it. The reader then parks: no flush,
+/// pin or exit runs on it.
 #[test]
 #[cfg_attr(miri, ignore)] // threads
 fn a_partial_batch_of_large_values_is_freed_after_flush_and_exit() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
+    // Born before the reader's reservation (an allocation may advance the
+    // epoch; a reservation covers the nodes born up to the epoch it
+    // publishes).
+    let values: Vec<usize> = (0..3)
+        .map(|_| Counted::boxed(&live, 1 << 20) as usize)
+        .collect();
     let (pinned, go, done) = (flag(), flag(), flag());
     let reader = {
         let (pinned, go, done) = (Arc::clone(&pinned), Arc::clone(&go), Arc::clone(&done));
         thread::spawn(move || {
             let guard = pin();
+            // A load under the guard publishes the epoch the section
+            // reserves; a section that loaded nothing reserves nothing.
+            let _ = Atomic::<Counted>::null().load(Ordering::Acquire, &guard);
             pinned.store(true, Ordering::SeqCst);
             assert!(eventually(|| go.load(Ordering::SeqCst)));
             drop(guard);
@@ -268,11 +279,9 @@ fn a_partial_batch_of_large_values_is_freed_after_flush_and_exit() {
         })
     };
     assert!(eventually(|| pinned.load(Ordering::SeqCst)));
-    let l = Arc::clone(&live);
     thread::spawn(move || {
-        let values: Vec<*mut Counted> = (0..3).map(|_| Counted::boxed(&l, 1 << 20)).collect();
         for value in values {
-            unsafe { retire(value) };
+            unsafe { retire(value as *mut Counted) };
         }
         flush();
     })

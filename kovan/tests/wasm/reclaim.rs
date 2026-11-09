@@ -60,12 +60,12 @@ impl Drop for CountedNode {
 }
 
 /// Sequential adaptation of `reclaim::test_retire_eventually_frees`. The
-/// original split 2048 retires across 4 threads specifically to force
-/// multiple epoch transitions (the file's own comment: single-threaded
-/// retire only advances the epoch every EPOCH_FREQ = 128 retires). This
-/// performs the same total number of retires from one thread instead -
-/// still far more than 128, so the epoch still advances repeatedly - and
-/// checks the liveness property (some nodes get freed), not exact timing.
+/// original split 2048 allocations and retires across 4 threads so that the
+/// epoch moves repeatedly (a thread advances it at its first allocation and
+/// every EPOCH_FREQ = 128 after). This performs the same total number from
+/// one thread instead - still far more than 128, so the epoch still advances
+/// repeatedly - and checks the liveness property (some nodes get freed), not
+/// exact timing.
 /// The threaded original remains the real coverage on native.
 #[test]
 #[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model

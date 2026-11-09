@@ -8,7 +8,6 @@ use core::sync::atomic::Ordering;
 
 /// Traversals whose zero-count batches the free-list cache holds before it
 /// is freed (see `Handle::traverse_into_cache`).
-pub(crate) const MAX_CACHE: usize = 12;
 
 /// Trait for types that can be reclaimed by the wait-free memory
 /// reclamation system.
@@ -218,15 +217,6 @@ pub unsafe trait Reclaimable: Sized {
             drop(alloc::boxed::Box::from_raw(ptr));
         }
     }
-}
-
-/// Get the refs-node for a given node.
-/// If the node's batch_link has the RNODE bit set, the node itself is the refs-node.
-/// Otherwise, batch_link points to the refs-node.
-#[inline]
-pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
-    let refs = unsafe { (*node).batch_link.load(Ordering::Acquire) };
-    if is_rnode(refs) { node } else { refs }
 }
 
 /// Traverse a slot's retirement list, decrementing refs for each node.

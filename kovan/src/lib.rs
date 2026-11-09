@@ -11,32 +11,29 @@
 //! Every core operation completes in a bounded number of its own steps,
 //! whatever other threads do, including threads stopped for good at any
 //! point of theirs: no step waits for another thread, and no loop retries
-//! because another thread got in first more often than the bound below
-//! allows. T is the number of thread IDs handed out (at most 65,536); a
-//! step is one atomic instruction, as it is on x86_64 and on aarch64 with
-//! LSE (an LL/SC read-modify-write is the hardware's own retry loop; on
-//! targets whose 128-bit atomics are emulated with a lock, reclamation is
-//! not lock-free at all, see Supported Platforms in README.md).
+//! because another thread got in first. T is the number of thread IDs
+//! handed out (at most 65,536); a step is one atomic instruction, as it is
+//! on x86_64 and on aarch64 with LSE (an LL/SC read-modify-write is the
+//! hardware's own retry loop).
 //!
 //! - **Protected loads (`Atomic::load`, `Atom::load`): wait-free.** The
 //!   common case is one pointer load plus one epoch compare. If the global
-//!   epoch keeps advancing, the load re-publishes at most 15 times; then it
-//!   escalates to an *unconditional reservation* (the slot becomes
+//!   epoch moved, the load publishes it and loads again, at most 15 times;
+//!   then it escalates to an *unconditional reservation* (the slot becomes
 //!   eligible for every batch) and completes with one final load.
 //! - **`pin()`: wait-free.** A nested pin is a counter update. An outermost
-//!   pin enters the thread's reservation: one exchange of its slot's list
-//!   word (what a retire exchanged in since the slot was left is taken and
-//!   walked), one publication of the current epoch, and at most 15 more
-//!   attempts if the epoch moved, then a slow path whose loop passes once
-//!   more only for an epoch advance made by a thread that had not yet seen
-//!   its help request: every advance helps the pending requests first, and
-//!   a helper completes the request.
-//!   A thread's first pin also claims a thread ID: one pass over the
-//!   released IDs, no lock.
-//! - **`retire()`, `retire_reclaimable()`: wait-free.** O(1) per call; every 64th submits the
-//!   batch (one pass over the slots, one insert per eligible slot); the
-//!   first, every 128th after and every one that placed a batch help the
-//!   pending slow-path requests (O(T) each) and advance the epoch.
+//!   pin activates the thread's reservation: one exchange of its slot's
+//!   list word, and a walk of what that took (at most one node per retire
+//!   whose insert into the left slot has not rolled back yet). It publishes
+//!   no epoch. A thread's first pin also claims a thread ID: one pass over
+//!   the released IDs, no lock.
+//! - **`retire()`, `retire_reclaimable()`: wait-free.** O(1) per call;
+//!   every 64th submits the batch: one pass over the T slots, one insert
+//!   per eligible slot (one exchange, at most one compare-exchange after
+//!   it, none retried).
+//! - **Allocation (`RetiredNode::new`): wait-free.** One counter update and
+//!   one epoch load; every 128th allocation of a thread also advances the
+//!   epoch, one fetch-add.
 //! - **`Guard` drop: wait-free.** A nested drop is a counter update. The
 //!   outermost drop leaves the reservation: one exchange of the slot's
 //!   list word to the inactive marker, one walk of the list it took (one
@@ -46,10 +43,9 @@
 //! - **`flush()` and thread exit: wait-free**, a fixed sequence of the
 //!   steps above: the thread's partial batch is placed (padded with
 //!   fillers, one per eligible slot beyond its nodes, so it is always
-//!   placed), the epoch advanced, the released batches freed; repeated
-//!   only for what those frees' destructors retired. A thread that never
-//!   pinned claims a thread ID first, as a first pin does, while its batch
-//!   holds values it retired.
+//!   placed) and the released batches freed; repeated only for what those
+//!   frees' destructors retired. A filler is one allocation, the same step
+//!   as a node's.
 //!
 //! Every walk of a slot list takes the list with one exchange first, so it
 //! is as long as the list was at that instant: one entry per batch
@@ -72,7 +68,7 @@
 //! # Key Properties
 //!
 //! - **Near-zero read overhead**: the hot read path is a single atomic
-//!   pointer load plus an epoch check against a thread-local cache.
+//!   pointer load plus an epoch check against the thread's published epoch.
 //! - **Bounded Memory**: Retired nodes are reclaimed in batches. A batch a
 //!   retire cannot place is accumulated, never dropped, and a flush or an
 //!   exit places its batch padded, so it is never kept. A reader stalled
@@ -86,14 +82,17 @@
 //!
 //! # Architecture
 //!
-//! - **Per-thread epoch slots**: Each thread maintains a slot recording its
-//!   current epoch. Slots are protected by 128-bit DCAS (double compare-and-swap).
+//! - **Per-thread reservation slots**: Each thread with an ID owns a list
+//!   word (the batches placed in it; the inactive marker between sections)
+//!   and an era word (the epoch its loads are protected from), on a cache
+//!   line of their own.
 //! - **Batch retirement**: Retired nodes are accumulated in thread-local
 //!   batches (at least 64; batches grow under high thread counts so each
 //!   eligible slot can receive a node) and distributed across active slots
-//!   via `try_retire`.
-//! - **Wait-free helping**: Threads in the slow path publish their state so
-//!   other threads can help them complete, ensuring system-wide progress.
+//!   via `try_retire`, one exchange per slot.
+//! - **Epoch clock**: every 128th allocation of a thread advances the
+//!   global epoch; a node's birth is the epoch read after that, and a
+//!   reservation covers the nodes born up to the epoch it published.
 //!
 //! # Quiescence
 //!
@@ -151,23 +150,11 @@
 #![warn(missing_docs)]
 #![cfg_attr(feature = "nightly", feature(thread_local))]
 
-// The DCAS slot protocol stores (pointer, seqno) pairs in the two 64-bit
-// halves of a 128-bit word. On a 32-bit target the pointer half is merely
-// zero-extended and the refcount bias is taken from `usize::BITS`, so the
-// protocol itself is width-agnostic. What differs is how the 128-bit atomic
-// is realised:
-//
-// - x86_64 / aarch64 / s390x use the `native` WordPair, which mixes sub-word
-//   AtomicU64 accesses with a 128-bit compare-exchange over the same 16
-//   bytes. That is only coherent with genuine hardware DCAS, which
-//   `ASMRState::new` asserts via `AtomicU128::is_lock_free()`.
-// - Every other target (wasm32, i686, ...) uses the `fallback` WordPair,
-//   which routes *all* access through a single AtomicU128 and so stays
-//   coherent even when `portable-atomic` emulates that atomic with a lock.
-//
-// The trade on those targets is that reclamation is no longer lock-free, and
-// therefore no longer wait-free. The data structures remain correct; they
-// lose the progress guarantee. See the platform-support table in README.md.
+// A thread's reservation is two words, a pointer-sized list word and a
+// 64-bit era word, each read and written with the target's own atomics: on
+// every target with 64-bit atomics (x86_64, aarch64, s390x, riscv64, i686,
+// wasm32, ...) reclamation is lock-free and wait-free alike. See the
+// platform-support table in README.md.
 
 extern crate alloc;
 

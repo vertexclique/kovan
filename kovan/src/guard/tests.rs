@@ -10,9 +10,8 @@
 //! decide which batches wait for which traversal.
 
 use super::{HANDLE, Handle, flush, pin, retire};
-use crate::reclaim::MAX_CACHE;
 use crate::retired::{INVPTR, RetiredNode};
-use crate::slot::{EPOCH_FREQ, EPOCH_UNCONDITIONAL, RETIRE_FREQ};
+use crate::slot::{EPOCH_FREQ, RETIRE_FREQ};
 use crate::stall::{self, Step};
 use std::boxed::Box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -52,12 +51,21 @@ fn exit_over() -> bool {
 
 /// The epoch this thread's reservation slot publishes.
 fn published_epoch() -> u64 {
-    with_handle(|h| h.global().thread_slots(h.tid()).epoch[0].load_lo())
+    with_handle(|h| {
+        h.global()
+            .thread_slots(h.tid())
+            .epoch
+            .load(Ordering::Acquire)
+    })
 }
 
 /// Whether the reservation slot of `tid` is inactive (left).
 fn slot_inactive(tid: usize) -> bool {
-    crate::slot::global().thread_slots(tid).first[0].load_lo() == INVPTR as u64
+    crate::slot::global()
+        .thread_slots(tid)
+        .first
+        .load(Ordering::Acquire)
+        == INVPTR
 }
 
 /// This thread's ID, allocated by a first pin if it has none.
@@ -66,10 +74,10 @@ fn own_tid() -> usize {
     with_handle(|h| h.tid())
 }
 
-/// Spend this thread's first retire, which advances the epoch (helping the
-/// pending slow paths first, as every advance does), on a counted value it
-/// submits: a test that schedules each epoch move and each help counts the
-/// retires after this one.
+/// Spend this thread's first allocation, which advances the epoch (the
+/// epoch clock counts allocations), on a counted value it retires and
+/// submits: a test that schedules each epoch move counts the allocations
+/// after this one.
 fn spend_first_retire(live: &Arc<AtomicUsize>) {
     Counted::retire_one(live);
     flush();
@@ -137,13 +145,24 @@ impl Hold {
     }
 }
 
-/// A thread that pins and stays pinned until the test lets it go: its slot
-/// is active and eligible for every batch of oldest-born values.
+/// Publish the current epoch on this thread's slot, as the first protected
+/// load of a section does: a section that loaded nothing reserves nothing
+/// (its era word is the last published, 0 at first), so a test whose reader
+/// must hold a batch back makes it load first.
+fn reserve(guard: &crate::Guard) {
+    let cell = crate::Atomic::<Counted>::null();
+    let _ = cell.load(Ordering::Acquire, guard);
+}
+
+/// A thread that pins, loads (publishing the current epoch) and stays
+/// pinned until the test lets it go: its slot is active and eligible for
+/// every batch of oldest-born values.
 fn pinned_thread() -> (Hold, thread::JoinHandle<()>) {
     let hold = Hold::new();
     let h = hold.clone();
     let t = thread::spawn(move || {
         let guard = pin();
+        reserve(&guard);
         h.arrived.store(true, Ordering::SeqCst);
         assert!(eventually(|| h.go.load(Ordering::SeqCst)));
         drop(guard);
@@ -167,21 +186,6 @@ impl Counted {
             live: Arc::clone(live),
         }));
         unsafe { retire(node) };
-    }
-
-    /// Retire `RETIRE_FREQ - 1` values stamped with the first epoch into
-    /// this thread's empty batch, then place the batch with `try_retire`
-    /// straight away: another thread's batch in every active slot, with no
-    /// epoch advance after it (a retire that places a batch advances), so
-    /// the advances stay the test's own schedule.
-    fn place_oldest(live: &Arc<AtomicUsize>) {
-        for _ in 0..RETIRE_FREQ - 1 {
-            Counted::retire_oldest(live);
-        }
-        with_handle(|h| {
-            let (first, last) = h.take_batch().expect("the batch just retired");
-            assert!(h.try_retire(first, last, false), "the batch was not placed");
-        });
     }
 
     /// Retire one stamped with the first epoch as its birth: its batch
@@ -235,10 +239,14 @@ fn an_escalated_destructor_section_ends_with_its_drop() {
         // once, running the destructor inside flush().
         flush();
         assert!(slot_inactive(tid), "flush returned with its slot active");
+        // The leave of the escalated section reset the era word to 0; the
+        // next section's first protected load publishes a real epoch.
+        assert_eq!(published_epoch(), 0);
+        assert_eq!(with_handle(|h| h.cached_epoch.get()), 0);
         let guard = pin();
-        assert_ne!(published_epoch(), EPOCH_UNCONDITIONAL);
+        assert_eq!(published_epoch(), 0);
+        reserve(&guard);
         assert_eq!(published_epoch(), crate::slot::epoch());
-        assert_ne!(with_handle(|h| h.cached_epoch.get()), EPOCH_UNCONDITIONAL);
         drop(guard);
     })
     .join()
@@ -348,147 +356,6 @@ fn exit_keeps_its_tid_until_its_destructors_ran() {
     );
 }
 
-/// The slow path of a transition frees the free-list cache once its slot
-/// is live again (never before: see `slow_path`), and a destructor it runs
-/// retires a full epoch's worth, which submits two batches into this
-/// thread's slot and helps the pending slow-path threads before it advances
-/// the epoch. Traversals that re-entrant work makes push onto the cache the
-/// free already took out of its cell, never onto a copy of it. Everything
-/// is freed once, the last of it by the guard's drop.
-#[test]
-fn slow_path_free_survives_helping_itself() {
-    /// Its destructor retires a full epoch's worth of counted values.
-    #[repr(C)]
-    struct RetiresAnEpoch {
-        retired: RetiredNode,
-        live: Arc<AtomicUsize>,
-    }
-    impl Drop for RetiresAnEpoch {
-        fn drop(&mut self) {
-            for _ in 0..EPOCH_FREQ {
-                Counted::retire_one(&self.live);
-            }
-            self.live.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    let _l = lock();
-    let live = Arc::new(AtomicUsize::new(0));
-    let l = Arc::clone(&live);
-    thread::spawn(move || {
-        let tid = own_tid();
-        // One batch, the trigger in it, into this thread's slot, under the
-        // guard whose section the slow path runs in.
-        let guard = pin();
-        l.fetch_add(1, Ordering::SeqCst);
-        let node = Box::into_raw(Box::new(RetiresAnEpoch {
-            retired: RetiredNode::new(),
-            live: Arc::clone(&l),
-        }));
-        unsafe { retire(node) };
-        for _ in 1..RETIRE_FREQ {
-            Counted::retire_one(&l);
-        }
-        // The next free empties the cache first.
-        with_handle(|h| h.list_count.set(MAX_CACHE));
-        // The transition, taken through its slow path (as when the epoch
-        // does not settle within the fast attempts), inside the pin: its
-        // loop traverses the slot list onto the cache, and its drain runs
-        // the trigger.
-        with_handle(|h| h.slow_path(0, tid));
-        drop(guard);
-    })
-    .join()
-    .unwrap();
-    assert_eq!(live.load(Ordering::SeqCst), 0);
-}
-
-/// A retire that places a batch helps pending slow-path threads first, and
-/// the help may free cached batches whose destructors retire in turn, a
-/// full batch among them. The batch this retire then submits must be the
-/// one in the cells at that point, never one sized from a count read before
-/// the help (the nested retires may have submitted and emptied it).
-#[test]
-fn retire_submits_the_batch_left_after_helping() {
-    /// Its destructor retires one full batch of counted values.
-    #[repr(C)]
-    struct RetiresABatch {
-        retired: RetiredNode,
-        live: Arc<AtomicUsize>,
-    }
-    impl Drop for RetiresABatch {
-        fn drop(&mut self) {
-            for _ in 0..RETIRE_FREQ {
-                Counted::retire_one(&self.live);
-            }
-            self.live.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    let _l = lock();
-    let live = Arc::new(AtomicUsize::new(0));
-    let l = Arc::clone(&live);
-    thread::spawn(move || {
-        let global = crate::slot::global();
-        let tid = own_tid();
-        let guard = pin();
-        // One batch, the trigger in it, into this thread's slot, then onto
-        // the free-list cache, full, by a traversal of the slot list.
-        l.fetch_add(1, Ordering::SeqCst);
-        let node = Box::into_raw(Box::new(RetiresABatch {
-            retired: RetiredNode::new(),
-            live: Arc::clone(&l),
-        }));
-        unsafe { retire(node) };
-        for _ in 1..RETIRE_FREQ {
-            Counted::retire_one(&l);
-        }
-        with_handle(|h| {
-            let first = global.thread_slots(tid).first[0].exchange_lo(0, Ordering::AcqRel);
-            assert!(
-                first != 0 && first != INVPTR as u64,
-                "the batch skipped the own slot"
-            );
-            unsafe { h.traverse_onto_cache(first as *mut RetiredNode) };
-            h.list_count.set(MAX_CACHE);
-        });
-
-        // Another thread pending in the slow path: an active slot whose
-        // help request is open.
-        let pending = global.alloc_tid();
-        let slots = global.thread_slots(pending);
-        slots.epoch[0].store_lo(crate::slot::epoch(), Ordering::SeqCst);
-        slots.first[0].store_lo(0, Ordering::SeqCst);
-        slots.state[0].pointer.store(0, Ordering::SeqCst);
-        slots.state[0].parent.store(0, Ordering::SeqCst);
-        slots.state[0].epoch.store(0, Ordering::SeqCst);
-        let seqno = slots.epoch[0].load_hi();
-        slots.state[0]
-            .result
-            .store(super::INVPTR as u64, seqno, Ordering::SeqCst);
-        global.inc_slow();
-
-        // Three batches, each leaving a node in the pending slot and in this
-        // one; the first placed helps, and its help traverses the pending
-        // slot's list, which frees the cache and so runs the trigger.
-        for _ in 0..3 * RETIRE_FREQ {
-            Counted::retire_one(&l);
-        }
-
-        global.dec_slow();
-        // The pending thread leaves as an exit would.
-        let first = slots.first[0].exchange_lo(INVPTR as u64, Ordering::AcqRel);
-        if first != 0 && first != INVPTR as u64 {
-            with_handle(|h| unsafe { h.traverse_into_cache(first as *mut RetiredNode) });
-        }
-        global.release_tid(pending);
-        drop(guard);
-    })
-    .join()
-    .unwrap();
-    assert_eq!(live.load(Ordering::SeqCst), 0);
-}
-
 /// A thread's exit runs its destructors with its slot left: a destructor
 /// that pins enters the slot for a section of its own (active while that
 /// section lives, left at its end), as any code outside a section does, so
@@ -582,7 +449,10 @@ fn exit_destructors_reach_the_handle() {
             crate::slot::advance_epoch();
             let guard = pin();
             let _ = self.shared.load(Ordering::Acquire, &guard);
-            let published = crate::slot::global().thread_slots(self.tid).epoch[0].load_lo();
+            let published = crate::slot::global()
+                .thread_slots(self.tid)
+                .epoch
+                .load(Ordering::Acquire);
             self.covered.store(
                 !slot_inactive(self.tid) && published == crate::slot::epoch(),
                 Ordering::SeqCst,
@@ -692,38 +562,33 @@ fn exit_frees_a_chain_of_retiring_destructors() {
     );
 }
 
-/// A thread that advances the epoch stamps its next allocations with the
-/// epoch it advanced to, pinning or not: its births stay recent, so the
-/// batches they end up in skip the slots of threads stalled at older
-/// epochs.
+/// A node allocated after the epoch moved carries the epoch it finds: the
+/// birth is read from the global counter at the allocation, whatever this
+/// thread did between (other threads' advances, no pin here), and a
+/// thread's own `EPOCH_FREQ`th allocation advances the epoch itself before
+/// the read.
 #[test]
 fn an_epoch_advance_refreshes_the_birth_stamp() {
     let _l = lock();
-    let live = Arc::new(AtomicUsize::new(0));
-    let l = Arc::clone(&live);
-    thread::spawn(move || {
+    thread::spawn(|| {
         own_tid();
-        let seeded = RetiredNode::new().birth_epoch();
-        // Other threads' advances, then this thread's own at its
-        // EPOCH_FREQ-th retire, none of them followed by a pin here.
+        let first = RetiredNode::new().birth_epoch();
+        assert_eq!(first, crate::slot::epoch());
         for _ in 0..4 {
             crate::slot::advance_epoch();
         }
-        with_handle(|h| h.alloc_counter.set(0));
-        for _ in 0..EPOCH_FREQ {
-            Counted::retire_one(&l);
-        }
-        let stamped = RetiredNode::new().birth_epoch();
-        assert!(
-            stamped > seeded + 4,
-            "births still stamped {stamped}, seeded {seeded}"
-        );
-        assert!(stamped <= crate::slot::epoch());
-        flush();
+        let after = RetiredNode::new().birth_epoch();
+        assert_eq!(after, first + 4, "a birth stamped behind the epoch");
+        // The thread's next EPOCH_FREQ-th allocation advances the epoch and
+        // stamps the epoch it made.
+        with_handle(|h| h.alloc_counter.set(EPOCH_FREQ));
+        let before = crate::slot::epoch();
+        let advanced = RetiredNode::new().birth_epoch();
+        assert_eq!(advanced, before + 1);
+        assert_eq!(crate::slot::epoch(), before + 1);
     })
     .join()
     .unwrap();
-    assert_eq!(live.load(Ordering::SeqCst), 0);
 }
 
 /// A thread that pinned, dropped its guard and idles, with no flush, holds
@@ -731,7 +596,7 @@ fn an_epoch_advance_refreshes_the_birth_stamp() {
 /// other threads, even of values born before its last reservation, skip
 /// its slot and are freed while it stays idle.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn an_idle_thread_holds_nothing_back() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
@@ -772,7 +637,7 @@ fn an_idle_thread_holds_nothing_back() {
 /// pinned thread's drop traverses it and frees the value, with no flush
 /// anywhere else.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn a_flush_pads_a_partial_batch_while_a_reader_is_pinned() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
@@ -808,7 +673,7 @@ fn a_flush_pads_a_partial_batch_while_a_reader_is_pinned() {
 /// The same at a thread's exit: the exiting thread's partial batch is
 /// placed, padded, and freed by the pinned thread's drop.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn an_exit_places_its_partial_batch_while_a_reader_is_pinned() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
@@ -912,7 +777,7 @@ mod progress;
 ///
 /// Before the fix the value was dropped unfreed, and this test failed.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn a_retire_after_the_exit_is_freed() {
     struct Late {
         live: Arc<AtomicUsize>,

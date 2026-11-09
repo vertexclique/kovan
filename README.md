@@ -26,8 +26,8 @@ Kovan tracks this automatically with near-zero overhead on reads.
 - **Near-zero read overhead**: One atomic load & one comparison
 - **Wait-free operations**: loads, `pin()`, `retire()`, guard drops, `flush()`
   and thread exit each complete in a bounded number of their own steps,
-  whatever other threads do, stalled ones included (with native 128-bit
-  atomics, see Supported Platforms).
+  whatever other threads do, stalled ones included (on every target with
+  64-bit atomics, see Supported Platforms).
 - **Bounded memory**: Never grows unbounded like epoch-based schemes. A thread's
   reservation ends with the drop of its outermost guard, so a thread with no
   live guard (idle, parked, between tasks) holds no retired value back; a
@@ -120,13 +120,19 @@ docs give the contract and a complete example.
 
 ## How It Works
 
-1. **`pin()`** - Enter critical section, get a guard
-2. **`load()`** - Read pointer with epoch tracking
-3. **`retire()`** - Schedule memory for safe reclamation
+1. **`pin()`** - Enter critical section, get a guard: one exchange activates
+   the thread's reservation
+2. **`load()`** - Read pointer with epoch tracking: one load and one compare
+   with the epoch the reservation publishes; when the epoch moved, the load
+   publishes it and loads again
+3. **`retire()`** - Schedule memory for safe reclamation: batches of retired
+   nodes are placed in the reservations that may still hold them
 
 The guard ensures any pointers you load stay valid. The drop of a thread's
-outermost guard leaves its reservation and frees the retired memory that
-reservation held back; a thread with no live guard delays no reclamation.
+outermost guard leaves its reservation (one exchange) and frees the retired
+memory that reservation held back; a thread with no live guard delays no
+reclamation. The epoch advances with allocations (every 128th of a thread),
+and a reservation covers the nodes born up to the epoch it published.
 
 ## Examples
 
@@ -195,34 +201,24 @@ kovan-map = { version = "0.2", features = ["recycle"] }
 **Architectures**:
 
 Supported list:
-- Native Wait-Free (128-bit atomics):
-  - `x86_64`: Requires compilation target feature `+cmpxchg16b`.
-  - `aarch64` / `arm64`: Supported out of the box.
-  - `s390` and `riscv64gc`: Supported natively. I am not testing it on CI (cross glibc issues).
-- Lock-Based Fallback (via `portable-atomic`):
-  - Other 64-bit architectures without 128-bit atomic instructions (e.g., `riscv64`, `mips64`).
-  - 32-bit architectures: `wasm32-unknown-unknown`, `wasm32-wasip1`, `i686`.
-  - On these platforms, 128-bit operations fall back to spinlocks.
-  - **IMPORTANT**: Also on these platforms data structures function correctly but drop their **wait-free guarantees**.
+- `x86_64`, `aarch64` / `arm64`: tested on CI (Linux, macOS, Windows).
+- `s390x`, `riscv64gc` and every other 64-bit target with 64-bit atomics:
+  supported, not tested on CI (cross glibc issues).
+- 32-bit targets with 64-bit atomics: `i686` (tested on CI with real
+  threads), `wasm32-unknown-unknown`, `wasm32-wasip1` (tested on CI,
+  single-threaded).
+
+A thread's reservation is a pointer-sized list word and a 64-bit era word,
+each accessed with the target's own atomic instructions: reclamation is
+wait-free on every target above, with no 128-bit atomic and no lock-based
+fallback.
 
 ### 32-bit targets
 
-Supported, under the same lock-based-fallback caveat as any platform without
-native 128-bit atomics. The DCAS slot protocol is width-agnostic: the pointer
-half of each `(pointer, seqno)` word pair is zero-extended, and the batch
+Supported, with the same guarantees. The protocol is width-agnostic: the list
+word is pointer-sized (its inactive marker is all ones), the era word is 64
+bits (`cmpxchg8b` on `i686`, native on wasm32), and the batch
 reference-counter bias comes from `usize::BITS`.
-
-Two consequences worth stating plainly:
-
-- **No wait-free guarantee.** A 32-bit target never selects the `native`
-  `WordPair`, so `portable-atomic` emulates the 128-bit atomic with a lock.
-  Reclamation stays correct; it stops being lock-free, and so stops being
-  wait-free.
-- **Thread-ID headroom shrinks.** `RetiredNode::set_slot_info` packs
-  `(tid, slot_index)` into one `usize`, so the `tid` field is 16 bits wide
-  rather than 48. `MAX_PAGES * SLOTS_PER_PAGE` is 65,536, which fits exactly.
-  Static assertions in `slot.rs` fail the build rather than truncate a `tid`
-  should those constants ever grow.
 
 On `wasm32` the runtime is single-threaded unless the build opts into threads,
 so there is no contention to remove and lock-free machinery buys nothing there.
@@ -255,8 +251,8 @@ why, rather than shipping a test that asserts nothing.
 
 | Target | What CI runs | Result |
 | --- | --- | --- |
-| `x86_64` | Full workspace suite (native DCAS path) | 544 |
-| `i686` | Full workspace suite at 32-bit: real threads on the seqlock fallback | 544 |
+| `x86_64` | Full workspace suite | 544 |
+| `i686` | Full workspace suite at 32-bit pointer width, with real threads | 544 |
 | `wasm32-unknown-unknown` | Build (incl. `--no-default-features`), clippy, **and runs** the wasm suites via `wasm-bindgen-test` | 213 |
 | `wasm32-wasip1` | Build, clippy, **and runs** the wasm suites under `wasmtime` | 212 |
 

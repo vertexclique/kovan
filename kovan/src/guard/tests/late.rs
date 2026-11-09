@@ -18,7 +18,12 @@ use std::thread;
 /// The ID and the published epoch of this thread's late section, if one is
 /// live.
 fn late_section() -> Option<(usize, u64)> {
-    let epoch_of = |tid: usize| crate::slot::global().thread_slots(tid).epoch[0].load_lo();
+    let epoch_of = |tid: usize| {
+        crate::slot::global()
+            .thread_slots(tid)
+            .epoch
+            .load(Ordering::Acquire)
+    };
     #[cfg(feature = "nightly")]
     {
         let handle = &super::HANDLE;
@@ -95,7 +100,7 @@ fn after_exit<R: Send + 'static>(body: impl FnOnce() -> R + Send + 'static) -> R
 /// Before the fix the pin returned a guard that reserved nothing (and on
 /// nightly it panicked claiming an ID), and this test failed.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn a_pin_after_the_exit_reserves_until_its_guard_drops() {
     let _l = lock();
     let (during, after, released) = after_exit(|| {
@@ -116,7 +121,7 @@ fn a_pin_after_the_exit_reserves_until_its_guard_drops() {
 /// Nested pins after the exit share one section: the inner drop leaves it
 /// in place, the outer one ends it.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn nested_pins_after_the_exit_end_the_section_once() {
     let _l = lock();
     let (outer, inner, after, released) = after_exit(|| {
@@ -145,7 +150,7 @@ fn nested_pins_after_the_exit_end_the_section_once() {
 /// lives, though another thread replaces it, retires it and flushes; once
 /// the guard drops, it is freed.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn a_load_after_the_exit_is_protected() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(1));
@@ -210,7 +215,7 @@ fn a_load_after_the_exit_is_protected() {
 /// A value retired inside a section after the exit goes out with the
 /// section's end (its handle's exit) and is freed.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn a_retire_inside_a_section_after_the_exit_is_freed() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));

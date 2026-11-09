@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Run Miri tests for kovan core crate only.
-# Doctests are skipped (--lib --tests) because Miri cannot emulate cmpxchg16b.
+# Doctests are skipped (--lib --tests): test.yml runs them on every toolchain.
 #
 # Must be run with nightly rust, e.g.:
 #   rustup default nightly

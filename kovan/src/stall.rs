@@ -20,31 +20,9 @@ pub(crate) enum Step {
     /// An outermost guard drop has exchanged its slot's list word to INVPTR
     /// (the slot left) and not yet traversed what the exchange captured.
     Left,
-    /// A pin's slow path has published its help request (result pending)
-    /// and not yet entered its loop.
-    SlowPending,
-    /// A thread detaching a slot list at the end of a slow-path cycle has
-    /// moved the era seqno odd (the slot closed to new batches) and not yet
-    /// emptied the list.
-    EraClosed,
-    /// A thread detaching a slot list at the end of a slow-path cycle has
-    /// read the slot and not yet tried to empty it (one pass of the
-    /// detach's loop).
-    DetachList,
-    /// A helper has made one pass of its loop (updated its helper slot) and
-    /// not yet read the epoch again.
-    HelpPass,
-    /// A helper checking that the request it helps is still open has read
-    /// the request's low word and not yet its high word.
-    HelpRecheck,
     /// A protected load's convergence pass has loaded the pointer and not
     /// yet read the epoch again.
     LoadAttempt,
-    /// An outermost pin's transition has made one attempt (traversed and
-    /// published) and not yet read the epoch again.
-    TransitionAttempt,
-    /// A pin's slow path is about to make one pass of its loop.
-    SlowPass,
     /// A retire's insert has checked its slot active and eligible and not
     /// yet exchanged its node in.
     InsertReady,

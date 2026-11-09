@@ -11,9 +11,6 @@ keywords = ["concurrency", "lock-free", "memory-reclamation", "smr"]
 categories = ["concurrency", "memory-management", "no-std"]
 readme.workspace = true
 
-[package.metadata.docs.rs]
-rustdoc-args = ["-C", "target-feature=+cmpxchg16b"]
-
 [lib]
 name = "kovan"
 path = "src/lib.rs"
@@ -35,10 +32,6 @@ shuttle = ["dep:shuttle"]
 
 [dependencies]
 once_cell = { version = "1.21", default-features = false, features = ["alloc"] }
-portable-atomic = { version = "1.11.1", default-features = false, features = [
-    "require-cas",
-    "fallback",
-] }
 shuttle = { version = "0.9.1", optional = true }
 
 # criterion and shuttle are native-only: both pull in threading and stack

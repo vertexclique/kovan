@@ -96,7 +96,7 @@ fn retire_without_pinning(flushes: bool) -> (usize, usize) {
 /// batch, so every value is freed before A exits (an exit that submits
 /// would free them later, which this checks apart).
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn unpinned_thread_that_flushes_frees_what_it_retired() {
     let _l = lock();
     let (after_flush, left) = retire_without_pinning(true);
@@ -112,7 +112,7 @@ fn unpinned_thread_that_flushes_frees_what_it_retired() {
 
 /// A just exits: the exit claims an ID and submits A's batch.
 #[test]
-#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn unpinned_thread_that_exits_frees_what_it_retired() {
     let _l = lock();
     let (_, left) = retire_without_pinning(false);

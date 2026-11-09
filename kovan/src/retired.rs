@@ -26,18 +26,6 @@ pub(crate) const INVPTR: usize = !0_usize;
 /// Batches are bounded by `RETIRE_FREQ` (64), so 31 bits is ample headroom.
 pub(crate) const REFC_PROTECT: usize = 1_usize << (usize::BITS - 1);
 
-/// Width of the `slot_index` field in the packed `(tid, slot_index)` value
-/// stored by [`RetiredNode::set_slot_info`].
-///
-/// The `tid` field gets the remaining `usize::BITS - SLOT_INFO_INDEX_BITS`
-/// bits: 48 on a 64-bit target, 16 on a 32-bit one. `slot.rs` carries the
-/// static assertions that both fields are wide enough at every supported
-/// pointer width.
-pub(crate) const SLOT_INFO_INDEX_BITS: u32 = 16;
-
-/// Mask selecting the `slot_index` field of a packed slot-info value.
-pub(crate) const SLOT_INFO_INDEX_MASK: usize = (1_usize << SLOT_INFO_INDEX_BITS) - 1;
-
 /// Mark a pointer as an RNODE (XOR with 1)
 #[inline]
 pub(crate) fn rnode_mark(ptr: *mut RetiredNode) -> *mut RetiredNode {
@@ -105,17 +93,15 @@ impl RetiredNode {
     /// so that threads pinned before this allocation can be correctly identified
     /// as not needing protection for this node.
     ///
-    /// The epoch comes from a thread-local cache (refreshed at every `pin()`)
-    /// rather than a direct read of the global counter, avoiding a contended
-    /// atomic load on every allocation. The cached value is always ≤ the true
-    /// global epoch, so it can only defer reclamation more conservatively,
-    /// never prematurely. See `guard::current_birth_epoch`.
+    /// The allocation counts on the thread's epoch clock (every `EPOCH_FREQ`th
+    /// advances the global epoch) and the birth is the global epoch read
+    /// after that. See `guard::alloc_birth_epoch`.
     pub fn new() -> Self {
         Self {
             next: AtomicPtr::new(core::ptr::null_mut()),
             batch_link: AtomicPtr::new(core::ptr::null_mut()),
             refs_or_next: AtomicUsize::new(0),
-            birth_epoch: UnsafeCell::new(crate::guard::current_birth_epoch()),
+            birth_epoch: UnsafeCell::new(crate::guard::alloc_birth_epoch()),
             destructor: UnsafeCell::new(None),
         }
     }
@@ -167,33 +153,20 @@ impl RetiredNode {
             .store(next as usize, core::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Store (tid, slot_index) packed into the `next` field during try_retire scan phase.
-    ///
-    /// `slot_index` occupies the low [`SLOT_INFO_INDEX_BITS`] bits and `tid`
-    /// the rest. The static assertions in `slot.rs` guarantee both fit at
-    /// every supported pointer width.
+    /// Store the thread ID of the slot this node goes to in the `next`
+    /// field, during try_retire's scan phase.
     #[inline]
-    pub(crate) fn set_slot_info(&self, tid: usize, index: usize) {
-        debug_assert!(index <= SLOT_INFO_INDEX_MASK, "slot index overflows field");
-        debug_assert!(
-            tid <= usize::MAX >> SLOT_INFO_INDEX_BITS,
-            "tid overflows field"
-        );
-        let packed = (tid << SLOT_INFO_INDEX_BITS) | index;
+    pub(crate) fn set_slot_info(&self, tid: usize) {
         self.next.store(
-            packed as *mut RetiredNode,
+            tid as *mut RetiredNode,
             core::sync::atomic::Ordering::Relaxed,
         );
     }
 
-    /// Read the (tid, slot_index) packed into `next` during try_retire insert phase.
+    /// Read the thread ID stored in `next` during try_retire's insert phase.
     #[inline]
-    pub(crate) fn get_slot_info(&self) -> (usize, usize) {
-        let packed = self.next.load(core::sync::atomic::Ordering::Relaxed) as usize;
-        (
-            packed >> SLOT_INFO_INDEX_BITS,
-            packed & SLOT_INFO_INDEX_MASK,
-        )
+    pub(crate) fn get_slot_info(&self) -> usize {
+        self.next.load(core::sync::atomic::Ordering::Relaxed) as usize
     }
 }
 

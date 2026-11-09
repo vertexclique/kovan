@@ -13,8 +13,8 @@ use core::sync::atomic::Ordering;
 // shuttle's instrumented `AtomicUsize` instead of `core::sync::atomic`'s.
 // This gives shuttle's scheduler a yield point at every pointer load, store,
 // swap and CAS across every kovan-based data structure, without touching the
-// 128-bit DCAS epoch/slot protocol in `slot.rs` (shuttle has no 128-bit
-// atomic, and that protocol's correctness isn't what these tests probe).
+// reservation words in `slot.rs` (plain core atomics: that protocol's
+// correctness is the TLA+ model's to check, not what these tests probe).
 // Optional dependency, off by default: no cost in a normal build.
 #[cfg(not(feature = "shuttle"))]
 pub(crate) use core::sync::atomic::AtomicUsize;

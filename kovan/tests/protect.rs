@@ -43,7 +43,7 @@ impl Drop for EraTestNode {
     }
 }
 
-/// A node used only to force epoch advancement via retire().
+/// A node used only to move the epoch: its allocation counts on the clock.
 #[repr(C)]
 struct DummyNode {
     retired: RetiredNode,

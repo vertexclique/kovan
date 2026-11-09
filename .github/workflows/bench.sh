@@ -13,7 +13,6 @@ case $target in *:*) filter=${target#*:}; target=${target%%:*} ;; esac
 crate=${target%%/*}
 bench=${target#*/}
 base=${BASELINE:-kovan-v0.1.22}
-export RUSTFLAGS="-C target-feature=+cmpxchg16b"
 
 if ! git cat-file -e "$base:$crate/benches/$bench.rs" 2>/dev/null; then
   tree=$(mktemp -d)

@@ -268,7 +268,7 @@ fn drain_and_audit(pool: &'static Pool, slot: &Atomic<Slot>) {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn retired_nodes_return_to_the_pool_and_are_reused() {
     const WARMUP: u64 = 4_096;
     const STEADY: u64 = 100_000;
@@ -333,7 +333,7 @@ unsafe impl Reclaimable for Plain {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn default_dealloc_frees_the_box() {
     const NODES: usize = 1_000;
 
@@ -358,7 +358,7 @@ fn default_dealloc_frees_the_box() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)] // mixed-size atomics (AtomicU64 + AtomicU128 on same WordPair) are UB under Miri's model
+#[cfg_attr(miri, ignore)] // multi-threaded, with deadline waits: not run under Miri
 fn concurrent_recycling_never_exposes_a_recycled_value() {
     const READERS: usize = 4;
     const WRITERS: usize = 2;
@@ -429,7 +429,7 @@ fn concurrent_recycling_never_exposes_a_recycled_value() {
     );
     assert!(observed.load(Ordering::Relaxed) >= READERS * MIN_CHECKS);
     // Without recycling every publish allocates. With it, only the nodes in
-    // flight (batches waiting on a reader's next transition) are extra, and
+    // flight (batches waiting on a reader's drop) are extra, and
     // how many that is depends on scheduling: about 3% of the publishes on
     // an idle machine, up to about 10% with the cores oversubscribed. A
     // quarter leaves room for that and still fails a pool that is not used.

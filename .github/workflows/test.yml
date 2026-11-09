@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
 jobs:
   # Every supported toolchain on every platform: the workspace's rust-version (1.99), stable and
@@ -101,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      RUSTFLAGS: "-C target-feature=+cmpxchg16b -Zsanitizer=address"
+      RUSTFLAGS: "-Zsanitizer=address"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -128,13 +127,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-        env:
-          RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
       - name: Clippy (recycle)
         run: cargo clippy --workspace --all-targets --features recycle -- -D warnings
-        env:
-          RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
       # `default = ["std"]` on kovan and kovan-map is a real feature
       # combination (the no_std + alloc path); wasm.yml proves it builds at
@@ -145,8 +140,6 @@ jobs:
         run: |
           cargo clippy -p kovan --no-default-features --lib -- -D warnings
           cargo clippy -p kovan-map --no-default-features --lib -- -D warnings
-        env:
-          RUSTFLAGS: "-C target-feature=+cmpxchg16b"
 
   doc:
     name: Docs

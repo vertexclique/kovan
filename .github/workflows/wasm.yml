@@ -1,10 +1,9 @@
 name: WASM / 32-bit
 
-# kovan's DCAS slot protocol is width-agnostic, but 32-bit targets take a
-# different code path: they never select the `native` WordPair, so
-# portable-atomic emulates the 128-bit atomic with a spin-based seqlock
-# (correct, but no longer lock-free). Nothing in the x86_64 matrix exercises
-# that path, so it needs its own workflow or it silently rots.
+# kovan's reservation protocol is width-agnostic: a pointer-sized list word
+# (its inactive marker all ones) and a 64-bit era word, each a target-native
+# atomic. Nothing in the x86_64 matrix exercises 32-bit pointers, so the
+# width logic needs its own workflow or it silently rots.
 #
 # Coverage split, and why each one exists:
 #   - wasm32-unknown-unknown: builds AND RUNS the wasm suites. This is the only
@@ -122,9 +121,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-multilib libc6-dev-i386
 
-      # No +cmpxchg16b here on purpose: i686 has no 128-bit atomic, so this
-      # exercises the portable-atomic seqlock fallback -- the same code path
-      # wasm takes, but with real threads contending on it.
+      # The reservation words are a pointer-sized word and a 64-bit word,
+      # both lock-free on i686 (cmpxchg8b): the full threaded suite at 32-bit
+      # pointer width, with real threads contending.
       - name: Run full suite (release)
         run: cargo test --workspace --target i686-unknown-linux-gnu --release
 
