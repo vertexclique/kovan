@@ -494,9 +494,14 @@ impl ThreadSlots {
     pub(crate) fn leave(&self, index: usize) -> u64 {
         let era = self.epoch[index].load_lo() & !ERA_INACTIVE;
         let kept = if era == EPOCH_UNCONDITIONAL { 0 } else { era };
-        // Relaxed: the exchange that follows releases it, and a retire reads
-        // it only after an exchange of its own on the list word.
-        self.epoch[index].store_lo(kept | ERA_INACTIVE, Ordering::Relaxed);
+        // Release: a retire's scan reads the era with a plain Acquire load
+        // after a plain load of the list word (`try_retire`, the scan and the
+        // insert's re-check), not only after an exchange of its own. A scan
+        // that reads the list word still active and this tag skips the slot,
+        // and the batch is freed elsewhere: only a Release store makes this
+        // section's reads happen before that free. Relaxed held on x86, which
+        // keeps loads ahead of later stores; ARM and POWER do not.
+        self.epoch[index].store_lo(kept | ERA_INACTIVE, Ordering::Release);
         self.first[index].exchange_lo(INVPTR as u64, Ordering::AcqRel)
     }
 }
