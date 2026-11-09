@@ -25,6 +25,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The reclamation model's code map must name every atomic operation of kovan/src at its current
+  # line (tools/proof-map-check.py): a pull request whose code and map disagree fails here, in
+  # seconds, before the shares run.
+  map:
+    name: Code map matches kovan/src
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the reclamation model's code map
+        run: python3 tools/proof-map-check.py
+
   share:
     name: TLA+ share ${{ matrix.shard }} of 16
     runs-on: ubuntu-latest
@@ -50,10 +62,14 @@ jobs:
 
   tla:
     name: TLA+ model checking
-    needs: share
+    needs: [share, map]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: The code map matched kovan/src
+        run: |
+          [ "${{ needs.map.result }}" = success ] || {
+            echo "the reclamation model's code map does not match kovan/src: ${{ needs.map.result }}" >&2; exit 1; }
       - name: Every share matched EXPECTED.txt
         run: |
           [ "${{ needs.share.result }}" = success ] || {

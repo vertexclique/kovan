@@ -36,6 +36,7 @@ RC_wf_mix                          MC_Reclaim         pass
 RC_wf_exit                         MC_Reclaim         pass
 RC_wf_unpinned_exit                MC_Reclaim         pass
 RC_wf_unpinned_flush               MC_Reclaim         pass
+RC_exit_tid_steal                 MC_Reclaim         pass
 RC_mut_tid_released_early          MC_Reclaim         violated:NoUseAfterFree
 RC_mut_cache_copied                MC_Reclaim         violated:NoDoubleFree
 RC_mut_help_before_submit          MC_Reclaim         violated:NoNullDeref

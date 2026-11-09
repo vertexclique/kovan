@@ -99,6 +99,15 @@ P_exit_tid == [t \in {1, 2, 3} |-> CASE t = 1 -> <<P, Wr(1), Rt, Rt, U, After(2,
                                     [] t = 2 -> <<After(1, 5), P, U, After(1, 6), Rt, Fl, P, Wr(2),
                                                   Rt, Rt, Wr(2), Wr(2), U, Fl>>
                                     [] t = 3 -> <<AwaitRel, After(2, 5), P, After(2, 7), Ld(2), U>>]
+\* A drop an exit runs pins under the tid the exit already released. Thread 1 retires node 1 and
+\* exits: with no slot eligible its batch is freed at once, and node 1's drop (DtorR3) pins and
+\* loads. Thread 3, spawned once the tid is released, takes it over, pins and loads cell 2;
+\* thread 2 then replaces cell 2 and retires three nodes, so a batch holding the node thread 3
+\* loaded is placed in thread 3's slot. Under tid_released_early the drop's pin takes that list
+\* from the slot (the exchange to 0) and the batch is freed under thread 3's reader.
+P_exit_tid_steal == [t \in {1, 2, 3} |-> CASE t = 1 -> <<Wr(1), Ex>>
+                                          [] t = 2 -> <<After(3, 3), Wr(2), Rt, Rt>>
+                                          [] t = 3 -> <<AwaitRel, P, Ld(2), U>>]
 \* One thread: a chain of drops that retire (node 1's retires node 3, node 3's node 4).
 P_exit_chain == [t \in {1} |-> <<P, Wr(1), U, Ex>>]
 \* The same with one more pin before the exit: the retire's advances moved the epoch past the
