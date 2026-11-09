@@ -1,7 +1,9 @@
 //! A thread's reservation slot takes one node of every batch retired while
-//! the slot's published epoch covers the batch, and a batch is freed only
-//! after every slot that took one of its nodes has traversed its list. The
-//! owner traverses its list at critical-section boundaries.
+//! the slot is active and its published epoch covers the batch, and a
+//! batch is freed only after every slot that took one of its nodes has
+//! traversed its list. The owner traverses its list at the end of each
+//! critical section (the drop of its outermost guard leaves the slot) and
+//! at the start of the next.
 //!
 //! These tests pin that a thread which keeps operating traverses its list
 //! as it goes, for every shape of critical section: the number of retired
@@ -21,11 +23,10 @@ use std::thread;
 
 /// Retired values a thread that keeps operating may leave alive at any
 /// point. The protocol holds, per thread: the batch being filled (under 64
-/// nodes), the batches retired since the last epoch advance (two per 128
-/// retires), and the traversed batches cached for freeing (at most 12
-/// traversals' worth, two batches each in these loops): under 2048. The
-/// bound is twice that, so it pins "does not grow with the retire count"
-/// without pinning those constants.
+/// nodes) and the batches placed in its slot during its current section,
+/// freed at that section's end: a few batches. The bound is far above that,
+/// so it pins "does not grow with the retire count" without pinning those
+/// constants.
 const LIVE_BOUND: usize = 4096;
 
 /// Operations per scenario: many times the bound, so a list that is never
@@ -166,10 +167,10 @@ fn long_section_is_drained_after_it_ends() {
     });
 }
 
-/// A thread that retires and then parks has flushed first, as the idle
-/// contract asks: everything it retired is freed while it stays parked,
-/// through the traversals of the threads that keep operating. (They load
-/// before they retire, so this pins the parked thread's share alone.)
+/// A thread that retires, flushes and then parks: everything it retired is
+/// freed while it stays parked, through the traversals of the threads that
+/// keep operating. (They load before they retire, so this pins the parked
+/// thread's share alone.)
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded and 100k operations
 fn flushed_parked_thread_holds_nothing_back() {
@@ -201,13 +202,14 @@ fn flushed_parked_thread_holds_nothing_back() {
     });
 }
 
-/// A thread parked without flushing keeps its own slot published, so it
-/// holds back its unsubmitted batch and the batches that hold a node born
-/// before it parked. Nothing born after that is held back: the threads
-/// that keep operating free their own garbage as they go.
+/// A thread parked without flushing holds nothing back either: its slot was
+/// left at the drop of its last guard, so the threads that keep operating
+/// free their own garbage as they go, and the parked thread's own values,
+/// which its last section's batches placed in its slot, went with that
+/// drop.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded and 100k operations
-fn unflushed_parked_thread_holds_back_only_older_garbage() {
+fn unflushed_parked_thread_holds_nothing_back() {
     let _l = test_lock();
     on_fresh_thread(|live| {
         let head = Arc::new(Atomic::new(Node::boxed(live)));
@@ -225,13 +227,14 @@ fn unflushed_parked_thread_holds_back_only_older_garbage() {
             })
         };
         parked_rx.recv().unwrap();
-        // What the parked thread holds back: at most the 1000 values it
-        // retired, plus the head.
+        // The parked thread's own 1000 values went with its last drop: what
+        // stays alive is this thread's batch being filled and the batch its
+        // current section placed, under three batches' worth.
         for i in 0..ITERS {
             load_replace_retire(&head, live);
             let n = live.load(Ordering::SeqCst);
             assert!(
-                n <= LIVE_BOUND + 1001,
+                n <= 3 * 64,
                 "beside an unflushed parked thread: {n} retired values still alive after {} operations",
                 i + 1
             );
@@ -265,8 +268,7 @@ const CANARY: u64 = 0x5eed_cafe_f00d_d00d;
 /// and its later protected loads, some under nested guards, raise its
 /// reservation: the pointer stays valid for the whole section, because the
 /// slot list is only traversed where no guard of the thread is live. Once
-/// the section ends, the next outermost pins traverse, and the value is
-/// freed as the thread keeps operating.
+/// the section ends, its drop traverses, and the value is freed.
 #[test]
 #[cfg_attr(miri, ignore)] // thousands of operations: too slow under Miri
 fn section_keeps_what_it_loaded_first() {
@@ -288,8 +290,7 @@ fn section_keeps_what_it_loaded_first() {
         // enough behind it to submit its batch and advance the epoch many
         // times, with protected loads after each retire (the raise) and
         // nested sections in between. Enough advances that a traversal
-        // inside the section would also have freed the traversed batches
-        // (the free-list cache is freed every thirteenth traversal).
+        // inside the section would also have freed the traversed batches.
         let null = unsafe { Shared::from_raw(core::ptr::null_mut()) };
         let unlinked = shared.swap(null, Ordering::AcqRel, &guard);
         unsafe { retire(unlinked.as_raw()) };

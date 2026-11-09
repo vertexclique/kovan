@@ -5,7 +5,7 @@
 //! the epoch counter, slow-path counter, and thread ID allocator.
 
 use crate::cache_padded::CachePadded;
-use crate::retired::{INVPTR, RetiredNode};
+use crate::retired::INVPTR;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
@@ -369,22 +369,50 @@ pub(crate) const RETIRE_FREQ: usize = 64;
 /// Epoch advancement frequency: a thread advances at its first retire, then every `EPOCH_FREQ`th
 pub(crate) const EPOCH_FREQ: usize = 128;
 
-/// Unconditional reservation marker for a slot's epoch word.
+/// The tag of a left slot's era word, its top bit. The leave of a slot sets
+/// it, before the exchange that makes the list word INVPTR, and the next
+/// activation clears it, before the exchange that makes the list word 0: a
+/// scan skips a tagged slot (`era_covers`), and a retire that exchanged a
+/// node into a slot and then reads the tag knows the slot was left since
+/// its scan, so it takes the node out again (`try_retire`). The era the
+/// slot last published stays in the low bits. Every slot of a thread (the
+/// reservation and the helper slots) carries it.
+pub(crate) const ERA_INACTIVE: u64 = 1 << 63;
+
+/// Unconditional reservation marker for a slot's epoch word: the largest
+/// untagged era.
 ///
 /// A slot publishing this value is eligible for **every** batch in
-/// `try_retire`'s scan (`epoch < min_epoch` is false for any `min_epoch`),
-/// so every subsequently retired batch inserts a node into the slot and is
-/// deferred until the slot's next traversal. This is the wait-free
-/// completion path for protected loads: when the global epoch keeps
-/// advancing during a load's bounded convergence attempts, the loader
-/// escalates to an unconditional reservation and finishes with one more
-/// pointer load - protected regardless of birth epochs.
+/// `try_retire`'s scan (`era_covers` holds for any `min_epoch`), so every
+/// subsequently retired batch inserts a node into the slot and is deferred
+/// until the slot's next traversal. This is the wait-free completion path
+/// for protected loads: when the global epoch keeps advancing during a
+/// load's bounded convergence attempts, the loader escalates to an
+/// unconditional reservation and finishes with one more pointer load -
+/// protected regardless of birth epochs.
 ///
-/// The marker is cleared (replaced by the real current epoch, with the
-/// slot's list traversed) at the next `pin()` boundary or outermost guard
-/// drop. The global epoch counter is monotonically increasing from 1 and
-/// can never reach this value.
-pub(crate) const EPOCH_UNCONDITIONAL: u64 = u64::MAX;
+/// The marker ends with the critical section that escalated: the outermost
+/// guard drop leaves the slot (its list word becomes INVPTR, so no scan
+/// reads its epoch) and resets the era to 0, so the next outermost `pin()`
+/// publishes the real current epoch. The global epoch counter is
+/// monotonically increasing from 1 and can never reach this value.
+pub(crate) const EPOCH_UNCONDITIONAL: u64 = ERA_INACTIVE - 1;
+
+/// Whether a slot whose era word reads `era` reserves the nodes born at
+/// `min_epoch` or later: the algorithm's `era >= min_epoch`, false for a
+/// left slot (tagged: negative as a signed word, below every birth) and
+/// true for an escalated one (the largest untagged value). One compare.
+#[inline]
+pub(crate) fn era_covers(era: u64, min_epoch: u64) -> bool {
+    era as i64 >= min_epoch as i64
+}
+
+/// Whether `era`, read from a slot's era word, carries the tag of a left
+/// slot (`ERA_INACTIVE`).
+#[inline]
+pub(crate) fn era_left(era: u64) -> bool {
+    (era as i64) < 0
+}
 
 /// Helping state for the slow-path / wait-free mechanism
 pub(crate) struct HelpState {
@@ -409,31 +437,67 @@ impl HelpState {
     }
 }
 
-/// Per-thread slot group: first (list+seqno), epoch (epoch+seqno), state
-/// (helping), and the batches exited owners of the ID left for adoption.
+/// Per-thread slot group: first (list+seqno), epoch (epoch+seqno) and state
+/// (helping). A slot's list word is INVPTR while the slot is inactive: a
+/// thread's reservation (index 0) is active only between its outermost
+/// `pin()` and the drop of that guard, which leaves the slot.
 #[repr(align(128))]
 pub(crate) struct ThreadSlots {
     pub(crate) first: [WordPair; SLOTS_PER_THREAD],
     pub(crate) epoch: [WordPair; SLOTS_PER_THREAD],
     pub(crate) state: [HelpState; SLOTS_PER_THREAD],
-    /// Orphaned batches parked by threads that owned this ID and exited: a
-    /// chain of finalized refs-nodes (batch_link = RNODE(batch_first))
-    /// linked through `next`, or null. Only the ID's owner stores a chain
-    /// here; any thread takes one by swapping the word to null.
-    orphans: AtomicPtr<RetiredNode>,
 }
 
 impl ThreadSlots {
     fn new() -> Self {
         // Initialize: first.lo = INVPTR (inactive), first.hi = 0 (seqno)
-        //             epoch.lo = 0, epoch.hi = 0
+        //             epoch.lo = ERA_INACTIVE (left, era 0), epoch.hi = 0
         //             state = zeroed
         Self {
             first: core::array::from_fn(|_| WordPair::new(INVPTR as u64, 0)),
-            epoch: core::array::from_fn(|_| WordPair::new(0, 0)),
+            epoch: core::array::from_fn(|_| WordPair::new(ERA_INACTIVE, 0)),
             state: core::array::from_fn(|_| HelpState::new()),
-            orphans: AtomicPtr::new(core::ptr::null_mut()),
         }
+    }
+
+    /// [Enter] Activate slot `index`: one store clears the tag of the era
+    /// word (the era the slot last published stays), then one exchange of
+    /// the list word to 0 takes what it held. Returns the list word
+    /// displaced (0, INVPTR, or a list the caller traverses).
+    ///
+    /// The store comes first, so a retire whose exchange lands after ours
+    /// reads the era untagged and keeps its node: with the tag still set it
+    /// would take the node out of a slot the owner believes active
+    /// (`try_retire`, `InsertCheck`). The exchange, never a store: the slot
+    /// left INVPTR may hold a node a retire exchanged in and has not rolled
+    /// back yet; the exchange takes it, the rollback then fails and counts
+    /// the node, and the caller's traversal balances that count. SeqCst, the
+    /// full barrier the scan's fence pairs with on x86-64; elsewhere the
+    /// caller follows it with `publish_fence`.
+    #[inline(always)]
+    pub(crate) fn activate(&self, index: usize) -> u64 {
+        let era = self.epoch[index].load_lo();
+        if era_left(era) {
+            // Relaxed: the exchange that follows releases it.
+            self.epoch[index].store_lo(era & !ERA_INACTIVE, Ordering::Relaxed);
+        }
+        self.first[index].exchange_lo(0, Ordering::SeqCst)
+    }
+
+    /// [LeaveMark] and [Leave] Leave slot `index`: one store tags the era
+    /// word (the escalated era reset to 0), then one exchange of the list
+    /// word to INVPTR. Returns the list word displaced (0, INVPTR, or a list
+    /// the caller traverses). The tag is stored before the exchange, so a
+    /// retire whose exchange lands after ours reads it and takes its node
+    /// out again (`try_retire`, `InsertCheck`).
+    #[inline(always)]
+    pub(crate) fn leave(&self, index: usize) -> u64 {
+        let era = self.epoch[index].load_lo() & !ERA_INACTIVE;
+        let kept = if era == EPOCH_UNCONDITIONAL { 0 } else { era };
+        // Relaxed: the exchange that follows releases it, and a retire reads
+        // it only after an exchange of its own on the list word.
+        self.epoch[index].store_lo(kept | ERA_INACTIVE, Ordering::Relaxed);
+        self.first[index].exchange_lo(INVPTR as u64, Ordering::AcqRel)
     }
 }
 
@@ -451,23 +515,6 @@ pub(crate) struct ASMRState {
     /// [`alloc_tid`](Self::alloc_tid) that takes the ID over. An ID never
     /// handed out has its bit clear, so only its first owner takes it.
     released: [AtomicU64; MAX_THREADS / 64],
-}
-
-/// Number of thread IDs whose orphan word holds a chain (see [`ThreadSlots`]):
-/// lets an adopter skip the pass over the IDs with one load while no exited
-/// thread left anything. Exact whenever no thread is between the two steps of
-/// a park or an adoption. A static beside [`ASMRState`], of which there is one,
-/// so a flush on a thread that never pinned reads it with one load, without
-/// reaching the state first.
-static ORPHANED: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether some thread ID's orphan word holds a chain, by one load of the
-/// count of such IDs (exact whenever no thread is between the steps of a park
-/// or an adoption). Relaxed: a park this load does not see yet waits for a
-/// later adoption, which loads the count again.
-#[inline]
-pub(crate) fn orphans_parked() -> bool {
-    ORPHANED.load(Ordering::Relaxed) != 0
 }
 
 /// Global epoch counter (starts at 1).
@@ -631,42 +678,10 @@ impl ASMRState {
         }
     }
 
-    /// Deactivate a thread's slots before its ID is released.
-    ///
-    /// Deactivation must be race-aware: a concurrent `try_retire` may insert
-    /// a node into a slot at any time before the slot reads INVPTR. A blind
-    /// `store(INVPTR)` would obliterate such a node - its refs-decrement
-    /// would never happen and the whole batch would leak. So the list word
-    /// is *exchanged* to INVPTR and any captured list is returned to the
-    /// caller for traversal.
-    ///
-    /// Seqnos (the `hi` halves) are deliberately preserved: the slow-path
-    /// parity protocol relies on seqnos never repeating for a slot, even
-    /// across tid recycling. Only the epoch `lo` is cleared (lowering an
-    /// epoch is the safe direction - the slot merely stops being eligible).
-    ///
-    /// Returns up to SLOTS_PER_THREAD captured list heads that the caller
-    /// must traverse (entries are null when there was nothing to capture).
-    /// The ID stays the caller's until [`release_tid`](Self::release_tid).
-    pub(crate) fn deactivate_slots(&self, tid: usize) -> [u64; SLOTS_PER_THREAD] {
-        let slots = self.thread_slots(tid);
-        let mut captured = [0u64; SLOTS_PER_THREAD];
-        for (j, cap) in captured.iter_mut().enumerate() {
-            // Stop eligibility first so try_retire's insert-phase re-check
-            // (epoch < min_epoch) rejects the slot before we capture.
-            slots.epoch[j].store_lo(0, Ordering::SeqCst);
-            let first = slots.first[j].exchange_lo(INVPTR as u64, Ordering::AcqRel);
-            if first != INVPTR as u64 && first != 0 {
-                *cap = first;
-            }
-        }
-        captured
-    }
-
-    /// Release a thread ID for recycling, once its thread no longer uses its
-    /// slots (see [`deactivate_slots`](Self::deactivate_slots)). Step
-    /// `TidRelease`: one `fetch_or`, whose release orders every write the
-    /// owner made to the ID's slots before the next owner's claim.
+    /// Release a thread ID for recycling, once its thread has left its
+    /// reservation (every slot of the ID holds INVPTR). Step `TidRelease`:
+    /// one `fetch_or`, whose release orders every write the owner made to
+    /// the ID's slots before the next owner's claim.
     pub(crate) fn release_tid(&self, tid: usize) {
         self.released[tid / 64].fetch_or(1 << (tid % 64), Ordering::Release);
     }
@@ -675,65 +690,6 @@ impl ASMRState {
     #[cfg(test)]
     pub(crate) fn tid_is_released(&self, tid: usize) -> bool {
         self.released[tid / 64].load(Ordering::SeqCst) & (1 << (tid % 64)) != 0
-    }
-
-    /// Park the orphaned batches `head ..= tail` (finalized refs-nodes
-    /// linked through `next`) on the orphan word of `tid`, which the caller
-    /// owns until it releases the ID.
-    ///
-    /// Two steps, no loop, no wait. Step `OrphanTake` swaps out what an
-    /// earlier owner of the ID left there, which is joined behind this chain:
-    /// an adopter only ever swaps the word to null, so nothing lands in it
-    /// between the two steps. Step `OrphanPublish` stores the joined chain,
-    /// the release that orders every write to its batches before an
-    /// adopter's acquire.
-    ///
-    /// # Safety
-    ///
-    /// `head` and `tail` are the ends of a chain of finalized refs-nodes
-    /// that no other thread can reach, and the caller owns `tid`.
-    pub(crate) unsafe fn park_orphans(
-        &self,
-        tid: usize,
-        head: *mut RetiredNode,
-        tail: *mut RetiredNode,
-    ) {
-        let word = &self.thread_slots(tid).orphans;
-        let earlier = word.swap(core::ptr::null_mut(), Ordering::Acquire);
-        #[cfg(test)]
-        crate::stall::at(crate::stall::Step::OrphanPark, tid);
-        unsafe { (*tail).next.store(earlier, Ordering::Relaxed) };
-        word.store(head, Ordering::Release);
-        if earlier.is_null() {
-            ORPHANED.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Take the orphaned batches parked on one thread ID, as a chain of
-    /// refs-nodes linked through `next` (null when none is parked).
-    ///
-    /// Step `OrphanAdopt`: one pass over the IDs handed out, skipped with one
-    /// load while no ID holds a chain; an ID whose word is empty costs one
-    /// load, and the first whose word holds a chain is swapped to null. The chain
-    /// taken is fixed by that swap: what exiting threads park afterwards
-    /// waits for the next adoption.
-    pub(crate) fn adopt_orphans(&self) -> *mut RetiredNode {
-        if !orphans_parked() {
-            return core::ptr::null_mut();
-        }
-        for tid in 0..self.max_threads() {
-            let word = &self.thread_slots(tid).orphans;
-            if word.load(Ordering::Relaxed).is_null() {
-                continue;
-            }
-            // Acquire: pairs with the release store of `park_orphans`.
-            let chain = word.swap(core::ptr::null_mut(), Ordering::Acquire);
-            if !chain.is_null() {
-                ORPHANED.fetch_sub(1, Ordering::Relaxed);
-                return chain;
-            }
-        }
-        core::ptr::null_mut()
     }
 
     /// HR_NUM getter

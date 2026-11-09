@@ -23,40 +23,42 @@
 //!   epoch keeps advancing, the load re-publishes at most 15 times; then it
 //!   escalates to an *unconditional reservation* (the slot becomes
 //!   eligible for every batch) and completes with one final load.
-//! - **`pin()`: wait-free.** A nested pin, or an outermost one that finds
-//!   the global epoch where its thread's last transition left it, is a
-//!   counter update. Otherwise a transition: at most 16 attempts, each one
-//!   walk of the thread's own slot list (see below) and one publication,
-//!   then a slow path whose loop passes once more only for an epoch
-//!   advance made by a thread that had not yet seen its help request: every
-//!   advance helps the pending requests first, and a helper completes the
-//!   request.
+//! - **`pin()`: wait-free.** A nested pin is a counter update. An outermost
+//!   pin enters the thread's reservation: one exchange of its slot's list
+//!   word (what a retire exchanged in since the slot was left is taken and
+//!   walked), one publication of the current epoch, and at most 15 more
+//!   attempts if the epoch moved, then a slow path whose loop passes once
+//!   more only for an epoch advance made by a thread that had not yet seen
+//!   its help request: every advance helps the pending requests first, and
+//!   a helper completes the request.
 //!   A thread's first pin also claims a thread ID: one pass over the
 //!   released IDs, no lock.
 //! - **`retire()`, `retire_reclaimable()`: wait-free.** O(1) per call; every 64th submits the
 //!   batch (one pass over the slots, one insert per eligible slot); the
 //!   first, every 128th after and every one that placed a batch help the
 //!   pending slow-path requests (O(T) each) and advance the epoch.
-//! - **`Guard` drop: wait-free** (a counter store; plus one slot
-//!   transition when the section escalated to an unconditional
-//!   reservation).
+//! - **`Guard` drop: wait-free.** A nested drop is a counter update. The
+//!   outermost drop leaves the reservation: one exchange of the slot's
+//!   list word to the inactive marker, one walk of the list it took (one
+//!   entry per batch submitted while the section ran), then the frees of
+//!   the batches that walk released, whose destructors are the thread's
+//!   own work.
 //! - **`flush()` and thread exit: wait-free**, a fixed sequence of the
-//!   steps above; batches an exiting thread cannot place are parked on its
-//!   thread ID and adopted by `flush()`, both without a lock: one load tells
-//!   whether any ID holds parked batches, and each call adopts one ID's
-//!   chain, on a thread that never pinned too. A thread that never pinned
-//!   claims a thread ID first, as a first pin does, in `flush()` while some
-//!   batch is parked or its own batch holds values it retired, and at exit
-//!   while its batch holds values.
+//!   steps above: the thread's partial batch is placed (padded with
+//!   fillers, one per eligible slot beyond its nodes, so it is always
+//!   placed), the epoch advanced, the released batches freed; repeated
+//!   only for what those frees' destructors retired. A thread that never
+//!   pinned claims a thread ID first, as a first pin does, while its batch
+//!   holds values it retired.
 //!
 //! Every walk of a slot list takes the list with one exchange first, so it
 //! is as long as the list was at that instant: one entry per batch
 //! submitted while the slot was eligible, since its previous walk. What
 //! other threads insert meanwhile starts a new list, and an insert still
 //! linking its entry ends the walk there (the inserter walks the rest), so
-//! no walk grows while it runs. A thread that stays away from its slot for
-//! long owes a walk as long as what was retired meanwhile; `flush()`
-//! before idling avoids that (see Quiescence).
+//! no walk grows while it runs. A slot is eligible only while its thread
+//! holds a guard, so a walk is as long as what was retired during one
+//! critical section, never as long as an idle period.
 //!
 //! The destructors of retired values run inside these operations (the
 //! batches a walk frees); each kovan call a destructor makes is an
@@ -71,13 +73,15 @@
 //!
 //! - **Near-zero read overhead**: the hot read path is a single atomic
 //!   pointer load plus an epoch check against a thread-local cache.
-//! - **Bounded Memory**: Retired nodes are reclaimed in batches. Batches
-//!   that cannot be placed are accumulated or adopted, never dropped. A
-//!   stalled reader only delays batches containing nodes born before its
-//!   pinned epoch; younger garbage remains reclaimable. (A reader stalled
-//!   *inside* an escalated critical section defers all younger batches
-//!   until it resumes: escalation windows are bounded by the critical
-//!   section that triggered them.)
+//! - **Bounded Memory**: Retired nodes are reclaimed in batches. A batch a
+//!   retire cannot place is accumulated, never dropped, and a flush or an
+//!   exit places its batch padded, so it is never kept. A reader stalled
+//!   inside a critical section only delays batches containing nodes born
+//!   before its pinned epoch; younger garbage remains reclaimable. (A
+//!   reader stalled *inside* an escalated critical section defers all
+//!   younger batches until it resumes: escalation windows are bounded by
+//!   the critical section that triggered them.) A thread with no live
+//!   guard delays nothing.
 //! - **`no_std` Compatible**: Uses only `alloc`. No standard library required.
 //!
 //! # Architecture
@@ -93,11 +97,15 @@
 //!
 //! # Quiescence
 //!
-//! A thread's reservation slot stays active after its last `Guard` drops;
-//! it is refreshed/drained on the next `pin()`, `flush()`, or thread exit.
-//! Long-idle threads that once pinned should call [`flush`] before idling
-//! to release retained garbage promptly: with no guard live, `flush()`
-//! also leaves the slot holding nothing back until the thread pins again.
+//! A thread's reservation is active exactly while the thread holds a
+//! `Guard`: the outermost `pin()` enters its slot, and the drop of that
+//! guard leaves it, traversing what retirers put in the slot meanwhile and
+//! freeing the batches that released. A thread with no live guard is
+//! counted by no batch, so an idle thread, a parked pool thread or a task
+//! runtime that pins per turn holds no retired value back, however long it
+//! stays away and whatever it loaded before. Nothing has to be flushed
+//! before idling; [`flush`] submits what the calling thread itself retired
+//! and has not submitted yet (its partial batch).
 //!
 //! # Recycling node memory (the `recycle` feature)
 //!

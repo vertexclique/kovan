@@ -1,30 +1,32 @@
-//! The epoch's advance and the traversals it drives: a thread advances the
+//! The epoch's advance and the traversals around it: a thread advances the
 //! epoch at its first retire, at every `EPOCH_FREQ`th after it, and at every
-//! retire or exit that placed a batch; a reader's next outermost pin then
-//! traverses what was placed in its slot, and with the epoch where its last
-//! transition left it, a pin skips.
+//! retire or exit that placed a batch; a reader's outermost drop traverses
+//! what was placed in its slot; every outermost pin enters; and a protected
+//! load of a node born after the thread's reservation refreshes the
+//! published epoch to cover it.
 
 use super::progress::drain;
 use super::{
-    Counted, Hold, eventually, join_within, lock, own_tid, spend_first_retire, with_handle,
+    Counted, Hold, eventually, join_within, lock, own_tid, published_epoch, slot_inactive,
+    spend_first_retire, with_handle,
 };
 use crate::guard::pin;
 use crate::retired::{INVPTR, RetiredNode};
-use crate::slot::{EPOCH_FREQ, RETIRE_FREQ};
+use crate::slot::{EPOCH_FREQ, ERA_INACTIVE, RETIRE_FREQ};
 use crate::stall::{self, Step};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::vec::Vec;
 
 /// A thread advances the epoch at its first retire and at every
 /// `EPOCH_FREQ`th after it, as Crystalline's `alloc_cnt++ % FREQ == 0`
 /// does (threads that each retire a few values and exit still move it), and
-/// at every retire that placed a batch (the `RETIRE_FREQ`th ones here, the
-/// batch going to this thread's slot among the active ones). An advance
-/// stamps the thread's next births with the epoch it made, and nothing else
-/// moves the stamp between pins, so the retires that advanced are the ones
-/// the stamp moved at, whatever other threads do meanwhile.
+/// at every retire that placed a batch (the `RETIRE_FREQ`th ones here, freed
+/// at once with no slot active). An advance stamps the thread's next births
+/// with the epoch it made, and nothing else moves the stamp between pins, so
+/// the retires that advanced are the ones the stamp moved at, whatever other
+/// threads do meanwhile.
 #[test]
 fn a_thread_advances_at_its_first_retire_every_epoch_freq_th_and_every_placed_batch() {
     let _l = lock();
@@ -52,7 +54,7 @@ fn a_thread_advances_at_its_first_retire_every_epoch_freq_th_and_every_placed_ba
 }
 
 /// The entries of `tid`'s slot list, head first.
-fn slot_list(tid: usize) -> Vec<*mut RetiredNode> {
+pub(super) fn slot_list(tid: usize) -> Vec<*mut RetiredNode> {
     let mut entries = Vec::new();
     let mut at = crate::slot::global().thread_slots(tid).first[0].load_lo() as *mut RetiredNode;
     while !at.is_null() && at as usize != INVPTR {
@@ -62,35 +64,36 @@ fn slot_list(tid: usize) -> Vec<*mut RetiredNode> {
     entries
 }
 
-/// A reader that has pinned once and keeps its slot active, held until the
-/// test lets it go; then it checks that its next pin takes the entry the
-/// placed batch put first in its slot. Each entry is inserted once, so that
-/// entry is gone from the slot once the pin took the list, whatever other
-/// tests of this binary insert meanwhile.
+/// A reader pinned, its slot active, held until the test lets it go; then it
+/// checks that the drop of its guard takes the entry a placed batch put in
+/// its slot and leaves the slot inactive. Each entry is inserted once, so
+/// that entry is gone from the slot once the drop took the list, whatever
+/// other tests of this binary insert meanwhile.
 fn reader(pinned: Hold) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let tid = own_tid();
+        let guard = pin();
         pinned.arrived.store(true, Ordering::SeqCst);
         assert!(eventually(|| pinned.go.load(Ordering::SeqCst)));
         let entry = *slot_list(tid)
             .last()
             .expect("the batch took no entry in the reader's slot");
-        drop(pin());
+        drop(guard);
+        assert!(slot_inactive(tid), "the drop left the slot active");
         assert!(
             !slot_list(tid).contains(&entry),
-            "the pin left the placed batch in its slot"
+            "the drop left the placed batch in its slot"
         );
     })
 }
 
-/// A batch a retire places in a reader's slot is traversed at the reader's
-/// next outermost pin, though the reader never retires or flushes: the
-/// retire that placed it advanced the epoch. The retiring thread stays until
-/// the reader checked, so the batch, held by its slot too, is not freed and
-/// its entry not reused.
+/// A batch a retire places in a reader's slot is traversed at the drop of
+/// the reader's guard, though the reader never retires, flushes or pins
+/// again. The retiring thread stays until the reader checked, so the batch,
+/// held by its slot too, is not freed and its entry not reused.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
-fn a_batch_a_retire_places_in_a_readers_slot_is_traversed_at_its_next_pin() {
+fn a_batch_a_retire_places_in_a_readers_slot_is_traversed_at_its_drop() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
     // The retirer spends its first retire, which advances the epoch on its
@@ -110,11 +113,13 @@ fn a_batch_a_retire_places_in_a_readers_slot_is_traversed_at_its_next_pin() {
             assert!(eventually(|| spent.go.load(Ordering::SeqCst)));
             // Oldest-born: an entry in every active slot, the reader's too;
             // the last of these places the batch.
+            let guard = pin();
             for _ in 0..RETIRE_FREQ {
                 Counted::retire_oldest(&live);
             }
             retired.arrived.store(true, Ordering::SeqCst);
             assert!(eventually(|| done.go.load(Ordering::SeqCst)));
+            drop(guard);
         })
     };
     spent.reached("the retiring thread");
@@ -131,12 +136,12 @@ fn a_batch_a_retire_places_in_a_readers_slot_is_traversed_at_its_next_pin() {
 }
 
 /// A batch a thread's exit places in a reader's slot is traversed at the
-/// reader's next outermost pin: the exit that placed it advanced the epoch.
-/// The exiting thread retires fewer values than a batch holds, so only its
-/// exit submits them; its own slot is left out of that submission.
+/// drop of the reader's guard. The exiting thread retires fewer values than
+/// a batch holds, so only its exit submits them, padded so that the one
+/// eligible slot, the reader's, takes an entry.
 #[test]
 #[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
-fn a_batch_an_exit_places_in_a_readers_slot_is_traversed_at_its_next_pin() {
+fn a_batch_an_exit_places_in_a_readers_slot_is_traversed_at_its_drop() {
     let _l = lock();
     let live = Arc::new(AtomicUsize::new(0));
     let spent = Hold::new();
@@ -158,18 +163,24 @@ fn a_batch_an_exit_places_in_a_readers_slot_is_traversed_at_its_next_pin() {
     pinned.reached("the reading thread");
     spent.release();
     join_within(exiting, "the exiting thread");
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        3,
+        "the exit freed values the reader's slot was eligible for"
+    );
     pinned.release();
     join_within(reading, "the reading thread");
     drain(&live);
 }
 
-/// An outermost pin with the epoch where its last transition left it skips
-/// its transition. Other tests of this binary may advance the epoch
-/// meanwhile, so one quiet pin in many is enough; a pin that transitioned
-/// every time would show none.
+/// An outermost pin is the reference's `reserve_slot`: it activates the slot
+/// (the slot was left at the last drop), and publishes the epoch only when
+/// the global epoch moved since the slot's era. With the epoch unchanged a
+/// pin makes no transition attempt and leaves the era word as it was;
+/// with the epoch moved it publishes the epoch it reads.
 #[test]
 #[cfg_attr(miri, ignore)] // the stall registry's hooks: a Mutex Miri runs slowly
-fn a_pin_with_the_epoch_unchanged_skips_its_transition() {
+fn an_outermost_pin_publishes_only_when_the_epoch_moved() {
     let _l = lock();
     thread::spawn(|| {
         let tid = own_tid();
@@ -179,14 +190,191 @@ fn a_pin_with_the_epoch_unchanged_skips_its_transition() {
             counted.fetch_add(1, Ordering::SeqCst);
             true
         });
-        let quiet = (0..1_000).any(|_| {
-            let (before, epoch) = (transitions.load(Ordering::SeqCst), crate::slot::epoch());
-            drop(pin());
-            transitions.load(Ordering::SeqCst) == before && crate::slot::epoch() == epoch
-        });
+        // The slot's era is the one its last pin published.
+        drop(pin());
+        let mut quiet = 0;
+        for _ in 0..1_000 {
+            let era = published_epoch() & !ERA_INACTIVE;
+            let before = transitions.load(Ordering::SeqCst);
+            let guard = pin();
+            assert!(
+                !slot_inactive(tid),
+                "an outermost pin left the slot inactive"
+            );
+            assert!(
+                !crate::slot::era_left(published_epoch()),
+                "an outermost pin left the era word tagged"
+            );
+            if crate::slot::epoch() == era {
+                // The epoch never moved: nothing was published.
+                assert_eq!(
+                    transitions.load(Ordering::SeqCst),
+                    before,
+                    "a pin at an unchanged epoch made a transition attempt"
+                );
+                assert_eq!(published_epoch(), era, "a pin published an epoch");
+                quiet += 1;
+            }
+            drop(guard);
+            assert!(slot_inactive(tid));
+            assert!(
+                crate::slot::era_left(published_epoch()),
+                "the drop did not tag the era word"
+            );
+        }
+        assert!(quiet > 0, "the epoch moved at every pin");
+
+        // The epoch moves: the next pin publishes it, in a transition.
+        let moved = crate::slot::advance_epoch();
+        let before = transitions.load(Ordering::SeqCst);
+        let guard = pin();
+        assert!(
+            transitions.load(Ordering::SeqCst) > before,
+            "a pin at a moved epoch made no transition attempt"
+        );
+        assert!(published_epoch() >= moved);
+        assert_eq!(published_epoch(), with_handle(|h| h.cached_epoch.get()));
+        drop(guard);
         stall::disarm(Step::TransitionAttempt, tid);
-        assert!(quiet, "every pin transitioned with the epoch unchanged");
     })
     .join()
     .unwrap();
+}
+
+/// A section pinned at one epoch loads a node allocated after the epoch
+/// moved (born later than the section's reservation): the load meets a
+/// later global epoch and raises the published epoch to at least the
+/// node's birth before it returns, so a batch retiring that node is
+/// placed in this slot. One thread, so it runs under Miri too.
+#[test]
+fn a_load_of_a_node_born_after_the_reservation_refreshes_the_published_epoch() {
+    let _l = lock();
+    thread::spawn(|| {
+        let tid = own_tid();
+        let guard = pin();
+        let reserved = published_epoch();
+        // The epoch moves (this thread's own advance, as a retire's would),
+        // and a node is allocated after it: its birth is later than the
+        // reservation.
+        with_handle(|h| h.increment_era(tid));
+        let value = Box::into_raw(Box::new(Counted {
+            retired: RetiredNode::new(),
+            live: Arc::new(AtomicUsize::new(1)),
+        }));
+        let birth = unsafe { (*value).retired.birth_epoch() };
+        assert!(
+            birth > reserved,
+            "the node was not born after the reservation"
+        );
+        let cell = crate::Atomic::new(value);
+        let loaded = cell.load(Ordering::Acquire, &guard);
+        assert_eq!(loaded.as_raw(), value);
+        assert!(
+            published_epoch() >= birth,
+            "the load left the published epoch {} below the node's birth {birth}",
+            published_epoch()
+        );
+        assert!(with_handle(|h| h.cached_epoch.get()) >= birth);
+        drop(guard);
+        drop(unsafe { Box::from_raw(value) });
+    })
+    .join()
+    .unwrap();
+}
+
+/// The same across threads, to the end: a reader pinned at an early epoch
+/// loads a node a writer allocated after advancing the epoch; the writer
+/// then retires it and flushes. The node stays allocated while the reader's
+/// guard lives (its batch was placed in the reader's slot) and is freed by
+/// the reader's drop.
+#[test]
+#[cfg_attr(miri, ignore)] // multi-threaded: hits the intentional mixed-size DCAS, outside Miri's model
+fn a_batch_of_a_node_born_after_a_reservation_waits_for_the_reader_that_loaded_it() {
+    let _l = lock();
+    let live = Arc::new(AtomicUsize::new(0));
+    let cell = Arc::new(crate::Atomic::<Counted>::null());
+    let (pinned, published, loaded, retired) = (Hold::new(), Hold::new(), Hold::new(), Hold::new());
+    let freed_under_guard = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (cell, live, freed) = (
+            Arc::clone(&cell),
+            Arc::clone(&live),
+            Arc::clone(&freed_under_guard),
+        );
+        let (pinned, published, loaded, retired) = (
+            pinned.clone(),
+            published.clone(),
+            loaded.clone(),
+            retired.clone(),
+        );
+        thread::spawn(move || {
+            own_tid();
+            let guard = pin();
+            pinned.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| published.go.load(Ordering::SeqCst)));
+            let held = cell.load(Ordering::Acquire, &guard);
+            assert!(!held.is_null());
+            loaded.arrived.store(true, Ordering::SeqCst);
+            assert!(eventually(|| retired.go.load(Ordering::SeqCst)));
+            // The value is still allocated: the count says so, and the read
+            // through the pointer is what AddressSanitizer reports otherwise.
+            let alive = live.load(Ordering::SeqCst) == 1
+                && unsafe { held.as_ref() }.is_some_and(|c| Arc::ptr_eq(&c.live, &live));
+            freed.store(!alive, Ordering::SeqCst);
+            drop(guard);
+        })
+    };
+    pinned.reached("the reader");
+    let writer = {
+        let (cell, live) = (Arc::clone(&cell), Arc::clone(&live));
+        let (published, loaded) = (published.clone(), loaded.clone());
+        thread::spawn(move || {
+            let tid = own_tid();
+            // The epoch moves after the reader's reservation; the node is
+            // born after that.
+            with_handle(|h| h.increment_era(tid));
+            live.fetch_add(1, Ordering::SeqCst);
+            let value = Box::into_raw(Box::new(Counted {
+                retired: RetiredNode::new(),
+                live: Arc::clone(&live),
+            }));
+            let guard = pin();
+            let old = cell.swap(
+                unsafe { crate::Shared::from_raw(value) },
+                Ordering::AcqRel,
+                &guard,
+            );
+            assert!(old.is_null());
+            drop(guard);
+            published.release();
+            loaded.reached("the reader's load");
+            let guard = pin();
+            let old = cell
+                .swap(
+                    unsafe { crate::Shared::from_raw(core::ptr::null_mut()) },
+                    Ordering::AcqRel,
+                    &guard,
+                )
+                .as_raw();
+            drop(guard);
+            unsafe { crate::guard::retire(old) };
+            crate::guard::flush();
+        })
+    };
+    join_within(writer, "the writer");
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        1,
+        "the batch skipped the reader that loaded a node born after its reservation"
+    );
+    retired.release();
+    join_within(reader, "the reader");
+    assert!(
+        !freed_under_guard.load(Ordering::SeqCst),
+        "the node was freed while the reader's guard lived"
+    );
+    assert!(
+        eventually(|| live.load(Ordering::SeqCst) == 0),
+        "the reader's drop did not free the node"
+    );
 }

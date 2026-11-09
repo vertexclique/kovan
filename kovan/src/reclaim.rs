@@ -69,10 +69,11 @@ pub(crate) const MAX_CACHE: usize = 12;
 ///   hold its lock across a call into kovan: that call may run `dealloc` on
 ///   the same thread, which would then wait on a lock it already holds.
 /// - Rely on a pool that outlives every node pointing to it: the free list
-///   must stay valid until the last such node was passed to `dealloc`. The
-///   threads that hold pending nodes release them on their next pin, flush
-///   or exit, so an owner that can drop the pool must first have every
-///   thread flush or exit.
+///   must stay valid until the last such node was passed to `dealloc`. A
+///   thread's reservation releases the nodes it holds when its outermost
+///   guard drops, and a thread's partial batch is submitted by its flush or
+///   exit, so an owner that can drop the pool must first have every thread
+///   drop its guards and flush or exit.
 ///
 /// ## Before publishing a recycled node again
 ///
@@ -244,12 +245,13 @@ pub(crate) unsafe fn get_refs_node(node: *mut RetiredNode) -> *mut RetiredNode {
 /// and an entry whose inserter has not linked the rest behind it yet ends
 /// the walk (its `next` is still null; that inserter walks the rest). The
 /// length is NOT bounded by the thread count: each
-/// `try_retire()` call system-wide may insert one node into this slot, and
-/// a slot is only traversed when its owner transitions it (next `pin()`
-/// after an epoch change, `flush()`, or exit). A thread returning from a
-/// long quiescence therefore owes a traversal proportional to the number
-/// of batches retired since its last transition. Long-idle threads should
-/// call `flush()` before idling.
+/// `try_retire()` call system-wide may insert one node into this slot
+/// while the slot is active, and a slot is traversed when its owner leaves
+/// it (the outermost guard's drop, the exit) or enters it (the outermost
+/// `pin()`, which takes what a retire exchanged in after the leave). A
+/// thread therefore owes a traversal proportional to the batches retired
+/// during one of its critical sections, never to an idle period: an
+/// inactive slot takes no node.
 ///
 /// # Safety
 ///
