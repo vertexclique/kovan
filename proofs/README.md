@@ -114,6 +114,11 @@ Lean: install elan once (`proofs/lean/README.md` says how). The recipes run
 - `tla/waitslots/`: `kovan_channel`'s wait list at its atomic steps (the slots, the count, the
   scans, the takeover, the abandon, `notify_one` and `notify_all`), 11 configurations: 5 that must
   pass and 6 that must fail.
+- `tla/ordering/`: the memory orders of the reclamation's pin, protected load, leave and retire
+  scan, under SC, x86-TSO, C11 (views over message histories) and C11 with ARM's load buffering:
+  under C11 every read of a node happens before its free, on the hardware models no read returns
+  after it; 18 configurations: 5 that must pass and 13 mutations and witnesses that must fail
+  (0.2.4's Relaxed tag store and its missing fence after an x86-64 activation, each alone).
 - `lean/Kovan/HopscotchShrink.lean`: the hopscotch map's shrink threshold, for one thread and
   every sequence of operations: a successful resize and a clear erase it; after a failed shrink
   at `c` entries, until the next erasure, no shrink is asked for while `max (c / 2) 1` entries

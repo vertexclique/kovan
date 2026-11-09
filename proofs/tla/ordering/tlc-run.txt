@@ -1,0 +1,25 @@
+TLC run of every configuration in proofs/tla/ordering, 2026-11-09 23:35 UTC.
+Written by proofs/tla/run_tlc.sh, not by hand. Version 2.19 of 08 August 2024.
+Java -Xmx8g; -workers 1, or 1 worker where a violation is expected. Limit: 120 s each.
+
+configuration                         generated   distinct    sec  result                     expected                   match
+LS_c11_fence                              18856      10111      2  pass                       pass                       yes
+LS_c11_scload                             11705       6260      1  pass                       pass                       yes
+LS_tso_024                                 2520       1465      1  pass                       pass                       yes
+LS_sc_024                                  2002       1173      2  pass                       pass                       yes
+LS_armlb_fixed                            18964      10168      1  pass                       pass                       yes
+LS_mut_c11_024                              199        121      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_c11_024_era                          286        171      2  violated:NoUseAfterFreeSkipEra violated:NoUseAfterFreeSkipEra yes
+LS_mut_no_pin_fence                         199        121      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_no_pin_fence_era                    1840        993      1  violated:NoUseAfterFreeSkipEra violated:NoUseAfterFreeSkipEra yes
+LS_mut_relaxed_tag                          331        204      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_relaxed_tag_scload                   243        152      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_armlb_relaxed_tag                    461        271      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_tso_store_activation                 206        108      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_wit_skip_era                             152         99      2  violated:NoSkipEra         violated:NoSkipEra         yes
+LS_wit_skip_era_scload                      117         78      1  violated:NoSkipEra         violated:NoSkipEra         yes
+LS_wit_skip_era_tso                         116         77      1  violated:NoSkipEra         violated:NoSkipEra         yes
+LS_wit_stale_load                            24         19      1  violated:NoStaleLoad       violated:NoStaleLoad       yes
+LS_wit_reader_free                          737        444      1  violated:NoReaderFree      violated:NoReaderFree      yes
+
+results matching EXPECTED.txt: 18 of 18

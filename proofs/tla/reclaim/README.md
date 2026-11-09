@@ -648,7 +648,8 @@ any order the code names; so a row says which operation the step is, with which 
 which branch, not the order. What the weaker orders of the code rest on (the fence pairing of a
 publication with a scan, the release half of an exchange ordering the tag store before it, the
 relaxed writes of an unpublished batch) is argued in the comments of `guard.rs`, and this model
-assumes it. Where the code takes one load and one store (`activate`, `leave`) the model has two
+assumes it; the [ordering family](../ordering/README.md) checks the orders of the pin, the leave
+and the scan under C11, x86-TSO and ARM's load buffering. Where the code takes one load and one store (`activate`, `leave`) the model has two
 labels (`PNE`/`PNE2`, `DU2`/`DU2s`, `LeaveMark`/`LeaveMarkS`, `ExitMark`/`ExitMarkS`,
 `HelperLeave`/`HelperLeaveS`); `activate` stores only when the loaded word is tagged, so `PNE2`
 and `DU2s` run only then, and `leave` always stores.

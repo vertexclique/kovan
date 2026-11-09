@@ -1,0 +1,187 @@
+Error: Invariant NoStaleLoad is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1]
+/\ hbW = 0
+/\ cur = [R |-> [P |-> 1, L |-> 1, E |-> 1], W |-> [P |-> 1, L |-> 1, E |-> 1]]
+/\ capR = FALSE
+/\ pcR = "PE"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ sc = [P |-> 1, L |-> 1, E |-> 1]
+/\ msgs = [ P |-> <<[v |-> 1, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>>,
+  L |-> <<[v |-> "inv", vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>>,
+  E |-> <<[v |-> TRUE, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>> ]
+/\ cnt = [v |-> 2, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ freed = FALSE
+/\ mem = [P |-> 1, L |-> "inv", E |-> TRUE]
+/\ sec = 1
+
+State 2: <RPE line 333, col 5 to line 338, col 22 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1]
+/\ hbW = 0
+/\ cur = [R |-> [P |-> 1, L |-> 1, E |-> 2], W |-> [P |-> 1, L |-> 1, E |-> 1]]
+/\ capR = FALSE
+/\ pcR = "PX"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ sc = [P |-> 1, L |-> 1, E |-> 1]
+/\ msgs = [ P |-> <<[v |-> 1, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>>,
+  L |-> <<[v |-> "inv", vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>>,
+  E |->
+      << [v |-> TRUE, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> FALSE, vw |-> [P |-> 1, L |-> 1, E |-> 2], hb |-> 0] >> ]
+/\ cnt = [v |-> 2, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ freed = FALSE
+/\ mem = [P |-> 1, L |-> "inv", E |-> TRUE]
+/\ sec = 1
+
+State 3: <RPX line 344, col 5 to line 354, col 22 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1]
+/\ hbW = 0
+/\ cur = [R |-> [P |-> 1, L |-> 2, E |-> 2], W |-> [P |-> 1, L |-> 1, E |-> 1]]
+/\ capR = FALSE
+/\ pcR = "PF"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ sc = [P |-> 1, L |-> 2, E |-> 1]
+/\ msgs = [ P |-> <<[v |-> 1, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>>,
+  L |->
+      << [v |-> "inv", vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> "empty", vw |-> [P |-> 1, L |-> 2, E |-> 2], hb |-> 0] >>,
+  E |->
+      << [v |-> TRUE, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> FALSE, vw |-> [P |-> 1, L |-> 1, E |-> 2], hb |-> 0] >> ]
+/\ cnt = [v |-> 2, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ freed = FALSE
+/\ mem = [P |-> 1, L |-> "inv", E |-> TRUE]
+/\ sec = 1
+
+State 4: <RPF line 358, col 5 to line 363, col 22 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 2]
+/\ hbW = 0
+/\ cur = [R |-> [P |-> 1, L |-> 2, E |-> 2], W |-> [P |-> 1, L |-> 1, E |-> 1]]
+/\ capR = FALSE
+/\ pcR = "PL"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ sc = [P |-> 1, L |-> 2, E |-> 2]
+/\ msgs = [ P |-> <<[v |-> 1, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]>>,
+  L |->
+      << [v |-> "inv", vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> "empty", vw |-> [P |-> 1, L |-> 2, E |-> 2], hb |-> 0] >>,
+  E |->
+      << [v |-> TRUE, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> FALSE, vw |-> [P |-> 1, L |-> 1, E |-> 2], hb |-> 0] >> ]
+/\ cnt = [v |-> 2, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ freed = FALSE
+/\ mem = [P |-> 1, L |-> "inv", E |-> TRUE]
+/\ sec = 1
+
+State 5: <WWS line 469, col 5 to line 474, col 22 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 2]
+/\ hbW = 0
+/\ cur = [R |-> [P |-> 1, L |-> 2, E |-> 2], W |-> [P |-> 2, L |-> 1, E |-> 1]]
+/\ capR = FALSE
+/\ pcR = "PL"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ sc = [P |-> 1, L |-> 2, E |-> 2]
+/\ msgs = [ P |->
+      << [v |-> 1, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> 2, vw |-> [P |-> 2, L |-> 1, E |-> 1], hb |-> 0] >>,
+  L |->
+      << [v |-> "inv", vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> "empty", vw |-> [P |-> 1, L |-> 2, E |-> 2], hb |-> 0] >>,
+  E |->
+      << [v |-> TRUE, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> FALSE, vw |-> [P |-> 1, L |-> 1, E |-> 2], hb |-> 0] >> ]
+/\ cnt = [v |-> 2, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ freed = FALSE
+/\ mem = [P |-> 1, L |-> "inv", E |-> TRUE]
+/\ sec = 1
+
+State 6: <RPL line 380, col 5 to line 388, col 42 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 2]
+/\ hbW = 0
+/\ cur = [R |-> [P |-> 1, L |-> 2, E |-> 2], W |-> [P |-> 2, L |-> 1, E |-> 1]]
+/\ capR = FALSE
+/\ pcR = "RD"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ sc = [P |-> 1, L |-> 2, E |-> 2]
+/\ msgs = [ P |->
+      << [v |-> 1, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> 2, vw |-> [P |-> 2, L |-> 1, E |-> 1], hb |-> 0] >>,
+  L |->
+      << [v |-> "inv", vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> "empty", vw |-> [P |-> 1, L |-> 2, E |-> 2], hb |-> 0] >>,
+  E |->
+      << [v |-> TRUE, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0],
+         [v |-> FALSE, vw |-> [P |-> 1, L |-> 1, E |-> 2], hb |-> 0] >> ]
+/\ cnt = [v |-> 2, vw |-> [P |-> 1, L |-> 1, E |-> 1], hb |-> 0]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ freed = FALSE
+/\ mem = [P |-> 1, L |-> "inv", E |-> TRUE]
+/\ sec = 1
+
+24 states generated, 19 distinct states found, 6 states left on queue.

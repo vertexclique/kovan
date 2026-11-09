@@ -1,0 +1,19 @@
+# configuration                    module             expected
+LS_c11_fence                       LeaveScan          pass
+LS_c11_scload                      LeaveScan          pass
+LS_tso_024                         LeaveScan          pass
+LS_sc_024                          LeaveScan          pass
+LS_armlb_fixed                     LeaveScan          pass
+LS_mut_c11_024                     LeaveScan          violated:NoUseAfterFree
+LS_mut_c11_024_era                 LeaveScan          violated:NoUseAfterFreeSkipEra
+LS_mut_no_pin_fence                LeaveScan          violated:NoUseAfterFree
+LS_mut_no_pin_fence_era            LeaveScan          violated:NoUseAfterFreeSkipEra
+LS_mut_relaxed_tag                 LeaveScan          violated:NoUseAfterFree
+LS_mut_relaxed_tag_scload          LeaveScan          violated:NoUseAfterFree
+LS_mut_armlb_relaxed_tag           LeaveScan          violated:NoUseAfterFree
+LS_mut_tso_store_activation        LeaveScan          violated:NoUseAfterFree
+LS_wit_skip_era                    LeaveScan          violated:NoSkipEra
+LS_wit_skip_era_scload             LeaveScan          violated:NoSkipEra
+LS_wit_skip_era_tso                LeaveScan          violated:NoSkipEra
+LS_wit_stale_load                  LeaveScan          violated:NoStaleLoad
+LS_wit_reader_free                 LeaveScan          violated:NoReaderFree
