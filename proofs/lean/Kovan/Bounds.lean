@@ -395,8 +395,7 @@ theorem retireSteps_le (boundary : Bool) (ps : List (Slot × Slot)) (inserts : L
     retireSteps boundary (scanAll ps) inserts b
       ≤ (11 + 7 * ps.length) + 9 * inserts.length + b := by
   have := tryRetireSteps_le ps inserts
-  unfold drainSteps
-  cases boundary <;> simp only [retireSteps, Bool.false_eq_true, ↓reduceIte] <;> omega
+  cases boundary <;> simp only [retireSteps, drainSteps, Bool.false_eq_true, ↓reduceIte] <;> omega
 
 /-! ## Flush and the exit -/
 
