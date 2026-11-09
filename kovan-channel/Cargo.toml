@@ -12,7 +12,7 @@ categories = ["concurrency", "data-structures"]
 readme.workspace = true
 # Shares kovan's test harnesses by path (kovan/tests/support), which a
 # published package of this crate does not hold.
-exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs"]
+exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs", "tests/retained_memory.rs"]
 
 [lib]
 name = "kovan_channel"
@@ -65,6 +65,10 @@ harness = false
 
 [[bench]]
 name = "async_wake_latency"
+harness = false
+
+[[bench]]
+name = "channel_api"
 harness = false
 
 # Single-threaded, non-blocking-API-only adaptations of the tests/*.rs

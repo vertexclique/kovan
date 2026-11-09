@@ -12,7 +12,7 @@ categories = ["concurrency", "data-structures"]
 readme.workspace = true
 # Shares kovan's test harnesses by path (kovan/tests/support), which a
 # published package of this crate does not hold.
-exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs"]
+exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs", "tests/retained_memory.rs"]
 
 [lib]
 name = "kovan_stm"
@@ -38,6 +38,13 @@ wasm-bindgen-test = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 shuttle = "0.9.1"
+# `criterion` (via its default `rayon` feature) does not compile for
+# `wasm32-*`: native-only, as in the other crates.
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "stm"
+harness = false
 
 # Single-threaded adaptations of the tests/*.rs integration tests, kept
 # under tests/wasm/ so they also run on 32-bit wasm (wasm32-wasip1 has no

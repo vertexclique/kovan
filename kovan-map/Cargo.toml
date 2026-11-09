@@ -12,7 +12,7 @@ categories = ["concurrency", "data-structures", "no-std"]
 readme.workspace = true
 # Shares kovan's test harnesses by path (kovan/tests/support), which a
 # published package of this crate does not hold.
-exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs"]
+exclude = ["tests/thread_exit.rs", "tests/steady_memory.rs", "tests/ownership.rs", "tests/retained_memory.rs"]
 
 [lib]
 name = "kovan_map"
@@ -92,4 +92,9 @@ path = "tests/wasm/stress_test.rs"
 
 [[bench]]
 name = "hopscotch"
+harness = false
+
+
+[[bench]]
+name = "map_api"
 harness = false
