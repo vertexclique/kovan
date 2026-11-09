@@ -18,6 +18,9 @@ jobs:
   lean:
     name: Lean proofs
     runs-on: ubuntu-latest
+    # The job takes under two minutes on master; a proof that outgrows this is cut
+    # down, not given more time.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
