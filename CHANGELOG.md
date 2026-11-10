@@ -15,7 +15,8 @@ Every crate goes to 0.2.5.
   it, and the batch it skipped the slot for is freed by another thread: with a Relaxed store
   nothing ordered the section's reads before that free. On x86 this held, as x86 keeps a load
   ahead of a later store; on ARM and POWER a reader could still be reading a value when its batch
-  was freed, and under Rust's memory model it was a data race on every target.
+  was freed, and under Rust's memory model it was a data race on every target. Test:
+  `tests/atom_reader_reclaim.rs`, `a_scan_that_reads_a_leave_sees_the_reads_before_it`.
 - kovan: a guard's protected load (`Atomic::load`, and through it every structure's) is `SeqCst`.
   On x86-64 no fence follows the activation of an outermost `pin()` whose epoch did not move, and
   in Rust's memory model an Acquire load after the activation's SeqCst exchange does not pair with
@@ -25,13 +26,16 @@ Every crate goes to 0.2.5.
   same instruction as an `Acquire` one: measured against 0.2.4, every case of the `throughput` and
   `comparison` benches ties. A `fence(SeqCst)` after every pin, the other sound fix, cost 30% to
   43% on the pin and single-thread load paths and 2% to 10% on read-heavy, swap and stack
-  workloads.
+  workloads. Test: `a_pin_after_the_scan_never_loads_the_value_it_freed`.
 - kovan: a retire's scan reads the thread count after its fence, and a thread claims its ID with a
   SeqCst compare-exchange. The count was read before the fence (as far back as 0.2.3), so a
   thread that claimed its ID, pinned and loaded the value being retired could lie outside the
   range the scan visited: the batch never counted it and was freed under its reads. On x86 the
   locked compare-exchange and the retirer's locked swap kept it from happening; under Rust's memory
-  model it was a data race, and miri reproduced it with a fresh reader thread per round.
+  model it was a data race, and miri reproduced it with a fresh reader thread per round. Tests:
+  `a_scan_sees_a_reader_whose_thread_pinned_for_the_first_time`, and
+  `readers_of_a_rebuilt_index_while_a_writer_appends` for the three together. Miri runs the four
+  over 16 seeds (`miri.sh`); on 0.2.4 they failed on 256, 256, 242 and 256 of 256 seeds.
 
 ### Changed behaviour
 
