@@ -184,25 +184,25 @@ Lines as of kovan 0.2.5.
 |---|---|---|---|
 | `PE` | `Guard::enter`, `ThreadSlots::activate` | `guard.rs:662`, `slot.rs:479-483` | the era word's load (the reader's own last store) and its store without the tag, Relaxed |
 | `PX` | `ThreadSlots::activate` | `slot.rs:484` | `exchange_lo(0)`, SeqCst (`Activation = "Store"`: a plain store) |
-| `PF` | `publish_fence` | `guard.rs:663`, `guard.rs:1974-1977` | `fence(SeqCst)`; compiled out on x86-64, in 0.2.4 and 0.2.5 (0.2.5 makes `PL` SeqCst instead) |
-| `PT` | `Guard::enter_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:675-680`, `guard.rs:1687-1695`, `reclaim.rs:291-297` | the captured node's batch count, `fetch_sub(1)` AcqRel; zero puts it on the cache |
+| `PF` | `publish_fence` | `guard.rs:663`, `guard.rs:1981-1984` | `fence(SeqCst)`; compiled out on x86-64, in 0.2.4 and 0.2.5 (0.2.5 makes `PL` SeqCst instead) |
+| `PT` | `Guard::enter_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:675-680`, `guard.rs:1694-1702`, `reclaim.rs:291-297` | the captured node's batch count, `fetch_sub(1)` AcqRel; zero puts it on the cache |
 | `PL` | `Atomic::load`, `protect_load` | `atomic.rs:115-118`, `guard.rs:344-372` | `data.load(order)` in 0.2.4 (`ProtectLoad = "Acquire"`), `data.load(Ordering::SeqCst)` in 0.2.5 (`"SeqCst"`); the epoch unchanged, the fast path returns it |
 | `RD`, `Satisfy` | the caller | | the read of the node through the guard; `Satisfy` completes it late (ARMLB) |
 | `LE` | `Guard::leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:482-488`, `guard.rs:520-521`, `slot.rs:495-504` | `store_lo(kept \| ERA_INACTIVE)`, Relaxed in 0.2.4, Release in 0.2.5 |
 | `LX` | `ThreadSlots::leave` | `slot.rs:505` | `exchange_lo(INVPTR)`, AcqRel |
 | `LT` | `leave_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:506-509`, `reclaim.rs:291-297` | the captured node's count, `fetch_sub(1)` |
-| `LD` | `leave_cold`, `drain_free_list` | `guard.rs:510-512`, `guard.rs:1703` | the cache drained: A freed when its count reached zero |
+| `LD` | `leave_cold`, `drain_free_list` | `guard.rs:510-512`, `guard.rs:1710` | the cache drained: A freed when its count reached zero |
 | `WS` | `Atomic::swap` | `atomic.rs:262-263` | `swap(B)`, AcqRel (the caller's order); A retired |
-| `WF` | `try_retire` | `guard.rs:1432` | `fence(SeqCst)` |
-| `WL` | `try_retire` | `guard.rs:1439-1442` | `first[j].load_lo()`, Acquire: INVPTR skips |
-| `WE` | `try_retire` | `guard.rs:1447-1450` | `epoch[j].load_lo()`, Acquire: a tagged era skips (`era_covers`) |
-| `WIL` | `try_retire` | `guard.rs:1526` | the list word re-checked |
-| `WIE` | `try_retire` | `guard.rs:1532` | the era re-checked |
-| `WIX` | `try_retire` | `guard.rs:1540` | `exchange_lo(A)`, AcqRel |
-| `WIR` | `try_retire` | `guard.rs:1552-1563` | [InsertRollback] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
-| `WIC` | `try_retire` | `guard.rs:1599` | [InsertCheck] the era word, Acquire: tagged, undo |
-| `WIU` | `try_retire` | `guard.rs:1600-1610` | [InsertUndo] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
-| `WA` | `try_retire` | `guard.rs:1614-1619` | `refs_or_next.fetch_add(adjs)`, AcqRel; zero puts the batch on the cache |
+| `WF` | `try_retire` | `guard.rs:1431` | `fence(SeqCst)` |
+| `WL` | `try_retire` | `guard.rs:1446-1449` | `first[j].load_lo()`, Acquire: INVPTR skips |
+| `WE` | `try_retire` | `guard.rs:1454-1457` | `epoch[j].load_lo()`, Acquire: a tagged era skips (`era_covers`) |
+| `WIL` | `try_retire` | `guard.rs:1533` | the list word re-checked |
+| `WIE` | `try_retire` | `guard.rs:1539` | the era re-checked |
+| `WIX` | `try_retire` | `guard.rs:1547` | `exchange_lo(A)`, AcqRel |
+| `WIR` | `try_retire` | `guard.rs:1559-1570` | [InsertRollback] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
+| `WIC` | `try_retire` | `guard.rs:1606` | [InsertCheck] the era word, Acquire: tagged, undo |
+| `WIU` | `try_retire` | `guard.rs:1607-1617` | [InsertUndo] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
+| `WA` | `try_retire` | `guard.rs:1621-1626` | `refs_or_next.fetch_add(adjs)`, AcqRel; zero puts the batch on the cache |
 | `WD` | `enqueue_due`, `drain_free_list` | `guard.rs:1254-1256` | the writer's cache drained: A freed |
 | `Drain` | (TSO) | | the oldest buffered store of the reader reaches memory |
 

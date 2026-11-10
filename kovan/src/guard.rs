@@ -1419,7 +1419,6 @@ impl Handle {
         #[cfg(test)]
         let _scope = TryRetireScope::enter(self);
         let global = self.global();
-        let max_threads = global.max_threads();
         let hr_num = global.hr_num();
 
         let mut curr = batch_first;
@@ -1430,6 +1429,14 @@ impl Handle {
         // Pairs with the SeqCst fence after a publication (do_update,
         // protect_load_cold, escalate) and with the SeqCst load of protect_load().
         fence(Ordering::SeqCst);
+        // The thread count is read after the fence, never before: a thread
+        // that claimed its ID (`alloc_tid`, a SeqCst compare-exchange) before
+        // this fence in the SeqCst order is in the range scanned, and one that
+        // claimed it after loads, with an SC load or after an SC fence, the
+        // unlink that precedes this fence. Read before the fence, the count
+        // could leave out a thread that pinned and loaded the value being
+        // retired, and the batch would be freed under that thread's reads.
+        let max_threads = global.max_threads();
         let mut last = curr;
         // One pass over the T x SLOTS_PER_THREAD slots, each visited once.
         for i in 0..max_threads {

@@ -672,10 +672,13 @@ impl ASMRState {
             // tid whose page doesn't exist yet.
             self.ensure_page(page_idx);
             // Strong: a failure means another thread took `current`, never a
-            // spurious one, which keeps the retries bounded.
+            // spurious one, which keeps the retries bounded. SeqCst: a scan
+            // that reads `next_tid` after its fence (`try_retire`) must see an
+            // ID claimed before that fence in the SeqCst order, and only an SC
+            // write is placed in that order; Release orders the page.
             if self
                 .next_tid
-                .compare_exchange(current, current + 1, Ordering::Release, Ordering::Relaxed)
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::Relaxed)
                 .is_ok()
             {
                 return current;

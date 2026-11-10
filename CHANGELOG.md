@@ -26,6 +26,12 @@ Every crate goes to 0.2.5.
   `comparison` benches ties. A `fence(SeqCst)` after every pin, the other sound fix, cost 30% to
   43% on the pin and single-thread load paths and 2% to 10% on read-heavy, swap and stack
   workloads.
+- kovan: a retire's scan reads the thread count after its fence, and a thread claims its ID with a
+  SeqCst compare-exchange. The count was read before the fence (as far back as 0.2.3), so a
+  thread that claimed its ID, pinned and loaded the value being retired could lie outside the
+  range the scan visited: the batch never counted it and was freed under its reads. On x86 the
+  locked compare-exchange and the retirer's locked swap kept it from happening; under Rust's memory
+  model it was a data race, and miri reproduced it with a fresh reader thread per round.
 
 ### Changed behaviour
 
