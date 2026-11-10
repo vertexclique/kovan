@@ -11,11 +11,13 @@
 (* put nodes in it) and the era word (`epoch[0].lo`: the era the reader    *)
 (* published, with the top bit `ERA_INACTIVE` set while the slot is left). *)
 (* A writer thread swaps a new node into the cell and retires the old one  *)
-(* (`try_retire`): a SeqCst fence, then a scan that loads each slot's list *)
-(* word and era word. A slot that looks left (list word INVPTR, or era     *)
-(* tagged) is skipped; an active one gets the node (an exchange of its     *)
-(* list word), and its owner frees the node when it next empties the slot. *)
-(* A node no slot holds is freed by the writer.                            *)
+(* (`try_retire`): a SeqCst fence, the thread count (`max_threads`, the    *)
+(* IDs handed out so far), then a scan that loads each slot's list word    *)
+(* and era word. A slot that looks left (list word INVPTR, or era tagged)  *)
+(* or whose era is below the node's birth is skipped; an active one gets   *)
+(* the node (an exchange of its list word), and its owner frees the node   *)
+(* when it next empties the slot. A node no slot holds is freed by the     *)
+(* writer.                                                                 *)
 (*                                                                         *)
 (* A TINY EXAMPLE. The cell holds node A. The reader pins, loads A and     *)
 (* reads A's value. The writer swaps B into the cell, retires A, fences    *)
@@ -35,15 +37,37 @@
 (* Edge 2 is the pin's fast path. On x86-64 `publish_fence` is no fence at *)
 (* all: the activation (a Relaxed store that clears the tag, then a SeqCst *)
 (* exchange of the list word to 0) is followed by the protected load of    *)
-(* the cell, an Acquire load. Under C11 a SeqCst exchange is not a fence:  *)
-(* when the writer's SeqCst fence comes before the activation in the order *)
-(* of SC operations, the reader's Acquire load may still return the old A, *)
-(* and the writer's scan may read the slot as it was before the activation *)
-(* (INVPTR, or a previous section's active word with that section's tag),  *)
-(* skip it and free A while the reader reads it. On x86 hardware the       *)
-(* locked exchange drains the store buffer and orders the later load, so   *)
-(* 0.2.4 is correct there; but the code is C11 code, compiled by a         *)
-(* compiler that may use what C11 allows, and miri checks it under C11.    *)
+(* the cell, an Acquire load in 0.2.4. Under C11 a SeqCst exchange is not  *)
+(* a fence: when the writer's SeqCst fence comes before the activation in  *)
+(* the order of SC operations, the reader's Acquire load may still return  *)
+(* the old A, and the writer's scan may read the slot as it was before the *)
+(* activation (INVPTR, or a previous section's active word with that       *)
+(* section's tag), skip it and free A while the reader reads it. On x86    *)
+(* hardware the locked exchange drains the store buffer and orders the     *)
+(* later load, so 0.2.4 is correct there; but the code is C11 code, and    *)
+(* miri checks it under C11.                                               *)
+(*                                                                         *)
+(* Edge 3 is a new thread (`Path = "Fresh"`). Its first pin claims an ID   *)
+(* (`alloc_tid`: a compare-exchange of next_tid, Release in 0.2.4), then   *)
+(* activates and loads. 0.2.4's scan read the count before its fence: it   *)
+(* may read the count without the new ID while the new thread's load      *)
+(* still returns A, and then it never looks at that thread's slot. 0.2.5   *)
+(* reads the count after the fence and claims SeqCst. The first pin of a   *)
+(* thread always publishes an epoch (`transition`: cached_epoch starts at  *)
+(* 0), a SeqCst era store followed by a SeqCst fence, and that fence after *)
+(* the claim is part of the story: with the count read after the scan's    *)
+(* fence, it alone already orders the load (C++20 4.4).                    *)
+(*                                                                         *)
+(* Two suspected edges, each on a path of its own. `Path = "Escalate"`:    *)
+(* a protected load whose epoch keeps moving escalates (`escalate`: the    *)
+(* era EPOCH_UNCONDITIONAL, a fence, one more load); the leave of that     *)
+(* section keeps era 0, and the next activation clears the tag with a      *)
+(* Relaxed store: a scan that reads the list word as the escalated section *)
+(* left it active and the era as the next activation untagged it (0, not   *)
+(* covering A) skips the slot, and the Relaxed store carries nothing of    *)
+(* the escalated section's reads. `Path = "Helped"`: the pin's slow path,  *)
+(* answered by a helper (LeaveScanSlowPath.tla), stores its list's even    *)
+(* sequence number after its fence.                                        *)
 (*                                                                         *)
 (* WHAT MUST NEVER HAPPEN (NoUseAfterFree). A read of A by the reader is   *)
 (* not over when A is freed. Under C11 that means every read of A happens  *)
@@ -53,289 +77,52 @@
 (* On hardware (TSO, ARMLB) and under SC it means no read of A returns     *)
 (* after the free.                                                         *)
 (*                                                                         *)
-(* The memory model is a constant, so one module checks the same code     *)
-(* under four models:                                                      *)
-(*   SC     every step acts on one memory, in one order;                   *)
-(*   TSO    x86-64: each thread's plain stores wait in a FIFO buffer; a    *)
-(*          load sees its own newest buffered store, else memory; a locked *)
-(*          instruction (every read-modify-write) and MFENCE run only with *)
-(*          an empty buffer, on memory, at once;                           *)
-(*   C11    the language's model (RC11, which C++20 adopted for SC fences) *)
-(*          as views over message histories, below;                        *)
-(*   ARMLB  C11 plus load buffering: the reader's plain read of the node   *)
-(*          may be satisfied after its later Relaxed store became visible, *)
-(*          as ARMv8 and POWER allow.                                      *)
+(* LeaveScanMemory.tla holds the four memory models (SC, TSO, C11, ARMLB)  *)
+(* and why the C11 one is C++20 for these steps.                           *)
 (*                                                                         *)
-(* THE C11 MODEL, IN PLAIN WORDS. Every atomic location keeps every value  *)
-(* it ever held, in modification order (`msgs`), each with the view its    *)
-(* writer released. A view says, for each location, the oldest message a   *)
-(* thread may still read (coherence: never older than one it already      *)
-(* read or wrote, or than one that happens before it). A load reads any   *)
-(* message at or after its view; an Acquire load (or read-modify-write)    *)
-(* takes in the message's view. A Release store or read-modify-write       *)
-(* hands its thread's whole view to its message; a Relaxed store hands     *)
-(* only the view of the thread's last fence (a fence's release half). A    *)
-(* read-modify-write reads the newest message (C++20 [atomics.order] p10). *)
-(* A SeqCst fence joins the global SC view into its thread's view and then *)
-(* publishes the result as the SC view (the promising semantics' rule).    *)
-(* A SeqCst access is not a fence: it reads at or after the SC view of its *)
-(* own location and raises the SC view of that location to what it read   *)
-(* or wrote, nothing more, so the thread's later non-SC accesses gain      *)
-(* nothing from it.                                                        *)
-(* Why this is C++20 for these steps: S, the single order of SC events, is *)
-(* the order the model runs them in. C++20 [atomics.order] p4 asks of S,   *)
-(* for operations A, B on one object with A coherence-ordered before B:    *)
-(*  (4.1) A, B both SC: A precedes B in S. An SC load after an SC write in *)
-(*        S reads it or later: the write raised the SC view.               *)
-(*  (4.2) A SC, B happens before SC fence Y: A precedes Y. An SC load      *)
-(*        after Y in S reads what Y's thread knew or later: Y published it.*)
-(*  (4.3) SC fence X happens before A, B SC: X precedes B. A read after X  *)
-(*        reads what an SC access before X in S read or wrote, or later:   *)
-(*        that access raised the SC view, and X took it in.                *)
-(*  (4.4) SC fence X happens before A, B happens before SC fence Y: X      *)
-(*        precedes Y. A read after the later fence reads what the earlier  *)
-(*        fence's thread knew, or later: the fence-to-fence rule.          *)
-(* The model allows every execution these rules and coherence allow for    *)
-(* these programs, with two simplifications, each exact here: a plain      *)
-(* store appends at the end of its location's modification order (only the *)
-(* reader stores to the era word, and every write of the list word and the *)
-(* cell is a read-modify-write), and RC11's ban on load buffering (no read *)
-(* is satisfied by a store that comes after it in its own thread), which   *)
-(* matters only for the reader's plain read of the node: ARMLB lifts it.   *)
-(* Data races are tracked by happens-before alone (`hbW`, `relhbR`), which *)
-(* an SC fence does not create: only Release/Acquire pairs and the fences' *)
-(* release halves carry it, as in RC11 and as miri's vector clocks do.     *)
+(* Left out, and why it changes nothing here: on the "Registered" path the *)
+(* global epoch never moves (the pin's fast path, the one edges 1 and 2    *)
+(* need), so A's birth is covered by every untagged era the reader         *)
+(* publishes; only the "Escalate" path moves it, at a protected load; the  *)
+(* sequence numbers in the high words stay even except on the "Helped"     *)
+(* path; one reader slot, one retired node, one writer; the batch's count  *)
+(* starts at PROT, the smallest stand-in for REFC_PROTECT here.            *)
 (*                                                                         *)
-(* Left out, and why it changes nothing here: the global epoch never       *)
-(* moves (the pin's fast path, the one the bug needs: a moved epoch makes  *)
-(* the pin publish with a SeqCst store and a fence), so A's birth is       *)
-(* covered by every untagged era and `era_covers` is "untagged"; the       *)
-(* sequence numbers in the high words stay even; one reader slot, one      *)
-(* retired node, one writer; the batch's count starts at PROT, the         *)
-(* smallest stand-in for REFC_PROTECT here.                                *)
-(*                                                                         *)
-(* The constants TagOrder, PinFence and ProtectLoad are the code's three   *)
-(* orders; Activation = "Store" is a mutation (the activation as a plain   *)
-(* store, no locked instruction). README.md lists the configurations.      *)
+(* The constants TagOrder, PinFence, ProtectLoad, CountRead, ClaimOrder,   *)
+(* UntagOrder and HelpedFence are the code's orders; Activation = "Store", *)
+(* TransitionFence = FALSE and EscalatedLeave = "Keep" change the code.    *)
+(* README.md lists the configurations.                                     *)
 (***************************************************************************)
-EXTENDS Integers, Sequences, TLC
-
-CONSTANTS
-    Model,        \* "SC", "TSO", "C11" or "ARMLB": the memory model every step runs under
-    TagOrder,     \* "Relaxed" (0.2.4) or "Release": the order of the tag store in ThreadSlots::leave
-    PinFence,     \* "None" (0.2.4 on x86-64) or "SeqCstFence": publish_fence after the activation
-    ProtectLoad,  \* "Acquire" (0.2.4, the caller's order) or "SeqCst": protect_load's pointer load
-    Activation,   \* "Exchange" (the code) or "Store": ThreadSlots::activate's write of the list word
-    Sections      \* how many critical sections the reader runs, one after another
-
-ASSUME Model \in {"SC", "TSO", "C11", "ARMLB"}                    \* one of the four memory models
-ASSUME TagOrder \in {"Relaxed", "Release"}                        \* the tag store's order
-ASSUME PinFence \in {"None", "SeqCstFence"}                       \* the pin's fence, or none
-ASSUME ProtectLoad \in {"Acquire", "SeqCst"}                      \* the protected load's order
-ASSUME Activation \in {"Exchange", "Store"}                       \* the activation's write
-ASSUME Sections \in 1 .. 3                                        \* one to three sections keep every run small
-
-A == 1             \* the old node: the one the writer swaps out and retires
-B == 2             \* the new node: the one the writer swaps in, never freed here
-INV == "inv"       \* INVPTR in a list word: the slot is left
-EMPTY == "empty"   \* 0 in a list word: the slot is active, no node in it
-LISTA == "listA"   \* a list word that holds A: a retire exchanged A into the slot
-PROT == 2          \* REFC_PROTECT: the count a batch starts at, above every traversal it can meet
-
-Locs == {"P", "L", "E"}   \* the atomic locations: the cell, the reader's list word, its era word
-Threads == {"R", "W"}     \* the reader and the writer
-Views == Model \in {"C11", "ARMLB"}   \* TRUE: the memory is message histories and views
-
-Max(a, b) == IF a >= b THEN a ELSE b                  \* the larger of two numbers
-Join(v1, v2) == [l \in Locs |-> Max(v1[l], v2[l])]    \* a view that knows what either view knows
-Bot == [l \in Locs |-> 1]                             \* the view of a thread that knows only the start
-InitVal == [l \in Locs |->                            \* what each location holds at the start:
-              IF l = "P" THEN A                       \*   the cell names A,
-              ELSE IF l = "L" THEN INV                \*   the slot is left (ThreadSlots::new),
-              ELSE TRUE]                              \*   and its era word is tagged (TRUE = tagged)
-
-VARIABLES
-    \* ---- the memory under SC and TSO ----
-    mem,      \* [Locs -> value]: what memory holds (the cell, first[0].lo, epoch[0].lo's tag)
-    buf,      \* [Threads -> Seq(<<loc, value>>)]: a thread's store buffer, oldest first (TSO only)
-    \* ---- the memory under C11 and ARMLB ----
-    msgs,     \* [Locs -> Seq([v, vw, hb])]: every value a location held, in modification order,
-              \*   with the view its writer released (vw) and the reads of A that happen before it (hb)
-    cur,      \* [Threads -> view]: per location, the oldest message the thread may still read
-    relvR,    \* view: the reader's view at its last fence, which its Relaxed stores carry
-    sc,       \* view: the SC view, what SeqCst fences and accesses published so far
-    hbW,      \* how many of the reader's reads of A happen before the writer's next step
-    relhbR,   \* how many of the reader's reads of A came before its last fence
-    cnt,      \* [v, vw, hb]: the batch's count (the refs node's refs_or_next), touched only by RMWs
-    \* ---- the reader ----
-    pcR,      \* the reader's next step (a label below)
-    sec,      \* which of its Sections the reader is in
-    got,      \* the node its protected load returned (A or B)
-    capR,     \* TRUE: its last exchange of the list word captured A (a list to traverse)
-    cached,   \* TRUE: its traversal brought A's count to zero: A is on its free-list cache
-    pend,     \* TRUE: its read of A is issued but not yet satisfied (ARMLB only)
-    \* ---- the writer ----
-    pcW,      \* the writer's next step (a label below)
-    held,     \* TRUE: the insert left A in the reader's slot (the node counts in adjs)
-    scan,     \* what the scan decided for the reader's slot: none, skip_inactive, skip_era, assigned
-    \* ---- ghosts: what the properties read ----
-    freed,    \* TRUE: A was freed
-    rd,       \* how many reads of A the reader has completed
-    uaf,      \* "none", or how a read of A met A's free: "race" or "read_after_free"
-    stale,    \* TRUE: a protected load returned A after the writer's swap had run
-    rfree     \* TRUE: the reader freed A (the node went through its slot)
-
-memv == <<mem, buf, msgs, cur, relvR, sc, hbW, relhbR, cnt>>   \* the memory
-rloc == <<pcR, sec, got, capR, cached, pend>>                  \* the reader's own state
-wloc == <<pcW, held, scan>>                                    \* the writer's own state
-ghost == <<freed, rd, uaf, stale, rfree>>                      \* the ghosts
-vars == <<memv, rloc, wloc, ghost>>                            \* everything
-
-(***************************************************************************)
-(* The memory: one operator per kind of access. Each defines every memory  *)
-(* variable's next value, so a step uses exactly one of them.              *)
-(***************************************************************************)
-
-\* The reads of A that happen before thread t's next step: the reader's own, all of them (they
-\* are sequenced before it); the writer's, what synchronisation brought it.
-HB(t) == IF t = "R" THEN rd ELSE hbW
-
-\* A locked instruction or an MFENCE of t may run: under TSO only with t's buffer empty (it
-\* drains the buffer first, the drain being Drain's steps); under the other models at once.
-Locked(t) == Model = "TSO" => buf[t] = <<>>
-
-\* Under SC and TSO, what t reads at l: its own newest buffered store to l, else memory.
-FlatVal(t, l) ==
-    LET ks == {k \in DOMAIN buf[t] : buf[t][k][1] = l}            \* t's buffered stores to l
-    IN IF ks = {} THEN mem[l]                                     \* none: memory
-       ELSE buf[t][CHOOSE k \in ks : \A j \in ks : j <= k][2]     \* else the newest of them
-
-\* The messages of l a load by t with order o may read, by position. A load never reads older
-\* than t's view; an SC load never older than the SC view either. Under SC and TSO one choice.
-Choices(t, l, o) ==
-    IF Views                                                      \* C11, ARMLB: from the thread's view on
-    THEN (IF o = "SeqCst" THEN Max(cur[t][l], sc[l]) ELSE cur[t][l]) .. Len(msgs[l]) \* SC load: never older than the SC view either
-    ELSE {0}                                                      \* SC, TSO: the one value memory gives
-
-\* The value a load by t of l that chose x returns.
-ValAt(t, l, x) ==
-    IF Views THEN msgs[l][x].v                                    \* the message chosen
-    ELSE IF Model = "TSO" THEN FlatVal(t, l)                      \* own buffer, else memory
-    ELSE mem[l]                                                   \* SC: memory
-
-\* The value a read-modify-write of l reads: the newest (C++20 [atomics.order] p10); under TSO
-\* memory, the locked instruction having drained the buffer.
-Newest(l) == IF Views THEN msgs[l][Len(msgs[l])].v ELSE mem[l]
-
-\* The load by t of l with order o ("Acquire" or "SeqCst") that chose message x. Every atomic
-\* load here is Acquire or SeqCst: t's view takes in the message's view, and t learns the reads
-\* of A that happen before the message. An SC load also raises the SC view of l to x (a read
-\* after a later SC fence must not read older: C++20 4.3).
-LoadAt(t, l, o, x) ==
-    IF Views                                                      \* C11, ARMLB: message histories
-    THEN LET m == msgs[l][x] IN                                   \* the message read
-         /\ cur' = [cur EXCEPT ![t] = Join(@, m.vw)]              \* acquire: its view joins t's
-         /\ hbW' = IF t = "W" THEN Max(hbW, m.hb) ELSE hbW        \* and what happens before it
-         /\ sc' = IF o = "SeqCst" THEN [sc EXCEPT ![l] = Max(@, x)] ELSE sc   \* SC: raise S's view of l
-         /\ UNCHANGED <<mem, buf, msgs, relvR, relhbR, cnt>>      \* nothing else moves
-    ELSE UNCHANGED memv                                           \* SC, TSO: a load changes nothing
-
-\* A plain store by the reader of value val to l, with order o ("Relaxed" or "Release").
-\* SC: memory at once. TSO: into the buffer (a MOV, whatever the order). C11: a new message at
-\* the end of l's modification order; Release hands it the reader's whole view and every read
-\* of A so far, Relaxed only what the reader's last fence released.
-Store(t, l, val, o) ==
-    IF Model = "SC"                                               \* SC: one memory
-    THEN /\ mem' = [mem EXCEPT ![l] = val]                        \* memory changes at once
-         /\ UNCHANGED <<buf, msgs, cur, relvR, sc, hbW, relhbR, cnt>> \* the rest of the memory stays
-    ELSE IF Model = "TSO"                                         \* TSO: a buffer per thread
-    THEN /\ buf' = [buf EXCEPT ![t] = Append(@, <<l, val>>)]      \* waits in the buffer
-         /\ UNCHANGED <<mem, msgs, cur, relvR, sc, hbW, relhbR, cnt>> \* the rest of the memory stays
-    ELSE LET ts == Len(msgs[l]) + 1                               \* its place in l's order
-             base == IF o = "Release" THEN cur[t] ELSE relvR      \* the view it releases
-             h == IF o = "Release" THEN HB(t) ELSE relhbR         \* the reads of A before it
-         IN /\ msgs' = [msgs EXCEPT ![l] = Append(@, [v |-> val, vw |-> [base EXCEPT ![l] = ts], hb |-> h])] \* the new message, last in l's order
-            /\ cur' = [cur EXCEPT ![t][l] = ts]                   \* t knows its own store
-            /\ UNCHANGED <<mem, buf, relvR, sc, hbW, relhbR, cnt>> \* the rest of the memory stays
-
-\* A read-modify-write by t of l that writes val, order o ("AcqRel" or "SeqCst"): it reads the
-\* newest message (taking in its view) and writes right after it, releasing t's view. A SeqCst
-\* one raises the SC view of l to what it wrote (C++20 4.1, 4.3). TSO: a locked instruction.
-Rmw(t, l, val, o) ==
-    /\ Locked(t)                                                  \* TSO: the buffer drained first
-    /\ IF Views                                                   \* C11, ARMLB: message histories
-       THEN LET last == msgs[l][Len(msgs[l])]                     \* the newest message, read
-                ts == Len(msgs[l]) + 1                            \* the place of the write
-                c == [Join(cur[t], last.vw) EXCEPT ![l] = ts]     \* acquire, then t knows its write
-                h == Max(HB(t), last.hb)                          \* reads of A before the write
-            IN /\ msgs' = [msgs EXCEPT ![l] = Append(@, [v |-> val, vw |-> c, hb |-> h])] \* the written message, right after the newest
-               /\ cur' = [cur EXCEPT ![t] = c]                    \* t's view after the access
-               /\ hbW' = IF t = "W" THEN h ELSE hbW               \* the writer learns what happens before it
-               /\ sc' = IF o = "SeqCst" THEN [sc EXCEPT ![l] = ts] ELSE sc \* SeqCst: S's view of l is the write
-               /\ UNCHANGED <<mem, buf, relvR, relhbR, cnt>>      \* the rest of the memory stays
-       ELSE /\ mem' = [mem EXCEPT ![l] = val]                     \* on memory, at once
-            /\ UNCHANGED <<buf, msgs, cur, relvR, sc, hbW, relhbR, cnt>> \* the rest of the memory stays
-
-\* A failed compare_exchange (AcqRel, failure Acquire): an Acquire load of the newest message.
-\* A strong compare-exchange fails only when the newest value differs; one that read a stale
-\* value would leave A counted and never freed, a leak, not a use after free.
-FailCas(t, l) ==
-    /\ Locked(t)                                                  \* TSO: a locked instruction
-    /\ LoadAt(t, l, "Acquire", IF Views THEN Len(msgs[l]) ELSE 0) \* an Acquire load of the newest
-
-\* fence(SeqCst) by t. C11: t's view joins the SC view and becomes it (the promising semantics'
-\* SC fence, C++20 4.2 to 4.4); its release half is what the reader's later Relaxed stores carry.
-\* An SC fence carries no happens-before by itself: hb gains nothing here. TSO: an MFENCE.
-Fence(t) ==
-    /\ Locked(t)                                                  \* TSO: waits for the drain
-    /\ IF Views                                                   \* C11, ARMLB: the SC view
-       THEN LET c == Join(cur[t], sc) IN                          \* everything S has published
-            /\ cur' = [cur EXCEPT ![t] = c]                       \* t now knows it
-            /\ sc' = c                                            \* and publishes what t knows
-            /\ relvR' = IF t = "R" THEN c ELSE relvR              \* release half: Relaxed stores
-            /\ relhbR' = IF t = "R" THEN rd ELSE relhbR           \*   after it carry this
-            /\ UNCHANGED <<mem, buf, msgs, hbW, cnt>>             \* the rest of the memory stays
-       ELSE UNCHANGED memv                                        \* SC: nothing; TSO: drained
-
-\* fetch_add(d) by t on the batch's count, AcqRel: reads the newest count and writes after it.
-CountAdd(t, d) ==
-    /\ Locked(t)                                                  \* TSO: a locked instruction
-    /\ IF Views                                                   \* C11, ARMLB: the count's message
-       THEN LET c == Join(cur[t], cnt.vw)                         \* acquire the count's view
-                h == Max(HB(t), cnt.hb)                           \* and the reads before it
-            IN /\ cnt' = [v |-> cnt.v + d, vw |-> c, hb |-> h]    \* release t's view with it
-               /\ cur' = [cur EXCEPT ![t] = c]                    \* t's view after the access
-               /\ hbW' = IF t = "W" THEN h ELSE hbW               \* the writer learns what happens before it
-               /\ UNCHANGED <<mem, buf, msgs, relvR, sc, relhbR>> \* the rest of the memory stays
-       ELSE /\ cnt' = [cnt EXCEPT !.v = @ + d]                    \* on memory, at once
-            /\ UNCHANGED <<mem, buf, msgs, cur, relvR, sc, hbW, relhbR>> \* the rest of the memory stays
-
-\* t frees A (free_batch_list after the drain). Under C11 a read of A that does not happen
-\* before the free is a data race with the deallocation (the property's first half).
-FreeA(t) ==
-    /\ freed' = TRUE                                              \* A's memory goes back
-    /\ uaf' = IF uaf = "none" /\ Model = "C11" /\ HB(t) < rd      \* a read not before the free
-              THEN "race" ELSE uaf                                \* a data race with the free
-
-\* The reader's read of A is satisfied: one more read; one after the free is a use after free.
-ReadA ==
-    /\ rd' = rd + 1                                               \* one more read of A
-    /\ uaf' = IF uaf = "none" /\ freed THEN "read_after_free" ELSE uaf \* after the free: a use after free
+EXTENDS LeaveScanSlowPath
 
 (***************************************************************************)
 (* The reader: Sections critical sections, each pin, load, read, drop.     *)
 (***************************************************************************)
 
+\* After the activation and the traversal of what it took: the first pin of a new thread, and
+\* the pin after an escalated section, publish an epoch (transition, from its do_update on);
+\* every other pin takes the fast path to its first protected load.
+AfterTraverse == IF cachedOk THEN "PL" ELSE "PUL"
+
+\* PC. Guard::enter -> slots() -> claim_tid -> alloc_tid: next_tid.compare_exchange(n, n + 1),
+\* Release in 0.2.4, SeqCst in 0.2.5 ("Fresh" only). The loads of next_tid before it, and the
+\* page allocation, read the start: no steps.
+RPC ==
+    /\ pcR = "PC"                                                 \* a new thread's first pin
+    /\ Rmw("R", "N", 1, ClaimOrder)                               \* its ID handed out
+    /\ pcR' = "PE"                                                \* then the activation
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
 \* PE. Guard::enter -> ThreadSlots::activate: the era word, tagged since the last leave, is
-\* stored without its tag (Relaxed). The load of the era before it reads the reader's own last
-\* store (it is the word's only writer), so it is no step.
+\* stored without its tag (Relaxed in the code; UntagOrder). The load of the era before it reads
+\* the reader's own last store (myEra: it is the word's only writer here), so it is no step.
 RPE ==
     /\ pcR = "PE"                                                 \* at the activation
-    /\ Store("R", "E", FALSE, "Relaxed")                          \* untag: era_covers again
+    /\ Store("R", "E", Era(FALSE, myEra), UntagOrder)             \* untag: the era it kept
     /\ pcR' = "PX"                                                \* then the exchange
-    /\ UNCHANGED <<sec, got, capR, cached, pend>>                 \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
 \* PX. ThreadSlots::activate: the list word exchanged to 0, SeqCst; what it held (a node a
 \* retire put in while the slot was left) is the reader's to traverse. Mutation (Activation =
@@ -348,43 +135,151 @@ RPX ==
        ELSE /\ Store("R", "L", EMPTY, "Release")                  \* mutation: a MOV on x86
             /\ capR' = FALSE                                      \* nothing captured
     /\ pcR' = IF PinFence = "SeqCstFence" THEN "PF"               \* publish_fence, if any
-              ELSE IF capR' THEN "PT" ELSE "PL"                   \* else traverse, or load
-    /\ UNCHANGED <<sec, got, cached, pend>>                       \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+              ELSE IF capR' THEN "PT" ELSE AfterTraverse          \* else traverse, or go on
+    /\ UNCHANGED <<sec, got, cached, pend, myEra, cachedOk>>      \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
-\* PF. publish_fence: fence(SeqCst) (0.2.4: every target but x86-64; fix F: every target).
+\* PF. publish_fence: fence(SeqCst) (0.2.4 and 0.2.5: every target but x86-64; fix F: every target).
 RPF ==
     /\ pcR = "PF"                                                 \* right after the exchange
     /\ Fence("R")                                                 \* the SC fence
-    /\ pcR' = IF capR THEN "PT" ELSE "PL"                         \* traverse, or load
-    /\ UNCHANGED <<sec, got, capR, cached, pend>>                 \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ pcR' = IF capR THEN "PT" ELSE AfterTraverse                \* traverse, or go on
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
-\* PT. Guard::enter_cold -> traverse_onto_cache: the captured node's batch count decremented
-\* (reclaim::traverse, fetch_sub AcqRel); the last decrement puts the batch on the cache.
+\* PT, PUT. Guard::enter_cold (PT) or do_update (PUT) -> traverse_onto_cache: the captured node's
+\* batch count decremented (reclaim::traverse, fetch_sub AcqRel); the last decrement puts the
+\* batch on the cache. After do_update's traversal comes its era store.
 RPT ==
-    /\ pcR = "PT"                                                 \* A was captured
+    /\ pcR \in {"PT", "PUT"}                                      \* A was captured
     /\ CountAdd("R", -1)                                          \* one traversal of A
     /\ cached' = (cached \/ cnt.v - 1 = 0)                        \* zero: on the cache
     /\ capR' = FALSE                                              \* traversed
-    /\ pcR' = "PL"                                                \* then the section's load
-    /\ UNCHANGED <<sec, got, pend>>                               \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ pcR' = IF pcR = "PUT" THEN "PU" ELSE AfterTraverse         \* then the publication, or go on
+    /\ UNCHANGED <<sec, got, pend, myEra, cachedOk>>              \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
-\* PL. Atomic::load -> protect_load: data.load(order), the order the caller passed (Acquire),
-\* or SeqCst (fix S). The epoch has not moved, so the fast path returns this pointer.
+\* PUL. transition -> do_update: first[0].load_lo() (Acquire). A list (a retire put A in since the
+\* activation): activate again and traverse it before the publication.
+RPUL ==
+    /\ pcR = "PUL"                                                \* the transition begins
+    /\ \E x \in Choices("R", "L", "Acquire"):                     \* any value the model allows
+         /\ LoadAt("R", "L", "Acquire", x)                        \* the list word
+         /\ pcR' = IF ValAt("R", "L", x) = LISTA THEN "PUX" ELSE "PU" \* a list: take it
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PUX. do_update -> activate: the era is untagged already (no store); the list word exchanged to
+\* 0, SeqCst; what it took is traversed (PUT).
+RPUX ==
+    /\ pcR = "PUX"                                                \* a list was seen
+    /\ Rmw("R", "L", EMPTY, "SeqCst")                             \* take it
+    /\ capR' = (Newest("L") = LISTA)                              \* A in it
+    /\ pcR' = IF capR' THEN "PUT" ELSE "PU"                       \* traverse, or publish
+    /\ UNCHANGED <<sec, got, cached, pend, myEra, cachedOk>>      \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PU. do_update: epoch[0].store_lo(curr_epoch, SeqCst), the epoch read after the traversal (at A's
+\* birth or later); cached_epoch mirrors it, so the next pins take the fast path.
+RPU ==
+    /\ pcR = "PU"                                                 \* the publication
+    /\ Store("R", "E", Era(FALSE, 1), "SeqCst")                   \* the era: covers A
+    /\ myEra' = 1                                                 \* the era it now holds
+    /\ cachedOk' = TRUE                                           \* mirror_transition
+    /\ pcR' = IF TransitionFence THEN "PUF" ELSE "PL"             \* the code: then the fence
+    /\ UNCHANGED <<sec, got, capR, cached, pend>>                 \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PUF. do_update: fence(SeqCst), guard.rs:595 (TransitionFence = FALSE: the mutation without it).
+\* The epoch read after it is unchanged: the transition ends.
+RPUF ==
+    /\ pcR = "PUF"                                                \* after the era store
+    /\ Fence("R")                                                 \* the SC fence
+    /\ pcR' = "PL"                                                \* then the section's load
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* The step after a protected load that returned v: read the node, or (B, never freed) drop.
+AfterLoad(v) == IF v = A THEN "RD" ELSE "LE"
+
+\* PL. Atomic::load -> protect_load: data.load(order), the order the caller passed (0.2.4:
+\* Acquire), or SeqCst (0.2.5, fix S). The epoch has not moved: the fast path returns it. On the
+\* "Escalate" path the epoch may have moved: the value is dropped and the cold path runs.
 RPL ==
     /\ pcR = "PL"                                                 \* inside the section
     /\ \E x \in Choices("R", "P", ProtectLoad):                   \* any value the model allows
          /\ LoadAt("R", "P", ProtectLoad, x)                      \* the protected load
+         /\ \/ /\ got' = ValAt("R", "P", x)                       \* fast path: the node it names
+               /\ stale' = (stale \/ (ValAt("R", "P", x) = A /\ pcW # "WS")) \* A, after the swap
+               /\ pcR' = AfterLoad(ValAt("R", "P", x))            \* read it, or drop
+            \/ /\ Path = "Escalate"                               \* the epoch moved since the pin
+               /\ pcR' = "PP"                                     \* protect_load_cold
+               /\ UNCHANGED <<got, stale>>                        \* the value is dropped
+    /\ UNCHANGED <<sec, capR, cached, pend, myEra, cachedOk>>     \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc>>                             \* the rest stays
+    /\ UNCHANGED <<freed, rd, uaf, rfree>>                        \* the other ghosts stay
+
+\* PP. protect_load_cold: epoch[0].store_lo(curr_epoch, SeqCst), the moved epoch (at A's birth or
+\* later). One publication stands for the code's fifteen: each is this store, the fence and the
+\* load after it, and all of them come before the escalation's own store and fence.
+RPP ==
+    /\ pcR = "PP"                                                 \* a raise of the era
+    /\ Store("R", "E", Era(FALSE, 1), "SeqCst")                   \* the moved epoch
+    /\ myEra' = 1                                                 \* the era it now holds
+    /\ pcR' = "PPF"                                               \* then the fence
+    /\ UNCHANGED <<sec, got, capR, cached, pend, cachedOk>>       \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PPF. protect_load_cold: fence(SeqCst).
+RPPF ==
+    /\ pcR = "PPF"                                                \* after the raise
+    /\ Fence("R")                                                 \* the SC fence
+    /\ pcR' = "PPL"                                               \* then the load again
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PPL. protect_load_cold: data.load(SeqCst). The epoch held: it returns this value; it moved
+\* again (until the attempts run out): escalate, the value dropped.
+RPPL ==
+    /\ pcR = "PPL"                                                \* the load after the raise
+    /\ \E x \in Choices("R", "P", "SeqCst"):                      \* any value the model allows
+         /\ LoadAt("R", "P", "SeqCst", x)                         \* the protected load
+         /\ \/ /\ got' = ValAt("R", "P", x)                       \* converged: the node it names
+               /\ stale' = (stale \/ (ValAt("R", "P", x) = A /\ pcW # "WS")) \* A, after the swap
+               /\ pcR' = AfterLoad(ValAt("R", "P", x))            \* read it, or drop
+            \/ /\ pcR' = "PES"                                    \* the epoch moved again: escalate
+               /\ UNCHANGED <<got, stale>>                        \* the value is dropped
+    /\ UNCHANGED <<sec, capR, cached, pend, myEra, cachedOk>>     \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc>>                             \* the rest stays
+    /\ UNCHANGED <<freed, rd, uaf, rfree>>                        \* the other ghosts stay
+
+\* PES. escalate: epoch[0].store_lo(EPOCH_UNCONDITIONAL, SeqCst); cached_epoch follows it.
+RPES ==
+    /\ pcR = "PES"                                                \* the escalation
+    /\ Store("R", "E", Era(FALSE, UNC), "SeqCst")                 \* covers every node
+    /\ myEra' = UNC                                               \* the era it now holds
+    /\ pcR' = "PESF"                                              \* then the fence
+    /\ UNCHANGED <<sec, got, capR, cached, pend, cachedOk>>       \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PESF. escalate: fence(SeqCst).
+RPESF ==
+    /\ pcR = "PESF"                                               \* after the escalation's store
+    /\ Fence("R")                                                 \* the SC fence
+    /\ pcR' = "PESL"                                              \* then the last load
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
+
+\* PESL. protect_load_cold: data.load(SeqCst) under the unconditional reservation, returned.
+RPESL ==
+    /\ pcR = "PESL"                                               \* the escalated load
+    /\ \E x \in Choices("R", "P", "SeqCst"):                      \* any value the model allows
+         /\ LoadAt("R", "P", "SeqCst", x)                         \* the protected load
          /\ got' = ValAt("R", "P", x)                             \* the node it names
-         /\ stale' = (stale \/ (ValAt("R", "P", x) = A /\ pcW # "WS"))   \* A, after the swap
-         /\ pcR' = IF ValAt("R", "P", x) = A THEN "RD" ELSE "LE"  \* B is never freed: no read
-    /\ UNCHANGED <<sec, capR, cached, pend>>                      \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
+         /\ stale' = (stale \/ (ValAt("R", "P", x) = A /\ pcW # "WS")) \* A, after the swap
+         /\ pcR' = AfterLoad(ValAt("R", "P", x))                  \* read it, or drop
+    /\ UNCHANGED <<sec, capR, cached, pend, myEra, cachedOk>>     \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc>>                             \* the rest stays
     /\ UNCHANGED <<freed, rd, uaf, rfree>>                        \* the other ghosts stay
 
 \* RD. The caller reads the node through the guard (a plain, non-atomic read). ARMLB: the read
@@ -398,8 +293,8 @@ RRD ==
             /\ UNCHANGED pend                                     \* the reader's other state stays
     /\ pcR' = "LE"                                                \* then the guard's drop
     /\ UNCHANGED memv                                             \* no memory access
-    /\ UNCHANGED <<sec, got, capR, cached>>                       \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
+    /\ UNCHANGED <<sec, got, capR, cached, myEra, cachedOk>>      \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc>>                             \* the rest stays
     /\ UNCHANGED <<freed, stale, rfree>>                          \* the other ghosts stay
 
 \* ARMLB only: the issued read of A is satisfied, at any step before a store that orders it
@@ -409,20 +304,24 @@ Satisfy ==
     /\ ReadA                                                      \* it reads A's memory now
     /\ pend' = FALSE                                              \* satisfied
     /\ UNCHANGED memv                                             \* no memory access
-    /\ UNCHANGED <<pcR, sec, got, capR, cached>>                  \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
+    /\ UNCHANGED <<pcR, sec, got, capR, cached, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc>>                             \* the rest stays
     /\ UNCHANGED <<freed, stale, rfree>>                          \* the other ghosts stay
 
 \* LE. Guard::leave -> leave_slot -> ThreadSlots::leave: the era word stored tagged (0.2.4:
-\* Relaxed; fix: Release). A Release store waits for the reader's earlier read of A (ARMLB).
+\* Relaxed; 0.2.5: Release), the escalated era reset to 0 (EscalatedLeave = "Keep": kept);
+\* leave_slot resets an escalated cached_epoch to 0, so the next pin publishes an epoch. A
+\* Release store waits for the reader's earlier read of A (ARMLB).
 RLE ==
     /\ pcR = "LE"                                                 \* the outermost drop
     /\ TagOrder = "Release" => ~pend                              \* release: earlier reads first
-    /\ Store("R", "E", TRUE, TagOrder)                            \* the tag: the slot is left
+    /\ LET kept == IF myEra = UNC /\ EscalatedLeave = "Reset" THEN 0 ELSE myEra \* the era kept
+       IN /\ Store("R", "E", Era(TRUE, kept), TagOrder)           \* the tag: the slot is left
+          /\ myEra' = kept                                        \* the era the next pin untags
+    /\ cachedOk' = (cachedOk /\ myEra # UNC)                      \* escalated: the next pin publishes
     /\ pcR' = "LX"                                                \* then the exchange
     /\ UNCHANGED <<sec, got, capR, cached, pend>>                 \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
 \* LX. ThreadSlots::leave: the list word exchanged to INVPTR (AcqRel; its release half waits
 \* for every earlier read); a node in it is the reader's to traverse.
@@ -431,9 +330,8 @@ RLX ==
     /\ ~pend                                                      \* release: the read is done
     /\ Rmw("R", "L", INV, "AcqRel")                               \* the slot is left
     /\ pcR' = IF Newest("L") = LISTA THEN "LT" ELSE "LD"          \* traverse what it held
-    /\ UNCHANGED <<sec, got, capR, cached, pend>>                 \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<sec, got, capR, cached, pend, myEra, cachedOk>> \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
 \* LT. Guard::leave_cold -> traverse_onto_cache: the captured node's count decremented.
 RLT ==
@@ -441,9 +339,8 @@ RLT ==
     /\ CountAdd("R", -1)                                          \* one traversal of A
     /\ cached' = (cached \/ cnt.v - 1 = 0)                        \* zero: on the cache
     /\ pcR' = "LD"                                                \* then the drain
-    /\ UNCHANGED <<sec, got, capR, pend>>                         \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<sec, got, capR, pend, myEra, cachedOk>>        \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc, ghost>>                      \* the rest stays
 
 \* LD. drain_free_list: a batch on the cache is freed; then the next section, or the end.
 RLD ==
@@ -455,32 +352,54 @@ RLD ==
     /\ sec' = sec + 1                                             \* this section is over
     /\ pcR' = IF sec < Sections THEN "PE" ELSE "Done"             \* pin again, or stop
     /\ UNCHANGED memv                                             \* no memory access
-    /\ UNCHANGED <<got, capR, pend>>                              \* the reader's other state stays
-    /\ UNCHANGED wloc                                             \* the writer does not move
+    /\ UNCHANGED <<got, capR, pend, myEra, cachedOk>>             \* the reader's other state stays
+    /\ UNCHANGED <<sloc, wloc, hloc>>                             \* the rest stays
     /\ UNCHANGED <<rd, stale>>                                    \* the other ghosts stay
 
+ReaderStep ==
+    \/ RPC \/ RPE \/ RPX \/ RPF \/ RPT \/ RPUL \/ RPUX \/ RPU \/ RPUF          \* the pin
+    \/ RPL \/ RPP \/ RPPF \/ RPPL \/ RPES \/ RPESF \/ RPESL                    \* the protected load
+    \/ RRD \/ Satisfy \/ RLE \/ RLX \/ RLT \/ RLD                             \* the read and the drop
+    \/ ReaderSlowStep                                                         \* the slow path
+
 (***************************************************************************)
-(* The writer: swap, retire A, the scan of the reader's slot, the insert,  *)
-(* the count, and the free of A when no slot holds it.                     *)
+(* The writer: swap, retire A, the count, the scan of the reader's slot,   *)
+(* the insert, the count, and the free of A when no slot holds it.         *)
 (***************************************************************************)
+
+\* Where the scan goes once it has decided for the reader's slot: on the "Helped" path to the
+\* helper's slot, else to the insert (assigned) or the count.
+ScanDone(d) == IF Path = "Helped" THEN "WH" ELSE IF d = "assigned" THEN "WIL" ELSE "WA"
 
 \* WS. Atomic::swap: the cell swapped to B (AcqRel); the old value, A, is retired.
 WWS ==
     /\ pcW = "WS"                                                 \* first step
     /\ Rmw("W", "P", B, "AcqRel")                                 \* A is unreachable from now
-    /\ pcW' = "WF"                                                \* then try_retire
+    /\ pcW' = IF Path = "Fresh" /\ CountRead = "BeforeFence" THEN "WN" ELSE "WF" \* 0.2.4: the count first
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
+
+\* WN. try_retire: max_threads(), next_tid.load(Acquire): before the fence in 0.2.4, after it in
+\* 0.2.5 ("Fresh" only; on the other paths the reader's ID was handed out long before, and the
+\* load reads the start). Without the reader's ID, the scan never visits its slot.
+WWN ==
+    /\ pcW = "WN"                                                 \* the thread count
+    /\ \E x \in Choices("W", "N", "Acquire"):                     \* any value the model allows
+         /\ LoadAt("W", "N", "Acquire", x)                        \* next_tid
+         /\ scan' = IF ValAt("W", "N", x) = 0 THEN "skip_range" ELSE scan \* the reader's ID out of range
+         /\ pcW' = IF CountRead = "BeforeFence" THEN "WF"         \* 0.2.4: then the fence
+                   ELSE IF ValAt("W", "N", x) = 0 THEN "WA" ELSE "WL" \* 0.2.5: the scan, or none
+    /\ UNCHANGED held                                             \* the writer's other state stays
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WF. try_retire: fence(SeqCst) before the scan.
 WWF ==
     /\ pcW = "WF"                                                 \* the scan's fence
     /\ Fence("W")                                                 \* pairs with the reader's
-    /\ pcW' = "WL"                                                \* then the scan
+    /\ pcW' = IF Path = "Fresh" /\ CountRead = "AfterFence" THEN "WN" \* 0.2.5: then the count
+              ELSE IF scan = "skip_range" THEN "WA" ELSE "WL"     \* the scan, or none
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WL. The scan: first[j].load_lo() (Acquire). INVPTR: the slot is left, skipped.
 WWL ==
@@ -488,27 +407,62 @@ WWL ==
     /\ \E x \in Choices("W", "L", "Acquire"):                     \* any value allowed
          /\ LoadAt("W", "L", "Acquire", x)                        \* the list word
          /\ IF ValAt("W", "L", x) = INV                           \* INVPTR: the slot is left
-            THEN /\ pcW' = "WA"                                   \* skipped: A not inserted
+            THEN /\ pcW' = ScanDone("skip_inactive")              \* skipped: A not inserted
                  /\ scan' = "skip_inactive"                       \* the scan's decision
-            ELSE /\ pcW' = "WE"                                   \* active: the era next
+            ELSE /\ pcW' = IF Path = "Helped" THEN "WLh" ELSE "WE" \* active: the sequence number, or the era
                  /\ UNCHANGED scan                                \* the writer's other state stays
     /\ UNCHANGED held                                             \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
-\* WE. The scan: epoch[j].load_lo() (Acquire); era_covers is false for a tagged era: skipped.
+\* WLh. The scan: first[j].load_hi() (Acquire). Odd: the slot is being handed over, skipped.
+WWLh ==
+    /\ pcW = "WLh"                                                \* the list's sequence number
+    /\ \E x \in Choices("W", "Lh", "Acquire"):                    \* any value allowed
+         /\ LoadAt("W", "Lh", "Acquire", x)                       \* the high word
+         /\ IF ValAt("W", "Lh", x) % 2 = 1                        \* odd: in a hand-over
+            THEN /\ pcW' = ScanDone("skip_seqno")                 \* skipped
+                 /\ scan' = "skip_seqno"                          \* the scan's decision
+            ELSE /\ pcW' = "WE"                                   \* even: the era
+                 /\ UNCHANGED scan                                \* the writer's other state stays
+    /\ UNCHANGED held                                             \* the writer's other state stays
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
+
+\* WE. The scan: epoch[j].load_lo() (Acquire); era_covers is false for a tagged era (skip_era)
+\* and for an era below A's birth (skip_epoch): skipped.
 WWE ==
     /\ pcW = "WE"                                                 \* the slot looked active
     /\ \E x \in Choices("W", "E", "Acquire"):                     \* any value allowed
          /\ LoadAt("W", "E", "Acquire", x)                        \* the era word
-         /\ IF ValAt("W", "E", x)                                 \* tagged
-            THEN /\ pcW' = "WA"                                   \* skipped (skip_era)
-                 /\ scan' = "skip_era"                            \* the scan's decision
-            ELSE /\ pcW' = "WIL"                                  \* covers A: assigned
-                 /\ scan' = "assigned"                            \* the scan's decision
+         /\ LET d == IF ValAt("W", "E", x).tag THEN "skip_era"    \* tagged: left
+                     ELSE IF ~Covers(ValAt("W", "E", x)) THEN "skip_epoch" \* below A's birth
+                     ELSE "assigned"                              \* covers A
+            IN IF d = "assigned" /\ Path = "Helped"               \* the era's sequence number next
+               THEN /\ pcW' = "WEh"                               \* not decided yet
+                    /\ UNCHANGED scan                             \* the writer's other state stays
+               ELSE /\ pcW' = ScanDone(d)                         \* decided
+                    /\ scan' = d                                  \* the scan's decision
     /\ UNCHANGED held                                             \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
+
+\* WEh. The scan: epoch[j].load_hi() (Acquire). Odd: in a hand-over, skipped; else assigned.
+WWEh ==
+    /\ pcW = "WEh"                                                \* the era's sequence number
+    /\ \E x \in Choices("W", "Eh", "Acquire"):                    \* any value allowed
+         /\ LoadAt("W", "Eh", "Acquire", x)                       \* the high word
+         /\ LET d == IF ValAt("W", "Eh", x) % 2 = 1 THEN "skip_seqno" ELSE "assigned" \* odd: skip
+            IN /\ pcW' = ScanDone(d)                              \* decided
+               /\ scan' = d                                       \* the scan's decision
+    /\ UNCHANGED held                                             \* the writer's other state stays
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
+
+\* WH ("Helped" only). The scan's visit of the helper's slots, once the helper left them: it reads
+\* INVPTR there and skips them (the helper's slots are not modelled, see LeaveScanSlowPath).
+WWH ==
+    /\ pcW = "WH"                                                 \* the helper's slots
+    /\ pcH = "Done"                                               \* the helper left them
+    /\ pcW' = IF scan = "assigned" THEN "WIL" ELSE "WA"           \* then the insert, or the count
+    /\ UNCHANGED <<memv, held, scan>>                             \* nothing else moves
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WIL. The insert: the list word re-checked (Acquire); INVPTR: not inserted.
 WWIL ==
@@ -517,18 +471,16 @@ WWIL ==
          /\ LoadAt("W", "L", "Acquire", x)                        \* still active?
          /\ pcW' = IF ValAt("W", "L", x) = INV THEN "WA" ELSE "WIE" \* INVPTR: skip; else the era
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
-\* WIE. The insert: the era re-checked (Acquire); tagged: not inserted.
+\* WIE. The insert: the era re-checked (Acquire); no longer covering A: not inserted.
 WWIE ==
     /\ pcW = "WIE"                                                \* still covered?
     /\ \E x \in Choices("W", "E", "Acquire"):                     \* any value the model allows
          /\ LoadAt("W", "E", "Acquire", x)                        \* the era word
-         /\ pcW' = IF ValAt("W", "E", x) THEN "WA" ELSE "WIX"     \* tagged: skip; else the exchange
+         /\ pcW' = IF Covers(ValAt("W", "E", x)) THEN "WIX" ELSE "WA" \* covers: the exchange
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WIX. The insert: exchange_lo(A) (AcqRel). It displaced INVPTR: the slot was left, roll back.
 WWIX ==
@@ -536,8 +488,7 @@ WWIX ==
     /\ Rmw("W", "L", LISTA, "AcqRel")                             \* the exchange
     /\ pcW' = IF Newest("L") = INV THEN "WIR" ELSE "WIC"          \* left: roll back; else check
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WIR. InsertRollback: compare_exchange_lo(A, INVPTR). Failed: an exchange (the reader's
 \* activation) took A, and traverses it: A counts.
@@ -548,8 +499,7 @@ WWIR ==
        ELSE FailCas("W", "L") /\ held' = TRUE                     \* the reader has it
     /\ pcW' = "WA"                                                \* then the count
     /\ UNCHANGED scan                                             \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WIC. InsertCheck: era_left(epoch.load_lo()) (Acquire): tagged, the reader left since the
 \* scan, so A is taken out again; untagged, A stays in the slot and counts.
@@ -557,12 +507,11 @@ WWIC ==
     /\ pcW = "WIC"                                                \* A is in the slot
     /\ \E x \in Choices("W", "E", "Acquire"):                     \* any value the model allows
          /\ LoadAt("W", "E", "Acquire", x)                        \* the era word again
-         /\ IF ValAt("W", "E", x)                                 \* tagged
+         /\ IF ValAt("W", "E", x).tag                             \* tagged
             THEN pcW' = "WIU" /\ UNCHANGED held                   \* left: undo
             ELSE pcW' = "WA" /\ held' = TRUE                      \* active: A counts
     /\ UNCHANGED scan                                             \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WIU. InsertUndo: compare_exchange_lo(A, INVPTR). Failed: an exchange took A: A counts.
 WWIU ==
@@ -572,8 +521,7 @@ WWIU ==
        ELSE FailCas("W", "L") /\ held' = TRUE                     \* the leave took it
     /\ pcW' = "WA"                                                \* then the count
     /\ UNCHANGED scan                                             \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WA. refs_or_next.fetch_add(adjs) (AcqRel), adjs = inserted - REFC_PROTECT: zero means no
 \* slot holds A and every traversal is done: the batch goes on the writer's cache.
@@ -582,8 +530,7 @@ WWA ==
     /\ CountAdd("W", (IF held THEN 1 ELSE 0) - PROT)              \* the adjustment
     /\ pcW' = IF cnt.v + (IF held THEN 1 ELSE 0) - PROT = 0 THEN "WD" ELSE "Done" \* zero: A goes on the cache
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+    /\ UNCHANGED <<rloc, sloc, hloc, ghost>>                      \* the rest stays
 
 \* WD. drain_free_list: the writer frees A.
 WWD ==
@@ -592,42 +539,40 @@ WWD ==
     /\ pcW' = "Done"                                              \* the writer is done
     /\ UNCHANGED memv                                             \* no memory access
     /\ UNCHANGED <<held, scan>>                                   \* the writer's other state stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
+    /\ UNCHANGED <<rloc, sloc, hloc>>                             \* the rest stays
     /\ UNCHANGED <<rd, stale, rfree>>                             \* the other ghosts stay
 
-\* TSO only: the oldest store in t's buffer reaches memory, at any time.
-Drain(t) ==
-    /\ Model = "TSO"                                              \* buffers exist only under TSO
-    /\ buf[t] # <<>>                                              \* something buffered
-    /\ mem' = [mem EXCEPT ![Head(buf[t])[1]] = Head(buf[t])[2]]   \* the oldest one lands
-    /\ buf' = [buf EXCEPT ![t] = Tail(@)]                         \* and leaves the buffer
-    /\ UNCHANGED <<msgs, cur, relvR, sc, hbW, relhbR, cnt>>       \* the rest of the memory stays
-    /\ UNCHANGED rloc                                             \* the reader does not move
-    /\ UNCHANGED wloc                                             \* the writer does not move
-    /\ UNCHANGED ghost                                            \* the ghosts stay
+WriterStep ==
+    \/ WWS \/ WWN \/ WWF \/ WWL \/ WWLh \/ WWE \/ WWEh \/ WWH                 \* swap, count, scan
+    \/ WWIL \/ WWIE \/ WWIX \/ WWIR \/ WWIC \/ WWIU \/ WWA \/ WWD             \* insert, count, free
 
-\* Both threads have finished and every store reached memory: the run is over.
-Terminated == pcR = "Done" /\ pcW = "Done" /\ \A t \in Threads : buf[t] = <<>>
+\* Every thread has finished and every store reached memory: the run is over.
+Terminated ==
+    /\ pcR = "Done" /\ pcW = "Done" /\ pcH = "Done"              \* every thread done
+    /\ \A t \in Threads : buf[t] = <<>>                           \* every buffer drained
 
 Init ==
-    /\ mem = InitVal                                              \* the cell names A, slot left
-    /\ buf = [t \in Threads |-> <<>>]                             \* buffers empty
-    /\ msgs = [l \in Locs |-> <<[v |-> InitVal[l], vw |-> Bot, hb |-> 0]>>]   \* one message each
-    /\ cur = [t \in Threads |-> Bot]                              \* both know only the start
-    /\ relvR = Bot                                                \* no fence yet
-    /\ sc = Bot                                                   \* S has published only the start
-    /\ hbW = 0                                                    \* the writer knows no read of A
-    /\ relhbR = 0                                                 \* nor does the reader's fence
-    /\ cnt = [v |-> PROT, vw |-> Bot, hb |-> 0]                   \* the batch's count
-    /\ pcR = "PE"                                                 \* the reader is about to pin
+    /\ MemInit                                                    \* the memory at the start
+    /\ pcR = CASE Path = "Fresh" -> "PC"                          \* a new thread: claim its ID first
+               [] Path = "Helped" -> "SQ"                         \* the slow path: post the request
+               [] OTHER -> "PE"                                   \* else about to pin
     /\ sec = 1                                                    \* the first section
     /\ got = A                                                    \* no load yet
     /\ capR = FALSE                                               \* nothing captured
     /\ cached = FALSE                                             \* the cache is empty
     /\ pend = FALSE                                               \* no read in flight
+    /\ myEra = IF Path = "Fresh" THEN 0 ELSE 1                    \* the era its slot keeps
+    /\ cachedOk = (Path # "Fresh")                                \* a new thread's cached_epoch is 0
+    /\ spass = 1                                                  \* the slow path's first pass
+    /\ slist = EMPTY                                              \* nothing taken
+    /\ slo = EMPTY                                                \* nothing read
     /\ pcW = "WS"                                                 \* the writer is about to swap
     /\ held = FALSE                                               \* A in no slot
     /\ scan = "none"                                              \* no scan yet
+    /\ pcH = IF Path = "Helped" THEN "H1" ELSE "Done"             \* the helper looks for requests
+    /\ hlo = EMPTY                                                \* nothing read
+    /\ hlist = EMPTY                                              \* nothing taken
+    /\ hcached = FALSE                                            \* its cache is empty
     /\ freed = FALSE                                              \* A is live
     /\ rd = 0                                                     \* no read of A yet
     /\ uaf = "none"                                               \* no use after free
@@ -635,8 +580,9 @@ Init ==
     /\ rfree = FALSE                                              \* the reader freed nothing
 
 Next ==
-    \/ RPE \/ RPX \/ RPF \/ RPT \/ RPL \/ RRD \/ Satisfy \/ RLE \/ RLX \/ RLT \/ RLD \* the reader's steps
-    \/ WWS \/ WWF \/ WWL \/ WWE \/ WWIL \/ WWIE \/ WWIX \/ WWIR \/ WWIC \/ WWIU \/ WWA \/ WWD \* the writer's steps
+    \/ ReaderStep                                                 \* the reader's steps
+    \/ WriterStep                                                 \* the writer's steps
+    \/ HelperStep                                                 \* the helper's steps
     \/ Drain("R")                                                 \* TSO: the reader's buffer drains
     \/ (Terminated /\ UNCHANGED vars)                             \* done: no deadlock
 
@@ -652,9 +598,16 @@ Spec == Init /\ [][Next]_vars
 \* free cannot happen before it). Under SC, TSO and ARMLB, no read returns after the free.
 NoUseAfterFree == uaf = "none"
 
-\* The same promise, broken only on the path the traced miri run took: the scan read the slot's
-\* list word active and its era tagged, and skipped it (skip_era).
+\* The same promise, broken only on one path of the scan: each names the decision the scan took
+\* for the reader's slot when A was freed under a read.
+\* The traced miri path: the list word active and the era tagged.
 NoUseAfterFreeSkipEra == ~(uaf # "none" /\ scan = "skip_era")
+\* Edge 3: the thread count read without the reader's ID, its slot never visited.
+NoUseAfterFreeOutOfRange == ~(uaf # "none" /\ scan = "skip_range")
+\* Suspect 4: the era untagged but below A's birth (the 0 an escalated leave kept).
+NoUseAfterFreeSkipEpoch == ~(uaf # "none" /\ scan = "skip_epoch")
+\* Suspect 5: a sequence number odd (the slot in a hand-over).
+NoUseAfterFreeSkipSeqno == ~(uaf # "none" /\ scan = "skip_seqno")
 
 \* When the run is over, A was freed: the promise above is not kept by never freeing A.
 FreedAtEnd == Terminated => freed
@@ -666,4 +619,10 @@ NoSkipEra == scan # "skip_era"
 NoStaleLoad == ~stale
 \* The reader frees A (the writer's insert left A in the slot, and the reader traversed it).
 NoReaderFree == ~rfree
+\* The scan reads the thread count without the reader's ID.
+NoSkipRange == scan # "skip_range"
+\* The scan skips the slot on an untagged era below A's birth.
+NoSkipEpoch == scan # "skip_epoch"
+\* The scan skips the slot on an odd sequence number.
+NoSkipSeqno == scan # "skip_seqno"
 =============================================================================

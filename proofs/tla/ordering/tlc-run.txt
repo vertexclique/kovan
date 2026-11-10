@@ -1,25 +1,44 @@
-TLC run of every configuration in proofs/tla/ordering, 2026-11-09 23:35 UTC.
+TLC run of every configuration in proofs/tla/ordering, 2026-11-10 02:10 UTC.
 Written by proofs/tla/run_tlc.sh, not by hand. Version 2.19 of 08 August 2024.
-Java -Xmx8g; -workers 1, or 1 worker where a violation is expected. Limit: 120 s each.
+Java -Xmx8g; -workers auto, or 1 worker where a violation is expected. Limit: 3600 s each.
 
 configuration                         generated   distinct    sec  result                     expected                   match
-LS_c11_fence                              18856      10111      2  pass                       pass                       yes
-LS_c11_scload                             11705       6260      1  pass                       pass                       yes
-LS_tso_024                                 2520       1465      1  pass                       pass                       yes
-LS_sc_024                                  2002       1173      2  pass                       pass                       yes
-LS_armlb_fixed                            18964      10168      1  pass                       pass                       yes
+LS_c11_fence                              14364       7705      3  pass                       pass                       yes
+LS_c11_scload                             11179       6086      1  pass                       pass                       yes
+LS_tso_024                                 2520       1465      2  pass                       pass                       yes
+LS_sc_024                                  2002       1173      1  pass                       pass                       yes
+LS_armlb_fixed                            14472       7762      2  pass                       pass                       yes
 LS_mut_c11_024                              199        121      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
-LS_mut_c11_024_era                          286        171      2  violated:NoUseAfterFreeSkipEra violated:NoUseAfterFreeSkipEra yes
-LS_mut_no_pin_fence                         199        121      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_c11_024_era                          286        171      1  violated:NoUseAfterFreeSkipEra violated:NoUseAfterFreeSkipEra yes
+LS_mut_no_pin_fence                         199        121      2  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
 LS_mut_no_pin_fence_era                    1840        993      1  violated:NoUseAfterFreeSkipEra violated:NoUseAfterFreeSkipEra yes
 LS_mut_relaxed_tag                          331        204      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
-LS_mut_relaxed_tag_scload                   243        152      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_mut_relaxed_tag_scload                   243        152      2  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
 LS_mut_armlb_relaxed_tag                    461        271      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
 LS_mut_tso_store_activation                 206        108      1  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
 LS_wit_skip_era                             152         99      2  violated:NoSkipEra         violated:NoSkipEra         yes
 LS_wit_skip_era_scload                      117         78      1  violated:NoSkipEra         violated:NoSkipEra         yes
 LS_wit_skip_era_tso                         116         77      1  violated:NoSkipEra         violated:NoSkipEra         yes
 LS_wit_stale_load                            24         19      1  violated:NoStaleLoad       violated:NoStaleLoad       yes
-LS_wit_reader_free                          737        444      1  violated:NoReaderFree      violated:NoReaderFree      yes
+LS_wit_reader_free                          737        444      2  violated:NoReaderFree      violated:NoReaderFree      yes
+LS_fresh_scload                            5118       2833      1  pass                       pass                       yes
+LS_fresh_fence                             6590       3612      2  pass                       pass                       yes
+LS_fresh_release_claim                     5319       2919      1  pass                       pass                       yes
+LS_fresh_sc_claim_alone                    4055       2238      1  pass                       pass                       yes
+LS_tso_fresh_024                           1620        944      2  pass                       pass                       yes
+LS_mut_count_before_fence                   400        247      1  violated:NoUseAfterFreeOutOfRange violated:NoUseAfterFreeOutOfRange yes
+LS_mut_count_before_fence_sc_claim          436        271      1  violated:NoUseAfterFreeOutOfRange violated:NoUseAfterFreeOutOfRange yes
+LS_mut_release_claim_no_transition_fence          322        195      2  violated:NoUseAfterFreeOutOfRange violated:NoUseAfterFreeOutOfRange yes
+LS_wit_skip_range                            13         11      1  violated:NoSkipRange       violated:NoSkipRange       yes
+LS_esc_release_untag                      84139      43176      2  pass                       pass                       yes
+LS_esc_keep_era                           93414      47534      3  pass                       pass                       yes
+LS_mut_relaxed_untag                      13233       7025      1  violated:NoUseAfterFreeSkipEpoch violated:NoUseAfterFreeSkipEpoch yes
+LS_mut_relaxed_untag_fence                13622       7250      2  violated:NoUseAfterFreeSkipEpoch violated:NoUseAfterFreeSkipEpoch yes
+LS_wit_skip_epoch                          5588       3132      2  violated:NoSkipEpoch       violated:NoSkipEpoch       yes
+LS_helped_fence_last                     895534     358035      7  pass                       pass                       yes
+LS_mut_helped_fence_first                513206     185895     15  violated:NoUseAfterFreeSkipSeqno violated:NoUseAfterFreeSkipSeqno yes
+LS_wit_skip_seqno                          1516        699      1  violated:NoSkipSeqno       violated:NoSkipSeqno       yes
+LS_mut_armlb_helped_fence_first          576181     210223     11  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+LS_tso_helped_fence_first                 15953       6581      2  pass                       pass                       yes
 
-results matching EXPECTED.txt: 18 of 18
+results matching EXPECTED.txt: 37 of 37

@@ -478,8 +478,14 @@ impl ThreadSlots {
     pub(crate) fn activate(&self, index: usize) -> u64 {
         let era = self.epoch[index].load_lo();
         if era_left(era) {
-            // Relaxed: the exchange that follows releases it.
-            self.epoch[index].store_lo(era & !ERA_INACTIVE, Ordering::Relaxed);
+            // Release, as the leave's tag is: a scan may read the list word
+            // as an earlier section left it (active) and this era. After a
+            // section that escalated the era kept is 0, which covers no
+            // batch, so that scan skips the slot without an exchange of its
+            // own; only a Release store here orders the earlier section's
+            // reads before the free that follows. A relaxed store carries no
+            // release, not even the leave's before it.
+            self.epoch[index].store_lo(era & !ERA_INACTIVE, Ordering::Release);
         }
         self.first[index].exchange_lo(0, Ordering::SeqCst)
     }

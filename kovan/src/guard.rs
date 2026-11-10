@@ -849,11 +849,15 @@ impl Handle {
         let result_epoch = slots.state[index].result.load_hi();
         slots.epoch[index].store_lo(result_epoch, Ordering::Release);
         slots.epoch[index].store_hi(seqno + 2, Ordering::Release);
-        // Mirror the published epoch and order it before this critical
-        // section's pointer loads (Dekker pairing, see protect_load).
+        slots.first[index].store_hi(seqno + 2, Ordering::Release);
+        // Mirror the published epoch and order it, and both seqnos, before
+        // this critical section's pointer loads (Dekker pairing, see
+        // protect_load). The fence comes after the list's seqno: a scan
+        // skips a slot whose list seqno it reads odd, and a store made
+        // after the fence is one a scan past its own fence may still miss,
+        // while this section's loads miss that scan's unlink.
         self.mirror_transition(result_epoch);
         fence(Ordering::SeqCst);
-        slots.first[index].store_hi(seqno + 2, Ordering::Release);
 
         // Check if the result pointer is already retired (need to protect
         // it): its batch's refs-node goes into the list as its terminal

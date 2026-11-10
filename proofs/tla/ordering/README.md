@@ -38,6 +38,43 @@ submits at once while readers pin, load and read) printed, for the racing reader
 `slot=(2,0) first=0x0 epoch=0x8000000000000009 -> skip_era`: the list word active, the era
 tagged. `LS_mut_c11_024_era` and `LS_mut_no_pin_fence_era` break the property on that path.
 
+## Three more places (0.2.5)
+
+The same family checks three orders found after the two edges, each a path of its own
+(`Path` in the configurations; `LeaveScanMemory.tla` holds the memory models, `LeaveScanSlowPath.tla`
+the helped slow path):
+
+- **The thread count** (`Path = "Fresh"`). A retire's scan visits the slots of the thread IDs below
+  a count. 0.2.4 read the count before the scan's fence, and a thread claimed its ID with a Release
+  compare-exchange: a reader that claimed, pinned and loaded A could be past the count, and A was
+  freed under its read. Miri reproduced it (a fresh reader thread per round). 0.2.5 reads the
+  count after the fence and claims with SeqCst. `LS_mut_count_before_fence` and
+  `LS_mut_count_before_fence_sc_claim` break it; `LS_fresh_scload` and `LS_fresh_fence` hold.
+  `LS_fresh_release_claim` shows the move alone holds only because a thread's first pin fences,
+  and `LS_mut_release_claim_no_transition_fence` takes that fence away; `LS_fresh_sc_claim_alone`
+  shows the SeqCst claim does not need it.
+- **The untag store after an escalated section** (`Path = "Escalate"`). A section whose protected
+  load escalated leaves its slot with the era 0, and the next activation stored that 0 without the
+  tag, Relaxed. A scan that reads the list word as the escalated section left it and that 0 skips
+  the slot with no exchange of its own, and a relaxed store carries no release: nothing ordered the
+  escalated section's reads before the free. 0.2.5 stores it Release. `LS_mut_relaxed_untag`
+  (and `_fence`) break it under C11; `LS_esc_release_untag` holds, as does `LS_esc_keep_era`, the
+  fix not taken. Under TSO and ARM's load buffering the old order holds: a data race in the
+  language's model, not a read of freed memory on those machines. Found by reading and by this
+  model; no test reaches it (it takes sixteen epoch advances inside one load).
+- **The helped slow path's fence** (`Path = "Helped"`). A pin answered by a helper stored its era
+  and the era's sequence number, fenced, and only then stored the list's sequence number. A scan
+  skips a slot whose list sequence number is odd, and a store after the pin's fence is one the scan
+  may miss while the pin's load misses the scan's swap. 0.2.5 fences after the three stores.
+  `LS_mut_helped_fence_first` breaks it under C11 and `LS_mut_armlb_helped_fence_first` under
+  ARM's load buffering; `LS_tso_helped_fence_first` holds (on x86-64 the locked `dec_slow` that
+  follows drains the buffer); `LS_helped_fence_last` holds. Found by reading and by this model; no
+  test reaches it (the slow path takes sixteen failed transitions).
+
+The Lean laws these rest on are the general ones of `lean/Kovan/Ordering/`: `release_tag_orders`
+for a Release store read by an Acquire load, `fences_forbid_sb` for two fences, and
+`ThreadCount.lean` for the count.
+
 ## What is transcribed from the code
 
 `kovan/src/slot.rs`, `guard.rs`, `reclaim.rs` and `atomic.rs` as of 0.2.4, one reader slot:
@@ -182,33 +219,33 @@ Lines as of kovan 0.2.5.
 
 | label | function | code | step |
 |---|---|---|---|
-| `PE` | `Guard::enter`, `ThreadSlots::activate` | `guard.rs:662`, `slot.rs:479-483` | the era word's load (the reader's own last store) and its store without the tag, Relaxed |
-| `PX` | `ThreadSlots::activate` | `slot.rs:484` | `exchange_lo(0)`, SeqCst (`Activation = "Store"`: a plain store) |
-| `PF` | `publish_fence` | `guard.rs:663`, `guard.rs:1981-1984` | `fence(SeqCst)`; compiled out on x86-64, in 0.2.4 and 0.2.5 (0.2.5 makes `PL` SeqCst instead) |
-| `PT` | `Guard::enter_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:675-680`, `guard.rs:1694-1702`, `reclaim.rs:291-297` | the captured node's batch count, `fetch_sub(1)` AcqRel; zero puts it on the cache |
+| `PE` | `Guard::enter`, `ThreadSlots::activate` | `guard.rs:662`, `slot.rs:479-489` | the era word's load (the reader's own last store) and its store without the tag, Relaxed in 0.2.4, Release in 0.2.5 (`UntagOrder`) |
+| `PX` | `ThreadSlots::activate` | `slot.rs:490` | `exchange_lo(0)`, SeqCst (`Activation = "Store"`: a plain store) |
+| `PF` | `publish_fence` | `guard.rs:663`, `guard.rs:1985-1988` | `fence(SeqCst)`; compiled out on x86-64, in 0.2.4 and 0.2.5 (0.2.5 makes `PL` SeqCst instead) |
+| `PT` | `Guard::enter_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:675-680`, `guard.rs:1698-1706`, `reclaim.rs:291-297` | the captured node's batch count, `fetch_sub(1)` AcqRel; zero puts it on the cache |
 | `PL` | `Atomic::load`, `protect_load` | `atomic.rs:115-118`, `guard.rs:344-372` | `data.load(order)` in 0.2.4 (`ProtectLoad = "Acquire"`), `data.load(Ordering::SeqCst)` in 0.2.5 (`"SeqCst"`); the epoch unchanged, the fast path returns it |
 | `RD`, `Satisfy` | the caller | | the read of the node through the guard; `Satisfy` completes it late (ARMLB) |
-| `LE` | `Guard::leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:482-488`, `guard.rs:520-521`, `slot.rs:495-504` | `store_lo(kept \| ERA_INACTIVE)`, Relaxed in 0.2.4, Release in 0.2.5 |
-| `LX` | `ThreadSlots::leave` | `slot.rs:505` | `exchange_lo(INVPTR)`, AcqRel |
+| `LE` | `Guard::leave`, `leave_slot`, `ThreadSlots::leave` | `guard.rs:482-488`, `guard.rs:520-521`, `slot.rs:501-510` | `store_lo(kept \| ERA_INACTIVE)`, Relaxed in 0.2.4, Release in 0.2.5 |
+| `LX` | `ThreadSlots::leave` | `slot.rs:511` | `exchange_lo(INVPTR)`, AcqRel |
 | `LT` | `leave_cold`, `traverse_onto_cache`, `reclaim::traverse` | `guard.rs:506-509`, `reclaim.rs:291-297` | the captured node's count, `fetch_sub(1)` |
-| `LD` | `leave_cold`, `drain_free_list` | `guard.rs:510-512`, `guard.rs:1710` | the cache drained: A freed when its count reached zero |
+| `LD` | `leave_cold`, `drain_free_list` | `guard.rs:510-512`, `guard.rs:1714` | the cache drained: A freed when its count reached zero |
 | `WS` | `Atomic::swap` | `atomic.rs:262-263` | `swap(B)`, AcqRel (the caller's order); A retired |
-| `WF` | `try_retire` | `guard.rs:1431` | `fence(SeqCst)` |
-| `WL` | `try_retire` | `guard.rs:1446-1449` | `first[j].load_lo()`, Acquire: INVPTR skips |
-| `WE` | `try_retire` | `guard.rs:1454-1457` | `epoch[j].load_lo()`, Acquire: a tagged era skips (`era_covers`) |
-| `WIL` | `try_retire` | `guard.rs:1533` | the list word re-checked |
-| `WIE` | `try_retire` | `guard.rs:1539` | the era re-checked |
-| `WIX` | `try_retire` | `guard.rs:1547` | `exchange_lo(A)`, AcqRel |
-| `WIR` | `try_retire` | `guard.rs:1559-1570` | [InsertRollback] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
-| `WIC` | `try_retire` | `guard.rs:1606` | [InsertCheck] the era word, Acquire: tagged, undo |
-| `WIU` | `try_retire` | `guard.rs:1607-1617` | [InsertUndo] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
-| `WA` | `try_retire` | `guard.rs:1621-1626` | `refs_or_next.fetch_add(adjs)`, AcqRel; zero puts the batch on the cache |
-| `WD` | `enqueue_due`, `drain_free_list` | `guard.rs:1254-1256` | the writer's cache drained: A freed |
+| `WF` | `try_retire` | `guard.rs:1435` | `fence(SeqCst)` |
+| `WL` | `try_retire` | `guard.rs:1450-1453` | `first[j].load_lo()`, Acquire: INVPTR skips |
+| `WE` | `try_retire` | `guard.rs:1458-1461` | `epoch[j].load_lo()`, Acquire: a tagged era skips (`era_covers`) |
+| `WIL` | `try_retire` | `guard.rs:1537` | the list word re-checked |
+| `WIE` | `try_retire` | `guard.rs:1543` | the era re-checked |
+| `WIX` | `try_retire` | `guard.rs:1551` | `exchange_lo(A)`, AcqRel |
+| `WIR` | `try_retire` | `guard.rs:1563-1574` | [InsertRollback] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
+| `WIC` | `try_retire` | `guard.rs:1610` | [InsertCheck] the era word, Acquire: tagged, undo |
+| `WIU` | `try_retire` | `guard.rs:1611-1621` | [InsertUndo] `compare_exchange_lo(A, INVPTR)`; failed, A counts |
+| `WA` | `try_retire` | `guard.rs:1625-1630` | `refs_or_next.fetch_add(adjs)`, AcqRel; zero puts the batch on the cache |
+| `WD` | `enqueue_due`, `drain_free_list` | `guard.rs:1258-1260` | the writer's cache drained: A freed |
 | `Drain` | (TSO) | | the oldest buffered store of the reader reaches memory |
 
 ## TLC results
 
-The run recorded in `tlc-run.txt` (one worker each, pinned to six CPUs, TLC 2.19): 18 of 18
+The run recorded in `tlc-run.txt` (one worker each, pinned to six CPUs, TLC 2.19): 37 of 37
 configurations match `EXPECTED.txt`. The largest passing one is `LS_armlb_fixed` (10,168 distinct
 states); every configuration finishes in 2 s or less, every mutation and witness within 1,840
 generated states.
