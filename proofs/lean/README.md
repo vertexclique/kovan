@@ -10,7 +10,9 @@ any size.
 
 The models here are sequential: one thread doing one operation at a time. That suits facts
 about arithmetic and bookkeeping, such as a threshold or a bound on how much work any sequence
-of operations can cause. How threads interleave is checked by the TLA+ models in `../tla/`.
+of operations can cause. How threads interleave is checked by the TLA+ models in `../tla/`. The
+files under `Kovan/Ordering/` are of another kind: they model memory orderings, which loads see
+which stores, on x86-64 and under the C11 rules (see "Memory orderings" below).
 
 ### The first proof: the hopscotch map's shrink threshold
 
@@ -186,6 +188,72 @@ two rings of 16 slots, whose tickets and turn words count to `2^64` and then wra
 
 `Kovan/Magazine.lean` proves these; the TLA+ model in `../tla/magazine` checks the threads'
 interleavings.
+
+### Memory orderings: the pin, the scan, the leave and the thread count
+
+One writer swaps a shared pointer, retires the old value and submits it at once, while readers
+pin, load the pointer and read the value. In three places kovan 0.2.4 relied on an ordering that
+the C11 rules (which Rust's atomics follow) do not give.
+
+1. The pin against the scan. The reader's pin exchanges its slot word to active (`SeqCst`), then
+   loads the pointer (`Acquire`). The writer swaps the pointer, runs `fence(SeqCst)`, then reads
+   the slot word. The two must never both miss: the reader loading the old pointer while the scan
+   reads the slot inactive and frees the old value. On x86-64, where `publish_fence` compiled to
+   nothing, the C11 rules allow both to miss: the scan's fence may come before the activation in
+   the order of `SeqCst` events, and nothing makes the reader's `Acquire` load see the swap.
+   x86-64 itself forbids it, because a locked instruction empties the core's store buffer before
+   the next load. 0.2.5 orders it by the rules on every target: a `SeqCst` fence after the
+   activation (fence against fence), or a `SeqCst` load.
+2. The leave against the scan. The drop stores the `ERA_INACTIVE` tag on the slot's era word,
+   then exchanges the list word. A scan that reads the list word still active and the tag set
+   skips the slot, and the value can be freed at once. With a `Relaxed` tag store nothing makes
+   the reader's reads of the value happen before that free: a data race, a use after free on ARM
+   or POWER (x86-64 never moves a load after a later store). With a `Release` tag store the
+   scan's `Acquire` load of the tag synchronizes with it, and the reads happen before the free.
+3. The thread count against a new thread's claim. A new thread claims its ID with a
+   compare-exchange of the thread count (`Release` in 0.2.4), then pins and loads the pointer.
+   The scan read the count before its `fence(SeqCst)` and visited only the threads below it. No
+   rule ties a load before a fence to the order of `SeqCst` events, so the count could miss the
+   claim (the scan never visits the new thread) while the new thread's load, before the scan's
+   fence in that order, read the old pointer. 0.2.5 reads the count after the fence and makes
+   the claim `SeqCst`: a count read after the fence that missed a `SeqCst` claim puts the fence
+   before the claim in that order, so before the load, which then sees the swap. A `SeqCst` fence
+   on the reader's side between the claim and the load (a new thread's first pin runs one) does
+   the same for a claim of any order.
+
+`Kovan/Ordering/Tso.lean` proves the x86-64 half on an operational model of x86-64 (a store
+buffer per thread, drained oldest first): when each thread's write is a locked instruction or is
+followed by `MFENCE`, no run has both loads miss; with plain stores, a run does.
+`Kovan/Ordering/C11.lean` writes the C11 rules down: an execution's events, sequenced before,
+reads from, the modification order and the order `S` of `SeqCst` events, with synchronizes with
+(release sequences and the fence rules included), happens before and coherence order defined from
+them. The conditions [atomics.order] p4 puts on `S` are definitions, never axioms: each theorem
+takes the ones it rests on as hypotheses. `Kovan/Ordering/PinFence.lean` proves both of 0.2.5's
+fixes of the pin from those conditions, for every execution, and checks a concrete execution of
+0.2.4's x86-64 shape that obeys every rule and in which both miss. `Kovan/Ordering/ReleaseTag.lean`
+proves that a release tag orders every read before the free, also through any chain of `AcqRel`
+decrements of the batch's count, and checks a concrete execution with a relaxed tag that obeys
+every rule and in which the read and the free race; the same execution with a release tag obeys
+every rule too, and is ordered. `Kovan/Ordering/ThreadCount.lean` proves both ways a count read
+after the fence is ordered against the claim (a `SeqCst` claim, or a `SeqCst` fence on the
+reader's side), for every execution, and checks four concrete executions that obey every rule and
+in which both miss: the count before the fence with a `Release` claim, with a `SeqCst` claim, and
+with a fence on the reader's side as well, and the count after the fence with a `Release` claim
+and no fence on the reader's side. `Kovan/Ordering/EscalatedUntag.lean` checks a concrete
+execution of a pin after an escalated section whose untag store is relaxed: it obeys every rule,
+and the escalated section's read races with the free although the leave's tag is a release; with
+a release untag store the same execution is ordered. `Kovan/Ordering/HelpedFence.lean` proves
+that a helped pin whose fence follows its store of the list's sequence number never has both
+miss, and checks a concrete execution with the fence first that obeys every rule and in which
+both miss, the pin's load being `SeqCst`.
+
+What these cover: the C11 theorems hold for every execution of the shape they name, of any size;
+the concrete executions are single ones, each checked against every rule of `Consistent`; the
+x86-64 theorem covers every run of its two-thread program. The TLA+ model in `../tla/ordering`
+checks the interleavings at small sizes, under the same memory models: `LS_tso_024` (0.2.4 holds
+on x86-64), `LS_mut_no_pin_fence` (edge 2), `LS_mut_relaxed_tag` (edge 1), `LS_mut_armlb_relaxed_tag`
+(edge 1 reads freed memory on ARM and POWER), `LS_c11_fence` and `LS_c11_scload` (the two fixes);
+these files check the orderings themselves.
 
 ## What is proved
 
@@ -423,6 +491,103 @@ unlocking, the version checks) and `lib.rs` (the clock).
 | `clock_even`, `clock_no_wrap`, `clock_grows`, `write_version`, `clock_wraps` | the clock stays even, grows without wrapping for `2^63` fetch-adds, and then wraps to 0 |
 | `retry_iff_later`, `newer_iff` | a load retries on a version exactly when that commit's fetch-add came after the load's read of the clock |
 | `rank_cons_lt`, `rank_cons_ge`, `rank_mono`, `rank_lt`, `rank_lt_iff`, `rank_eq_iff` | renaming the numbers in use to their ranks keeps every comparison, as the TLA+ model does |
+
+`Kovan/Ordering/Tso.lean`, a model of x86-64's memory (total store order) running the pin against
+the scan (`kovan/src/guard.rs` `Handle::enter`, `publish_fence`, `try_retire`'s scan,
+`kovan/src/slot.rs` `ThreadSlots::activate`): two threads, each writes 1 to its own word (a plain
+store, a store then `MFENCE`, or a locked read-modify-write) and then loads the other's; a step
+runs a thread's next instruction or drains the oldest entry of a thread's store buffer.
+
+| theorem | what it says |
+|---------|--------------|
+| `instr_cases`, `store_at`, `rmw_at`, `fence_at`, `load_at`, `not_last`, `past_end` | what each index of the two programs holds, and that the load is last |
+| `inv_init`, `mem_one_stays`, `step_inv`, `inv_of_reach` | in every run a buffer holds only its own thread's 1, a word that holds 1 keeps it, and a thread whose write is locked or fenced has, once past its write, an empty buffer and its 1 in memory |
+| `readVal_other` | a thread's load of the other thread's word reads memory |
+| `step_sees`, `sees_of_reach`, `locked_or_fenced_sees` | when neither write is a plain store, every run in which both loads ran has one of them return the other thread's 1 |
+| `kovan_x86_sees` | kovan 0.2.4 on x86-64, both writes locked: the pin and the scan never both miss |
+| `plain_misses` | with two plain stores, a run in which both loads return 0 |
+
+`Kovan/Ordering/C11.lean`, the C11 rules (C++20 [intro.races], [atomics.order], [atomics.fences],
+without consume): an execution is its events' kinds, orders and words with sequenced before,
+reads from, the modification order and `S`; release sequences, synchronizes with (all four
+forms), happens before and coherence order are defined from them; [atomics.order] p4's
+conditions on `S` are the definitions `SbInS`, `HbInS`, `CoInS`, `CoScFence`, `FenceCoSc` and
+`FenceCoFence`; `Consistent` gathers every rule (well formed relations, acyclic happens before,
+coherence, read-modify-write atomicity, p4).
+
+| theorem | what it says |
+|---------|--------------|
+| `hb_of_sb`, `hb_of_sw`, `hb_trans` | sequenced before and synchronizes with are happens before, which is transitive |
+| `Consistent.sStrict`, `Consistent.sbInS` | a consistent execution has a strict `S` and meets p4's first condition for sequenced before |
+| `hb_sub`, `co_sub`, `TablesOk.hb_le`, `TablesOk.co_le`, `Consistent.of_tables` | happens before and coherence order lie inside any tables closed under their rules, and an execution whose tables meet every condition is consistent: how a concrete execution is checked by evaluation |
+
+`Kovan/Ordering/PinFence.lean`, the pin against the scan under the C11 rules (`kovan/src/guard.rs`
+`Handle::enter`, `publish_fence`, `protect_load`, `try_retire`'s scan): the reader's activation,
+fence or not, and load of the pointer; the writer's swap, fence and load of the slot word; "both
+miss" is each load reading a write older than the other thread's.
+
+| theorem | what it says |
+|---------|--------------|
+| `stale_co`, `scOp_atomic`, `S_asymm` | a load that missed a write is coherence-ordered before it; a `SeqCst` operation is atomic; no two events precede each other in a strict `S` |
+| `fences_forbid_sb` | (F) with a `SeqCst` fence on both sides, no execution meeting p4.4 with a strict `S` has both miss |
+| `sc_load_forbids_sb` | (S) with the writer's `SeqCst` fence and the reader's `SeqCst` activation and load, no execution meeting p4's first condition, p4.2 and p4.3 with a strict `S` has both miss |
+| `consistent_fences_forbid_sb`, `consistent_sc_load_forbids_sb` | the same for every consistent execution |
+| `pin024_consistent`, `pin024_shape`, `pin024_misses` | 0.2.4 on x86-64 (a `SeqCst` exchange, then an `Acquire` load, no fence): a consistent execution in which both miss |
+
+`Kovan/Ordering/ReleaseTag.lean`, the leave's era tag under the C11 rules (`kovan/src/slot.rs`
+`ThreadSlots::leave`, `kovan/src/guard.rs` `try_retire`'s scan, the batch's count): a read
+sequenced before the tag store, the scan's load of the tag, the free after it, directly or through
+the count's `AcqRel` decrements.
+
+| theorem | what it says |
+|---------|--------------|
+| `sw_of_rf`, `release_tag_orders` | a release write read by an acquire read synchronizes with it, so a read sequenced before a release tag store happens before everything after the scan's load of the tag |
+| `rmwChain_hb`, `count_chain_orders` | a chain of `AcqRel` read-modify-writes, each reading the one before, carries happens before from the scan to the free |
+| `every_read_orders`, `release_tag_no_race` | with a release tag store every read before it happens before the free, and none races with it |
+| `leave024_tables`, `leave024_consistent`, `leave024_shape`, `leave024_race` | 0.2.4's `Relaxed` tag store: a consistent execution in which the scan skips the leaving reader and its read races with the free |
+| `leave025_tables`, `leave025_consistent`, `leave025_orders` | the same execution with a `Release` tag store is consistent and its read happens before the free |
+
+`Kovan/Ordering/ThreadCount.lean`, the thread count against a new thread's claim under the C11
+rules (`kovan/src/guard.rs` `try_retire`'s scan and its read of `max_threads`, `kovan/src/slot.rs`
+`ASMRState::alloc_tid`): the new thread's claim of its ID, activation, fence or not, and load of
+the pointer; the writer's swap, fence and read of the thread count, before or after the fence;
+"both miss" is the count reading a value older than the claim and the load reading the old
+pointer.
+
+| theorem | what it says |
+|---------|--------------|
+| `sc_after_fence_sees`, `fenced_after_fence_sees` | Lemma P: a write sequenced before a `SeqCst` fence is seen by a `SeqCst` load after that fence in `S` (p4.2), and by a load after a `SeqCst` fence that follows it in `S` (p4.4) |
+| `fence_before_sc_claim`, `fence_before_reader_fence` | a count read after the scan's fence that missed the claim puts the fence before a `SeqCst` claim (p4.3), or before a `SeqCst` fence after the claim (p4.4), in `S` |
+| `count_after_fence_sc_claim` | (S) the count read after the fence, a `SeqCst` claim sequenced before a `SeqCst` load: no execution meeting p4's first condition, p4.2 and p4.3 with a strict `S` has both miss |
+| `count_after_fence_reader_fence` | (F) the count read after the fence, a `SeqCst` fence between the claim and the load: no execution meeting p4.4 with a strict `S` has both miss, whatever the orders of the claim and the load |
+| `consistent_count_after_fence_sc_claim`, `consistent_count_after_fence_reader_fence` | the same for every consistent execution |
+| `count024_consistent`, `count024_shape`, `count024_misses` | the count read before the fence and a `Release` claim, as in 0.2.4 (with the load `SeqCst`, as the pin's fix made it): a consistent execution in which both miss |
+| `count_before_fence_consistent`, `count_before_fence_shape`, `count_before_fence_misses` | the same with a `SeqCst` claim: reading the count before the fence breaks it alone |
+| `count_before_fence_reader_fence_consistent`, `count_before_fence_reader_fence_shape`, `count_before_fence_reader_fence_misses` | the same with a `SeqCst` fence on the reader's side as well |
+| `count_release_claim_consistent`, `count_release_claim_shape`, `count_release_claim_misses` | the count read after the fence, a `Release` claim and no fence on the reader's side: a consistent execution in which both miss |
+| `count_sc_claim_inconsistent`, `count_reader_fence_inconsistent` | the same events with (S), or with (F) and a `Release` claim, have no consistent execution in which both miss |
+
+`Kovan/Ordering/EscalatedUntag.lean`, the activation's untag store after an escalated section
+(`kovan/src/slot.rs` `ThreadSlots::activate` and `leave`, `kovan/src/guard.rs` `escalate` and
+`try_retire`'s scan): the escalation's store and fence, the read of the value, the leave's
+`Release` tag and exchange, the next activation's store of the era 0 without the tag; the scan's
+loads of the list word (as the escalated section left it) and of that era, and the free.
+
+| theorem | what it says |
+|---------|--------------|
+| `untagRlx_tables`, `untagRlx_consistent`, `untagRlx_shape`, `untagRlx_race` | with a `Relaxed` untag store (before 0.2.5): a consistent execution in which the read and the free race, although the leave's tag is `Release`: a relaxed store carries no release |
+| `untagRel_tables`, `untagRel_consistent`, `untagRel_orders` | the same execution with a `Release` untag store (0.2.5) is consistent and its read happens before the free (`release_tag_orders`) |
+
+`Kovan/Ordering/HelpedFence.lean`, the fence of a pin answered by a helper (`kovan/src/guard.rs`
+`slow_path`, the stores after the request is answered, and `try_retire`'s scan of the list's
+sequence number): the pin's fence, its `Release` store of the list's sequence number and its
+`SeqCst` load of the pointer; the writer's swap, fence and scan; "both miss" is the scan reading
+the odd sequence number and the load reading the old pointer.
+
+| theorem | what it says |
+|---------|--------------|
+| `helped_fence_last`, `consistent_helped_fence_last` | the store sequenced before the pin's fence (0.2.5): no execution meeting p4.4 with a strict `S` has both miss (`fences_forbid_sb` with the store in the activation's place) |
+| `fenceFirst_consistent`, `fenceFirst_shape`, `fenceFirst_misses` | the fence before the store (before 0.2.5): a consistent execution in which both miss, the pin's load being `SeqCst` |
 
 ## How to check it
 

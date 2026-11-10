@@ -471,15 +471,21 @@ impl ThreadSlots {
     /// (`try_retire`, `InsertCheck`). The exchange, never a store: the slot
     /// left INVPTR may hold a node a retire exchanged in and has not rolled
     /// back yet; the exchange takes it, the rollback then fails and counts
-    /// the node, and the caller's traversal balances that count. SeqCst, the
-    /// full barrier the scan's fence pairs with on x86-64; elsewhere the
-    /// caller follows it with `publish_fence`.
+    /// the node, and the caller's traversal balances that count. SeqCst; on
+    /// x86-64 the guard's SeqCst protected loads pair with the scan's fence,
+    /// elsewhere the caller follows it with `publish_fence`.
     #[inline(always)]
     pub(crate) fn activate(&self, index: usize) -> u64 {
         let era = self.epoch[index].load_lo();
         if era_left(era) {
-            // Relaxed: the exchange that follows releases it.
-            self.epoch[index].store_lo(era & !ERA_INACTIVE, Ordering::Relaxed);
+            // Release, as the leave's tag is: a scan may read the list word
+            // as an earlier section left it (active) and this era. After a
+            // section that escalated the era kept is 0, which covers no
+            // batch, so that scan skips the slot without an exchange of its
+            // own; only a Release store here orders the earlier section's
+            // reads before the free that follows. A relaxed store carries no
+            // release, not even the leave's before it.
+            self.epoch[index].store_lo(era & !ERA_INACTIVE, Ordering::Release);
         }
         self.first[index].exchange_lo(0, Ordering::SeqCst)
     }
@@ -494,9 +500,14 @@ impl ThreadSlots {
     pub(crate) fn leave(&self, index: usize) -> u64 {
         let era = self.epoch[index].load_lo() & !ERA_INACTIVE;
         let kept = if era == EPOCH_UNCONDITIONAL { 0 } else { era };
-        // Relaxed: the exchange that follows releases it, and a retire reads
-        // it only after an exchange of its own on the list word.
-        self.epoch[index].store_lo(kept | ERA_INACTIVE, Ordering::Relaxed);
+        // Release: a retire's scan reads the era with a plain Acquire load
+        // after a plain load of the list word (`try_retire`, the scan and the
+        // insert's re-check), not only after an exchange of its own. A scan
+        // that reads the list word still active and this tag skips the slot,
+        // and the batch is freed elsewhere: only a Release store makes this
+        // section's reads happen before that free. Relaxed held on x86, which
+        // keeps loads ahead of later stores; ARM and POWER do not.
+        self.epoch[index].store_lo(kept | ERA_INACTIVE, Ordering::Release);
         self.first[index].exchange_lo(INVPTR as u64, Ordering::AcqRel)
     }
 }
@@ -667,10 +678,13 @@ impl ASMRState {
             // tid whose page doesn't exist yet.
             self.ensure_page(page_idx);
             // Strong: a failure means another thread took `current`, never a
-            // spurious one, which keeps the retries bounded.
+            // spurious one, which keeps the retries bounded. SeqCst: a scan
+            // that reads `next_tid` after its fence (`try_retire`) must see an
+            // ID claimed before that fence in the SeqCst order, and only an SC
+            // write is placed in that order; Release orders the page.
             if self
                 .next_tid
-                .compare_exchange(current, current + 1, Ordering::Release, Ordering::Relaxed)
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::Relaxed)
                 .is_ok()
             {
                 return current;

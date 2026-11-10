@@ -1,3 +1,15 @@
 TLC run of every configuration in proofs/tla/reclaim: not measured yet.
 The model changed (the pin's activation and the era tag, README.md); the results are filled from the
 CI run (.github/workflows/tla.yml), and `bash proofs/tla/run_tlc.sh local` rewrites this file.
+
+The configurations of "A writer and two readers" (README.md), measured locally on 2026-11-10 by
+`TLC_WORKERS=1 bash proofs/tla/run_tlc.sh reclaim <configuration>...` (TLC 2.19, one worker, the
+rows as the script printed them); a full run rewrites this file.
+
+configuration                         generated   distinct    sec  result                     expected                   match
+RC_swap_readers                          221348      81660     20  pass                       pass                       yes
+RC_swap_readers_turn                      32215      15908      7  pass                       pass                       yes
+RC_live_swap_readers_turn                 32215      15908     19  pass                       pass                       yes
+RC_mut_pin_skips_readers                  51238      19284      6  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+RC_mut_early_free_readers                143869      55364     13  violated:NoUseAfterFree    violated:NoUseAfterFree    yes
+RC_mut_tag_clear_late_readers             11062       5118      4  violated:PinnedIsActive    violated:PinnedIsActive    yes

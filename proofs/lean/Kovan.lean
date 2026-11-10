@@ -8,6 +8,13 @@ import Kovan.LeaveTag
 import Kovan.HopscotchShrinkThreads
 import Kovan.Magazine
 import Kovan.Mvcc
+import Kovan.Ordering.C11
+import Kovan.Ordering.EscalatedUntag
+import Kovan.Ordering.HelpedFence
+import Kovan.Ordering.PinFence
+import Kovan.Ordering.ReleaseTag
+import Kovan.Ordering.ThreadCount
+import Kovan.Ordering.Tso
 import Kovan.Recycle
 import Kovan.SegQueue
 import Kovan.Stm

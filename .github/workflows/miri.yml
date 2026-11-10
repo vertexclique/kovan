@@ -13,6 +13,8 @@ jobs:
   miri:
     name: Miri
     runs-on: ubuntu-latest
+    # The suite takes about 26 minutes; the multi-seed reclamation tests add at most 10.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

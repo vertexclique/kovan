@@ -1,0 +1,1323 @@
+Error: Invariant NoSkipEra is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "PE"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "inv",
+  E |-> [tag |-> TRUE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 2: <RPE line 121, col 5 to line 125, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "PX"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<<<"E", [tag |-> FALSE, e |-> 1]>>>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "inv",
+  E |-> [tag |-> TRUE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 3: <WWS line 376, col 5 to line 380, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "PX"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<<<"E", [tag |-> FALSE, e |-> 1]>>>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "inv",
+  E |-> [tag |-> TRUE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 4: <WWF line 397, col 5 to line 402, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "PX"
+/\ pcW = "WL"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<<<"E", [tag |-> FALSE, e |-> 1]>>>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "inv",
+  E |-> [tag |-> TRUE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 5: <Drain line 372, col 5 to line 377, col 50 of module LeaveScanMemory>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "PX"
+/\ pcW = "WL"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "inv",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 6: <RPX line 131, col 5 to line 140, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "PL"
+/\ pcW = "WL"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 7: <RPL line 209, col 5 to line 220, col 42 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LE"
+/\ pcW = "WL"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 2
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 8: <RLE line 316, col 5 to line 324, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LX"
+/\ pcW = "WL"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<<<"E", [tag |-> TRUE, e |-> 1]>>>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 2
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 9: <WWL line 406, col 5 to line 415, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LX"
+/\ pcW = "WE"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<<<"E", [tag |-> TRUE, e |-> 1]>>>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 2
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 10: <Drain line 372, col 5 to line 377, col 50 of module LeaveScanMemory>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LX"
+/\ pcW = "WE"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 2
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "empty",
+  E |-> [tag |-> TRUE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 11: <WWE line 433, col 5 to line 445, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LX"
+/\ pcW = "WA"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "inv",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> TRUE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_era"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 2
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 2,
+  L |-> "empty",
+  E |-> [tag |-> TRUE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+116 states generated, 77 distinct states found, 16 states left on queue.

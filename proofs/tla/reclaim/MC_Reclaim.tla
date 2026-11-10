@@ -280,6 +280,48 @@ P_pin_skips == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, P, Ld(1), U>>
 \* publication only when the epoch moved, all the way to the exits.
 P_pin_react == [t \in {1, 2} |-> IF t = 1 THEN <<P, Ld(1), U, P, Ld(1), U, P, Ld(1), U, Ex>>
                                           ELSE <<Wr(1), Fl, Wr(1), Fl, Ex>>]
+\* The shape of a workload that failed under Miri on kovan 0.2.4: one writer replaces a shared
+\* value and submits it at once, while readers each pin, load the value, read it under the guard
+\* and drop the guard, again and again. Under Miri one reader's drop (its leave and the drain
+\* after it) freed the value another reader was still reading, through two orderings this model
+\* takes as sequentially consistent (README.md, "Not modelled"). These programs run that shape
+\* in every interleaving the model allows. Thread 1 is the writer: it pins, swaps cell 1 to a
+\* fresh node (retiring node 1, the value the readers hold), drops its guard and flushes, so its
+\* batch of one is placed padded, one filler for each reader slot it finds eligible (RetireFreq 2:
+\* the write's retire only fills the batch, as the code's first retire of 64 does). Threads 2 and
+\* 3 are the readers, each with two sections of pin, load and drop. A reader's first pin
+\* publishes the epoch; a second pin that finds the epoch unchanged takes the fast path: the slot
+\* activated by its exchange, nothing published. A pointer a reader loaded is held, and may be
+\* read, until its guard drops, so a free under it breaks NoUseAfterFree.
+\* The three threads with no order between them are past the budget of one configuration (the
+\* run passed 800 thousand distinct states in three minutes on one worker, its queue still
+\* growing), so the writer starts at a chosen point of each reader's program, and the two programs
+\* below cover the shape in two halves.
+\* Both readers on the fast path while the writer runs. The writer starts once reader 2 has pinned
+\* its second section and reader 3 has loaded node 1 in its second section; nothing moved the
+\* epoch before, so both second pins took the fast path. Reader 2's load then meets the swap and
+\* both epoch advances in every order (node 1 or the fresh node, a raise, an escalation), and both
+\* readers' drops (their leaves, traversals and drains) race the writer's swap, retire, drop and
+\* padded flush, and each other, in every order. pin_skips_activation: the fast-path pins activate
+\* nothing, the flush's scan finds no reader slot active, and the flush frees node 1 while reader 3
+\* holds it. early_free: the flush places the batch in both readers' slots (its count 2), and one
+\* reader's drop takes the count to zero with its traversal and frees node 1 in its drain while
+\* the other reader holds it, the free Miri saw.
+P_swap_readers == [t \in {1, 2, 3} |-> IF t = 1 THEN <<After(2, 4), After(3, 5), P, Wr(1), U, Fl>>
+                                                ELSE <<P, Ld(1), U, P, Ld(1), U>>]
+\* A reader that drops its guard and pins again while the flush places. The writer starts once
+\* reader 2 has loaded node 1 in its first section and reader 3 has loaded it in its second (fast
+\* path) section. Reader 2 waits until the writer has dropped its guard, then drops its own (the
+\* tag, the exchange to INVPTR), pins again, loads and drops while the flush's scan and inserts
+\* run: an insert meets the tag before or after the leave's exchange (the rollback, the undo), or
+\* the next pin's activation. Reader 3 keeps node 1 until reader 2 has ended, then drops its
+\* guard, so reader 2's drop and drain run while the other reader still reads.
+\* tag_clear_late (the pin clears the tag after its exchange) lets an insert take its node back
+\* out of reader 2's active slot.
+P_swap_readers_turn == [t \in {1, 2, 3} |->
+                          CASE t = 1 -> <<After(2, 2), After(3, 5), P, Wr(1), U, Fl>>
+                            [] t = 2 -> <<P, Ld(1), After(1, 5), U, P, Ld(1), U>>
+                            [] t = 3 -> <<P, Ld(1), U, P, Ld(1), After(2, 7), U>>]
 \* The leave against an insert, once, with the reader parked for good after: thread 2 retires a
 \* node and flushes while thread 1 drops its guard, and exits. The insert that finds INVPTR must
 \* roll back, since no enter of thread 1 will ever take the word (no_rollback, as a lasso).

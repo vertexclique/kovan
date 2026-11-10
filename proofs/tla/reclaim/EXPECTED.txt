@@ -142,3 +142,9 @@ RC_mut_no_insert_recheck           MC_Reclaim         violated:NoBatchOnLeftSlot
 RC_mut_tag_clear_late              MC_Reclaim         violated:PinnedIsActive
 RC_mut_pin_skips_activation        MC_Reclaim         violated:NoUseAfterFree
 RC_wit_insert_undo                 MC_Reclaim         violated:NoInsertUndoW
+RC_swap_readers                    MC_Reclaim         pass
+RC_swap_readers_turn               MC_Reclaim         pass
+RC_live_swap_readers_turn          MC_Reclaim         pass
+RC_mut_pin_skips_readers           MC_Reclaim         violated:NoUseAfterFree
+RC_mut_early_free_readers          MC_Reclaim         violated:NoUseAfterFree
+RC_mut_tag_clear_late_readers      MC_Reclaim         violated:PinnedIsActive

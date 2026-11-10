@@ -4,6 +4,59 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
+## 0.2.5
+
+Every crate goes to 0.2.5.
+
+### Fixed
+
+- kovan: the drop of a thread's outermost `Guard` stores its slot's inactive tag with Release, not
+  Relaxed. A retire's scan reads that tag with a plain Acquire load and skips the slot when it sees
+  it, and the batch it skipped the slot for is freed by another thread: with a Relaxed store
+  nothing ordered the section's reads before that free. On x86 this held, as x86 keeps a load
+  ahead of a later store; on ARM and POWER a reader could still be reading a value when its batch
+  was freed, and under Rust's memory model it was a data race on every target. Test:
+  `tests/atom_reader_reclaim.rs`, `a_scan_that_reads_a_leave_sees_the_reads_before_it`.
+- kovan: a guard's protected load (`Atomic::load`, and through it every structure's) is `SeqCst`.
+  On x86-64 no fence follows the activation of an outermost `pin()` whose epoch did not move, and
+  in Rust's memory model an Acquire load after the activation's SeqCst exchange does not pair with
+  a retire's scan fence: the scan could miss the slot while the load still returned the value
+  being retired. An SC load that follows the scan's fence in the SeqCst order observes the
+  retirer's unlink. On x86-64 the hardware already behaved this way, and a `SeqCst` load is the
+  same instruction as an `Acquire` one: measured against 0.2.4, every case of the `throughput` and
+  `comparison` benches ties. A `fence(SeqCst)` after every pin, the other sound fix, cost 30% to
+  43% on the pin and single-thread load paths and 2% to 10% on read-heavy, swap and stack
+  workloads. Test: `a_pin_after_the_scan_never_loads_the_value_it_freed`.
+- kovan: a retire's scan reads the thread count after its fence, and a thread claims its ID with a
+  SeqCst compare-exchange. The count was read before the fence (as far back as 0.2.3), so a
+  thread that claimed its ID, pinned and loaded the value being retired could lie outside the
+  range the scan visited: the batch never counted it and was freed under its reads. On x86 the
+  locked compare-exchange and the retirer's locked swap kept it from happening; under Rust's memory
+  model it was a data race, and miri reproduced it with a fresh reader thread per round. Tests:
+  `a_scan_sees_a_reader_whose_thread_pinned_for_the_first_time`, and
+  `readers_of_a_rebuilt_index_while_a_writer_appends` for the three together. Miri runs the four
+  over 16 seeds (`miri.sh`); on 0.2.4 they failed on 256, 256, 242 and 256 of 256 seeds.
+- kovan: an outermost `pin()` stores its slot's era without the inactive tag with Release, not
+  Relaxed. After a section whose load escalated the era kept is 0, and a scan that read the slot's
+  list word from that section and this 0 skipped the slot with nothing ordering the section's reads
+  before the free: a data race under Rust's memory model (not on x86-64 or ARM hardware). Found by
+  reading; checked by the ordering model (`LS_mut_relaxed_untag`, `LS_esc_release_untag`) and in
+  Lean (`EscalatedUntag.lean`, `untagRlx_race`, `untagRel_orders`), as no test reaches an escalated
+  load.
+- kovan: a pin answered by a helper on the slow path fences after it stores its list's sequence
+  number, not before. A scan skips a slot whose list sequence number is odd; with the store after
+  the fence, the scan could skip the slot while the pin's first load returned the value being
+  retired. x86-64 was kept from it by the locked decrement that follows; the ordering model breaks
+  it under C11 and under ARM's load buffering (`LS_mut_helped_fence_first`,
+  `LS_mut_armlb_helped_fence_first`, `LS_helped_fence_last`), and Lean has the execution
+  (`HelpedFence.lean`, `fenceFirst_misses`, `helped_fence_last`). Found by reading; no test
+  reaches the helped slow path's race.
+
+### Changed behaviour
+
+- kovan: `Atomic::load` loads with `SeqCst` whatever `order` it is given, so an `order` that
+  `AtomicUsize::load` rejects (`Release`, `AcqRel`) no longer panics there.
+
 ## 0.2.4
 
 Every crate goes to 0.2.4.

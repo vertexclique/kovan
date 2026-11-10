@@ -1,0 +1,6813 @@
+Error: Invariant NoUseAfterFreeSkipSeqno is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "H1"
+/\ pcR = "SQ"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 2: <SQ line 55, col 5 to line 60, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "H1"
+/\ pcR = "SL"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 3: <SL line 65, col 5 to line 70, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "H1"
+/\ pcR = "SE"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 4: <SE line 109, col 5 to line 115, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 2],
+  W |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "H1"
+/\ pcR = "SR"
+/\ pcW = "WS"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 5: <WWS line 376, col 5 to line 380, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 2],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "H1"
+/\ pcR = "SR"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 6: <HH1 line 255, col 5 to line 261, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 2],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "H2"
+/\ pcR = "SR"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 7: <HH2 line 265, col 5 to line 270, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 2],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HF"
+/\ pcR = "SR"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 8: <HHF line 275, col 5 to line 279, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 2],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HA"
+/\ pcR = "SR"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 9: <HHA line 283, col 5 to line 288, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 2],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SR"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 10: <SR line 120, col 5 to line 129, col 38 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 2, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SD1"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 11: <SD1 line 134, col 5 to line 140, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 3, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SD2"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 12: <SD2 line 144, col 5 to line 151, col 38 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 3, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SD3"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 13: <SD3 line 155, col 5 to line 163, col 38 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 1, E |-> 2, N |-> 1, Lh |-> 1, Eh |-> 3, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SD4"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 14: <SD4 line 168, col 5 to line 178, col 38 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 2, N |-> 1, Lh |-> 2, Eh |-> 3, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SW1"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 15: <SW1 line 183, col 5 to line 187, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 3, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SW2"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 16: <SW2 line 191, col 5 to line 195, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SY"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 2]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 17: <SY line 200, col 5 to line 204, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SW3"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 18: <SW3 line 209, col 5 to line 213, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SDS"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 19: <SDS line 219, col 5 to line 229, col 38 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "SDr"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 20: <SDr line 234, col 5 to line 243, col 30 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "PL"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = FALSE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 21: <RPL line 209, col 5 to line 220, col 42 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "RD"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 0
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 22: <RRD line 288, col 5 to line 298, col 40 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "LE"
+/\ pcW = "WF"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 23: <WWF line 397, col 5 to line 402, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "LE"
+/\ pcW = "WL"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 24: <WWL line 406, col 5 to line 415, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "LE"
+/\ pcW = "WLh"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "none"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 25: <WWLh line 419, col 5 to line 428, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD1"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 26: <HHD1 line 292, col 5 to line 298, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD2"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 27: <HHD2 line 302, col 5 to line 308, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HD3"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 28: <HHD3 line 312, col 5 to line 317, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HE1"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 29: <HHE1 line 347, col 5 to line 352, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HL"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 30: <HHL line 367, col 5 to line 373, col 44 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "HX"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 31: <HHX line 378, col 5 to line 387, col 37 of module LeaveScanSlowPath>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LE"
+/\ pcW = "WH"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 32: <WWH line 461, col 5 to line 465, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LE"
+/\ pcW = "WA"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 2,
+  vw |-> [P |-> 1, L |-> 1, E |-> 1, N |-> 1, Lh |-> 1, Eh |-> 1, Rs |-> 1],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 33: <WWA line 529, col 5 to line 533, col 44 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LE"
+/\ pcW = "WD"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 0,
+  vw |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "none"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = FALSE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+State 34: <WWD line 537, col 5 to line 543, col 37 of module LeaveScan>
+/\ relvR = [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slist = "empty"
+/\ myEra = 1
+/\ hcached = FALSE
+/\ spass = 1
+/\ cur = [ R |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3],
+  W |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  H |-> [P |-> 1, L |-> 2, E |-> 3, N |-> 1, Lh |-> 3, Eh |-> 4, Rs |-> 3] ]
+/\ hbs = [W |-> 0, H |-> 0]
+/\ capR = FALSE
+/\ pcH = "Done"
+/\ pcR = "LE"
+/\ pcW = "Done"
+/\ pend = FALSE
+/\ rd = 1
+/\ rfree = FALSE
+/\ msgs = [ P |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 2,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  L |->
+      << [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "empty",
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  E |->
+      << [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> [tag |-> FALSE, e |-> 1],
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  N |->
+      << [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ] >>,
+  Lh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 3,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Eh |->
+      << [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> 0,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 2,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> 1,
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 2,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 3,
+                 Rs |-> 3 ],
+           hb |-> 0 ],
+         [ v |-> 2,
+           vw |->
+               [ P |-> 1,
+                 L |-> 2,
+                 E |-> 3,
+                 N |-> 1,
+                 Lh |-> 2,
+                 Eh |-> 4,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >>,
+  Rs |->
+      << [ v |-> "idle",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 1 ],
+           hb |-> 0 ],
+         [ v |-> "pending",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 2 ],
+           hb |-> 0 ],
+         [ v |-> "answered",
+           vw |->
+               [ P |-> 1,
+                 L |-> 1,
+                 E |-> 1,
+                 N |-> 1,
+                 Lh |-> 1,
+                 Eh |-> 1,
+                 Rs |-> 3 ],
+           hb |-> 0 ] >> ]
+/\ sc = [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3]
+/\ slo = "empty"
+/\ cnt = [ v |-> 0,
+  vw |-> [P |-> 2, L |-> 2, E |-> 3, N |-> 1, Lh |-> 2, Eh |-> 4, Rs |-> 3],
+  hb |-> 0 ]
+/\ scan = "skip_seqno"
+/\ buf = [R |-> <<>>, W |-> <<>>, H |-> <<>>]
+/\ stale = TRUE
+/\ uaf = "race"
+/\ got = 1
+/\ cached = FALSE
+/\ relhbR = 0
+/\ held = FALSE
+/\ cachedOk = TRUE
+/\ freed = TRUE
+/\ mem = [ P |-> 1,
+  L |-> "empty",
+  E |-> [tag |-> FALSE, e |-> 1],
+  N |-> 1,
+  Lh |-> 0,
+  Eh |-> 0,
+  Rs |-> "idle" ]
+/\ hlo = "empty"
+/\ sec = 1
+/\ hlist = "empty"
+
+513206 states generated, 185895 distinct states found, 23636 states left on queue.
