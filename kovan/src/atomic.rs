@@ -96,6 +96,11 @@ impl<T> Atomic<T> {
     ///
     /// Fast path cost: 1 atomic pointer load, 1 epoch load, 1 compare
     ///
+    /// The pointer is loaded with `SeqCst` whatever `order` is: the guard's
+    /// protection rests on this load pairing with a retirer's scan fence in
+    /// the SeqCst order. On x86-64 a `SeqCst` load is the same instruction as
+    /// an `Acquire` one.
+    ///
     /// # Examples
     ///
     /// ```
@@ -108,7 +113,9 @@ impl<T> Atomic<T> {
     /// ```
     #[inline]
     pub fn load<'g>(&self, order: Ordering, _guard: &'g Guard) -> Shared<'g, T> {
-        let raw = crate::guard::protect_load(&self.data, order);
+        // The protected load is SeqCst whatever `order` is (see the doc above).
+        let _ = order;
+        let raw = crate::guard::protect_load(&self.data);
         Shared {
             data: raw as *mut T,
             marker,

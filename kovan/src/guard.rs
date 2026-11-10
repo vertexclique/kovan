@@ -341,11 +341,20 @@ impl Handle {
     /// independent of all other threads. Fast path cost: one pointer load,
     /// one epoch load, one compare against the thread-local cache.
     #[inline(always)]
-    fn protect_load(&self, data: &AtomicUsize, order: Ordering) -> usize {
+    fn protect_load(&self, data: &AtomicUsize) -> usize {
         // Hot path: straight-line, no loop in the inlined body.
         // Step 1: load the pointer.
         // XXX: This must be done first since ordering depends on it.
-        let ptr = data.load(order);
+        // SeqCst, whatever order the caller named. On the pin's fast path no
+        // fence follows the activation on x86-64 (`publish_fence`), and in
+        // Rust's memory model an Acquire load after the activation's SeqCst
+        // exchange does not pair with the scan's `fence(SeqCst)`: the scan
+        // could miss this slot while this load still returned the pointer
+        // the retirer swapped out. An SC load does pair (C++20
+        // [atomics.order] p4: a modification sequenced before an SC fence X
+        // is observed by an SC load that follows X in S), and on x86-64 it is
+        // the same instruction as an Acquire load.
+        let ptr = data.load(Ordering::SeqCst);
 
         // Step 2: read the global epoch.
         let curr_epoch = slot::epoch();
@@ -363,13 +372,13 @@ impl Handle {
             return ptr;
         }
 
-        self.protect_load_cold(data, order, curr_epoch)
+        self.protect_load_cold(data, curr_epoch)
     }
 
     /// Convergence + escalation path of `protect_load`, kept out of line so
     /// the hot path stays as small as the original single-load fast path.
     #[cold]
-    fn protect_load_cold(&self, data: &AtomicUsize, order: Ordering, first_epoch: u64) -> usize {
+    fn protect_load_cold(&self, data: &AtomicUsize, first_epoch: u64) -> usize {
         let global = self.global();
         let tid = self.tid();
         let slots = global.thread_slots(tid);
@@ -383,7 +392,7 @@ impl Handle {
                 // Escalate, then re-read once. Wait-free completion, with no
                 // dependence on the epoch stabilizing.
                 self.escalate();
-                return data.load(order);
+                return data.load(Ordering::SeqCst);
             }
 
             // The epoch advanced: publish the new epoch and retry the load.
@@ -394,7 +403,7 @@ impl Handle {
             fence(Ordering::SeqCst);
             self.cached_epoch.set(curr_epoch);
 
-            let ptr = data.load(order);
+            let ptr = data.load(Ordering::SeqCst);
             #[cfg(test)]
             crate::stall::at(crate::stall::Step::LoadAttempt, tid);
             let e = slot::epoch();
@@ -643,9 +652,10 @@ impl Handle {
     /// active reads an era that holds every batch this section needs. When it
     /// moved, the slot publishes the epoch it reads (`transition`).
     ///
-    /// A SeqCst exchange on x86-64 is the full barrier the scan's fence
-    /// pairs with: a scan that did not see the slot active completed before
-    /// it, so the loads of this section see that batch's unlinks.
+    /// On x86-64 no fence follows the activation: the loads of this section
+    /// that need ordering are the protected loads, which are SeqCst
+    /// (`protect_load`), so a scan that did not see the slot active precedes
+    /// them in the SeqCst order and they see that batch's unlinks.
     /// Elsewhere `publish_fence` follows.
     #[inline(always)]
     fn enter(&self) {
@@ -1417,7 +1427,8 @@ impl Handle {
 
         // === Scan phase: assign slots to batch nodes ===
         // SeqCst fence ensures we see the most recent epoch stores from all threads.
-        // Pairs with the SeqCst store in protect_load() / do_update().
+        // Pairs with the SeqCst fence after a publication (do_update,
+        // protect_load_cold, escalate) and with the SeqCst load of protect_load().
         fence(Ordering::SeqCst);
         let mut last = curr;
         // One pass over the T x SLOTS_PER_THREAD slots, each visited once.
@@ -1952,12 +1963,13 @@ fn is_list(word: u64) -> bool {
 }
 
 /// The barrier after a publication of this thread's slot (an activation)
-/// and before the loads it must precede. On x86-64 the SeqCst
-/// read-modify-write that published is a locked instruction, the full
-/// barrier that `try_retire`'s scan fence pairs with, and its acquire half
-/// keeps the later loads after it. Elsewhere an Acquire load may be RCpc
-/// (AArch64 LDAPR), which an earlier write does not order, so a SeqCst
-/// fence follows.
+/// and before the loads it must precede. On x86-64 none is emitted: the
+/// loads it must precede are the guard's protected loads, which are SeqCst
+/// (`protect_load`), and an SC load that follows `try_retire`'s scan fence in
+/// the SeqCst order observes the retirer's unlink. The locked exchange that
+/// activates the slot is a full barrier on x86-64 hardware, but that alone
+/// does not order a later Acquire load in Rust's memory model. Elsewhere a
+/// SeqCst fence follows, as before.
 #[inline(always)]
 fn publish_fence() {
     #[cfg(not(target_arch = "x86_64"))]
@@ -1979,8 +1991,8 @@ pub(crate) fn current_birth_epoch() -> u64 {
 ///
 /// Called internally by `Atomic::load()`. Must NOT be called without a live Guard.
 #[inline(always)]
-pub(crate) fn protect_load(data: &AtomicUsize, order: Ordering) -> usize {
-    with_handle(|handle| handle.protect_load(data, order))
+pub(crate) fn protect_load(data: &AtomicUsize) -> usize {
+    with_handle(|handle| handle.protect_load(data))
 }
 
 /// Enter a critical section.

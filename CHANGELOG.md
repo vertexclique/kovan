@@ -16,6 +16,21 @@ Every crate goes to 0.2.5.
   nothing ordered the section's reads before that free. On x86 this held, as x86 keeps a load
   ahead of a later store; on ARM and POWER a reader could still be reading a value when its batch
   was freed, and under Rust's memory model it was a data race on every target.
+- kovan: a guard's protected load (`Atomic::load`, and through it every structure's) is `SeqCst`.
+  On x86-64 no fence follows the activation of an outermost `pin()` whose epoch did not move, and
+  in Rust's memory model an Acquire load after the activation's SeqCst exchange does not pair with
+  a retire's scan fence: the scan could miss the slot while the load still returned the value
+  being retired. An SC load that follows the scan's fence in the SeqCst order observes the
+  retirer's unlink. On x86-64 the hardware already behaved this way, and a `SeqCst` load is the
+  same instruction as an `Acquire` one: measured against 0.2.4, every case of the `throughput` and
+  `comparison` benches ties. A `fence(SeqCst)` after every pin, the other sound fix, cost 30% to
+  43% on the pin and single-thread load paths and 2% to 10% on read-heavy, swap and stack
+  workloads.
+
+### Changed behaviour
+
+- kovan: `Atomic::load` loads with `SeqCst` whatever `order` it is given, so an `order` that
+  `AtomicUsize::load` rejects (`Release`, `AcqRel`) no longer panics there.
 
 ## 0.2.4
 

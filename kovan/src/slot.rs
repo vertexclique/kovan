@@ -471,9 +471,9 @@ impl ThreadSlots {
     /// (`try_retire`, `InsertCheck`). The exchange, never a store: the slot
     /// left INVPTR may hold a node a retire exchanged in and has not rolled
     /// back yet; the exchange takes it, the rollback then fails and counts
-    /// the node, and the caller's traversal balances that count. SeqCst, the
-    /// full barrier the scan's fence pairs with on x86-64; elsewhere the
-    /// caller follows it with `publish_fence`.
+    /// the node, and the caller's traversal balances that count. SeqCst; on
+    /// x86-64 the guard's SeqCst protected loads pair with the scan's fence,
+    /// elsewhere the caller follows it with `publish_fence`.
     #[inline(always)]
     pub(crate) fn activate(&self, index: usize) -> u64 {
         let era = self.epoch[index].load_lo();
