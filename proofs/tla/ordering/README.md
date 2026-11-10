@@ -71,9 +71,8 @@ the helped slow path):
   follows drains the buffer); `LS_helped_fence_last` holds. Found by reading and by this model; no
   test reaches it (the slow path takes sixteen failed transitions).
 
-The Lean laws these rest on are the general ones of `lean/Kovan/Ordering/`: `release_tag_orders`
-for a Release store read by an Acquire load, `fences_forbid_sb` for two fences, and
-`ThreadCount.lean` for the count.
+Lean has each of the three too, with a concrete execution for the old order:
+`lean/Kovan/Ordering/ThreadCount.lean`, `EscalatedUntag.lean` and `HelpedFence.lean`.
 
 ## What is transcribed from the code
 

@@ -40,15 +40,17 @@ Every crate goes to 0.2.5.
   Relaxed. After a section whose load escalated the era kept is 0, and a scan that read the slot's
   list word from that section and this 0 skipped the slot with nothing ordering the section's reads
   before the free: a data race under Rust's memory model (not on x86-64 or ARM hardware). Found by
-  reading; checked by the ordering model (`LS_mut_relaxed_untag`, `LS_esc_release_untag`), as no
-  test reaches an escalated load.
+  reading; checked by the ordering model (`LS_mut_relaxed_untag`, `LS_esc_release_untag`) and in
+  Lean (`EscalatedUntag.lean`, `untagRlx_race`, `untagRel_orders`), as no test reaches an escalated
+  load.
 - kovan: a pin answered by a helper on the slow path fences after it stores its list's sequence
   number, not before. A scan skips a slot whose list sequence number is odd; with the store after
   the fence, the scan could skip the slot while the pin's first load returned the value being
   retired. x86-64 was kept from it by the locked decrement that follows; the ordering model breaks
   it under C11 and under ARM's load buffering (`LS_mut_helped_fence_first`,
-  `LS_mut_armlb_helped_fence_first`, `LS_helped_fence_last`). Found by reading; no test reaches
-  the helped slow path's race.
+  `LS_mut_armlb_helped_fence_first`, `LS_helped_fence_last`), and Lean has the execution
+  (`HelpedFence.lean`, `fenceFirst_misses`, `helped_fence_last`). Found by reading; no test
+  reaches the helped slow path's race.
 
 ### Changed behaviour
 

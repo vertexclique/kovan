@@ -239,7 +239,13 @@ after the fence is ordered against the claim (a `SeqCst` claim, or a `SeqCst` fe
 reader's side), for every execution, and checks four concrete executions that obey every rule and
 in which both miss: the count before the fence with a `Release` claim, with a `SeqCst` claim, and
 with a fence on the reader's side as well, and the count after the fence with a `Release` claim
-and no fence on the reader's side.
+and no fence on the reader's side. `Kovan/Ordering/EscalatedUntag.lean` checks a concrete
+execution of a pin after an escalated section whose untag store is relaxed: it obeys every rule,
+and the escalated section's read races with the free although the leave's tag is a release; with
+a release untag store the same execution is ordered. `Kovan/Ordering/HelpedFence.lean` proves
+that a helped pin whose fence follows its store of the list's sequence number never has both
+miss, and checks a concrete execution with the fence first that obeys every rule and in which
+both miss, the pin's load being `SeqCst`.
 
 What these cover: the C11 theorems hold for every execution of the shape they name, of any size;
 the concrete executions are single ones, each checked against every rule of `Consistent`; the
@@ -560,6 +566,28 @@ pointer.
 | `count_before_fence_reader_fence_consistent`, `count_before_fence_reader_fence_shape`, `count_before_fence_reader_fence_misses` | the same with a `SeqCst` fence on the reader's side as well |
 | `count_release_claim_consistent`, `count_release_claim_shape`, `count_release_claim_misses` | the count read after the fence, a `Release` claim and no fence on the reader's side: a consistent execution in which both miss |
 | `count_sc_claim_inconsistent`, `count_reader_fence_inconsistent` | the same events with (S), or with (F) and a `Release` claim, have no consistent execution in which both miss |
+
+`Kovan/Ordering/EscalatedUntag.lean`, the activation's untag store after an escalated section
+(`kovan/src/slot.rs` `ThreadSlots::activate` and `leave`, `kovan/src/guard.rs` `escalate` and
+`try_retire`'s scan): the escalation's store and fence, the read of the value, the leave's
+`Release` tag and exchange, the next activation's store of the era 0 without the tag; the scan's
+loads of the list word (as the escalated section left it) and of that era, and the free.
+
+| theorem | what it says |
+|---------|--------------|
+| `untagRlx_tables`, `untagRlx_consistent`, `untagRlx_shape`, `untagRlx_race` | with a `Relaxed` untag store (before 0.2.5): a consistent execution in which the read and the free race, although the leave's tag is `Release`: a relaxed store carries no release |
+| `untagRel_tables`, `untagRel_consistent`, `untagRel_orders` | the same execution with a `Release` untag store (0.2.5) is consistent and its read happens before the free (`release_tag_orders`) |
+
+`Kovan/Ordering/HelpedFence.lean`, the fence of a pin answered by a helper (`kovan/src/guard.rs`
+`slow_path`, the stores after the request is answered, and `try_retire`'s scan of the list's
+sequence number): the pin's fence, its `Release` store of the list's sequence number and its
+`SeqCst` load of the pointer; the writer's swap, fence and scan; "both miss" is the scan reading
+the odd sequence number and the load reading the old pointer.
+
+| theorem | what it says |
+|---------|--------------|
+| `helped_fence_last`, `consistent_helped_fence_last` | the store sequenced before the pin's fence (0.2.5): no execution meeting p4.4 with a strict `S` has both miss (`fences_forbid_sb` with the store in the activation's place) |
+| `fenceFirst_consistent`, `fenceFirst_shape`, `fenceFirst_misses` | the fence before the store (before 0.2.5): a consistent execution in which both miss, the pin's load being `SeqCst` |
 
 ## How to check it
 
