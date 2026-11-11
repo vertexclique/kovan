@@ -4,6 +4,17 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
+## Unreleased
+
+### Changed
+
+- kovan-mvcc: a `Txn` builds its write buffer at its first `write` or `delete`, not at `begin`. A
+  transaction that buffers no write (a reader, or one whose writes are applied outside the crate)
+  allocates no map and frees none when it ends: a `begin` and a `commit` of such a transaction run
+  1,685 instructions where they ran 5,275, and the transaction holds 1,776 bytes fewer while it
+  is open. What a transaction reads, writes and commits is unchanged. Test:
+  `kovan-mvcc/tests/begin_memory.rs`.
+
 ## 0.2.5
 
 Every crate goes to 0.2.5.

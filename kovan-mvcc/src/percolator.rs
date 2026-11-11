@@ -442,7 +442,7 @@ impl KovanMVCC {
             inflight_writes: self.inflight_writes.clone(),
             external_apply: self.external_apply,
             issued: self.issued.clone(),
-            writes: HopscotchMap::new(),
+            writes: None,
             primary_key: None,
             committed: false,
             isolation_level,
@@ -451,6 +451,9 @@ impl KovanMVCC {
         }
     }
 }
+
+/// A transaction's buffered writes: key -> (lock type, value).
+type WriteBuffer = HopscotchMap<Vec<u8>, (LockType, Option<Value>)>;
 
 pub struct Txn {
     txn_id: u128,
@@ -465,8 +468,9 @@ pub struct Txn {
     external_apply: bool,
     /// The instance's greatest timestamp taken (`KovanMVCC::issued`).
     issued: Arc<AtomicU64>,
-    /// Buffered writes: key -> (lock_type, value)
-    writes: HopscotchMap<Vec<u8>, (LockType, Option<Value>)>,
+    /// Buffered writes: key -> (lock_type, value). Built by the first write, so a
+    /// transaction that buffers none allocates no map and reclaims none when it ends.
+    writes: Option<WriteBuffer>,
     /// Primary key for 2PC
     primary_key: Option<Vec<u8>>,
     /// Whether this transaction has been committed (prevents Drop from rolling back)
@@ -510,11 +514,10 @@ impl Txn {
     pub fn read(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, MvccError> {
         let key = key.as_ref();
         // 0. Check local write buffer first (read-your-own-writes, even before
-        // prewrite). Skip the guarded map lookup entirely when there are no
-        // buffered writes (the common case for read-only transactions) - the
-        // is_empty() check is a single relaxed atomic load, no kovan pin.
-        if !self.writes.is_empty()
-            && let Some((lock_type, value_opt)) = self.writes.get(key)
+        // prewrite). A transaction that buffered no write has no map to look in
+        // (the common case for read-only transactions): no load, no kovan pin.
+        if let Some(writes) = self.buffered()
+            && let Some((lock_type, value_opt)) = writes.get(key)
         {
             // Track in read_set for Serializable even on local hits
             if let Some(ref read_set) = self.read_set {
@@ -548,8 +551,8 @@ impl Txn {
                 if lock.txn_id == self.txn_id {
                     // Read-your-own-writes (already prewritten)
                     return Ok(self
-                        .writes
-                        .get(key)
+                        .buffered()
+                        .and_then(|writes| writes.get(key))
                         .and_then(|(_, v)| v.map(|arc| (*arc).clone())));
                 }
 
@@ -630,6 +633,7 @@ impl Txn {
     pub fn write(&mut self, key: impl AsRef<[u8]>, value: Vec<u8>) -> Result<(), MvccError> {
         let key = key.as_ref();
         self.writes
+            .get_or_insert_with(HopscotchMap::new)
             .insert(key.to_vec(), (LockType::Put, Some(Arc::new(value))));
         if self.primary_key.is_none() {
             self.primary_key = Some(key.to_vec());
@@ -639,11 +643,18 @@ impl Txn {
 
     pub fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<(), MvccError> {
         let key = key.as_ref();
-        self.writes.insert(key.to_vec(), (LockType::Delete, None));
+        self.writes
+            .get_or_insert_with(HopscotchMap::new)
+            .insert(key.to_vec(), (LockType::Delete, None));
         if self.primary_key.is_none() {
             self.primary_key = Some(key.to_vec());
         }
         Ok(())
+    }
+
+    /// The buffered writes, `None` when the transaction buffered none.
+    fn buffered(&self) -> Option<&WriteBuffer> {
+        self.writes.as_ref().filter(|writes| !writes.is_empty())
     }
 
     pub fn commit(mut self) -> Result<u64, MvccError> {
@@ -656,7 +667,7 @@ impl Txn {
     }
 
     fn commit_registered(&mut self) -> Result<u64, MvccError> {
-        if self.writes.is_empty() {
+        if self.buffered().is_none() {
             return Ok(self.start_ts);
         }
 
@@ -728,7 +739,10 @@ impl Txn {
 
     fn prewrite(&mut self, primary_key: &[u8]) -> Result<(), MvccError> {
         // Sort keys to prevent deadlocks/livelocks
-        let mut keys: Vec<_> = self.writes.keys().collect();
+        let Some(writes) = self.buffered() else {
+            return Ok(());
+        };
+        let mut keys: Vec<_> = writes.keys().collect();
         keys.sort();
 
         // Collect lock infos and values for each key upfront
@@ -738,7 +752,7 @@ impl Txn {
         let key_infos: Vec<(Vec<u8>, LockInfo, Option<Value>)> = keys
             .iter()
             .map(|key| {
-                let (lock_type, value_opt) = self.writes.get(key).unwrap();
+                let (lock_type, value_opt) = writes.get(key).unwrap();
                 let lock_info = LockInfo {
                     txn_id: self.txn_id,
                     start_ts: self.start_ts,
@@ -831,7 +845,7 @@ impl Txn {
     }
 
     fn commit_secondaries(&self, primary_key: &[u8], commit_ts: u64) {
-        for (key, (lock_type, _)) in &self.writes {
+        for (key, (lock_type, _)) in self.buffered().into_iter().flatten() {
             if key == primary_key {
                 continue;
             }
@@ -862,7 +876,7 @@ impl Txn {
     fn rollback(&self) {
         // A rolled-back writer has no visible effects: stop excluding it.
         self.inflight_writes.unregister(self.txn_id);
-        for (key, _) in &self.writes {
+        for (key, _) in self.buffered().into_iter().flatten() {
             // Only clean up keys where we actually hold the lock.
             // A transaction that failed lock acquisition has no data to rollback
             // and must not write rollback records that could poison concurrent prewrites.
