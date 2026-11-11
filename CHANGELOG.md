@@ -4,7 +4,9 @@ Every change to what a public item does is listed here, under the release that m
 test that pins the new behaviour. "Changed behaviour" names the changes that keep their signature:
 `cargo semver-checks` cannot see those, so a user learns of them here or not at all.
 
-## Unreleased
+## 0.2.6
+
+Every crate goes to 0.2.6.
 
 ### Changed
 
